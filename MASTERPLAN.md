@@ -1,0 +1,886 @@
+# Purify Search — MASTERPLAN 总体作战计划
+
+| 项 | 值 |
+|---|---|
+| 版本 | v1 |
+| 日期 | 2026-08-09 |
+| 状态 | planning — 按任务卡逐张执行 |
+| 执行人 | liulin（本人写码；本文档是作战手册，不是外包说明书） |
+| 分支策略 | 能力层/北极星在 `codex/scrape-v1` 系；Search 线在 `codex/search-api-v1`（见 §13） |
+| 关联文档 | `SEARCH.md`（Search M0–M4 契约）、`SCRAPE-PLAN.md`、`AGENTS.md`（边界与提交纪律） |
+| 战略来源 | 三层战略报告（竞品调研 + 能力设计 + 北极星 + 极限层），2026-08 |
+
+**使用方法**：每张任务卡三段式——「完成什么 / 交付什么 / 验收标准」；下面附「实现参考」（签名、DDL、伪码、契约），照参考写，但具体实现自己定夺。每张卡对应一个（或一组）commit，做完勾验收。
+
+---
+
+## 0. 三层战略总览 · Three-Tier Strategy
+
+### 0.1 阶梯
+
+```text
+第一层 能力层    带收据的 JSON            JSON you can prove
+                （证据锚定/复验/编译提取/共识）        ↓ 器官
+第二层 北极星    信念检索                Belief Retrieval
+                （FactSpec → BeliefState，敢答"不知道"）  ↓ 编排
+第三层 极限层    事实清算所              The Fact Clearinghouse
+                （收据/担保/制图/审计/租约五工件）        经济工件
+```
+
+下层是上层的器官：证据与快照喂 /verify，/verify 喂校准与账本，账本喂审计与担保。**每一层的数据都让上一层的壁垒随运营时间复利。**
+
+### 0.2 五条竞争事实（2026-08 调研核实）
+
+1. Firecrawl v2.11 已上线 `deterministicJson`（按站点缓存可复用提取器）——但完全黑盒：不暴露提取器版本、验证分、漂移信号；其 change-tracking 官方文档自认"不提供加密验证或任何证据"。
+2. Parallel Basis 是可信度赛道最强对手：字段级 citations + excerpts + 校准置信度——但证据止于 URL+文字摘录，不锚定 DOM、不存快照、无法事后复验。
+3. **独立性计数（N_eff）全市场缺失**：十个镜像转载=十个"来源"。在位者有反向动机（展示 20 个来源显得可信）。
+4. **公开网页的时点事实 API 空白**：Zep/Graphiti 的时序知识图谱只做 agent 自身记忆；Wayback 只存页面不做事实。
+5. 数据行业标准条款是 **"No Warranty of Accuracy"**——没有任何 API 为数据错误承担财务责任。
+
+### 0.3 五个空白点（我们的进攻面）
+
+| # | 空白 | 对应任务 |
+|---|---|---|
+| 1 | 字段级证据锚定（quote+selector+偏移+快照哈希） | Phase 0 |
+| 2 | 事后可复验（/verify 三态） | Phase 1 |
+| 3 | 提取器透明健康度（版本/验证分/漂移/回归） | Phase 2–3 |
+| 4 | 共识提取与冲突暴露（N_eff） | Phase 3 |
+| 5 | BYO-URL 提取的校准置信度 | Phase 5+（数据攒够才启用） |
+
+### 0.4 明确不做
+
+自建搜索索引（Exa/Brave 资本战场）；自主浏览 agent（Firecrawl /agent 军备赛）；PII 脱敏等跟随特性（后补）；区块链存证（SHA-256+可回放快照足够，zkTLS 是后期互补轨道）；事实期货/质押/去中心化清算（监管沼泽）。
+
+> **EN —** Three tiers: evidence-grade extraction (organs) → belief retrieval (orchestration) → the fact clearinghouse (economic instruments). Verified market facts: Firecrawl's deterministicJson is a black box and its change tracking admits "no verification or evidence"; Parallel's Basis stops at URL+excerpt with no re-verification; independence accounting and point-in-time web-fact APIs simply do not exist; the industry default is "No Warranty of Accuracy". We attack five whitespaces and explicitly refuse to build indexes, browsing agents, or crypto notarization.
+
+---
+
+## 1. 现状盘点 · Current State（已核实）
+
+### 1.1 代码现状
+
+7,164 行 Go，单二进制。路由（`api/router.go`）：
+
+```text
+GET  /api/v1/health                    无鉴权
+POST /api/v1/scrape                    auth + ratelimit
+POST /api/v1/extract                   scrape→clean→单次 LLM(json_object)
+POST /api/v1/batch/scrape  GET /batch/:id
+POST /api/v1/crawl         GET /crawl/:id
+POST /api/v1/map
+```
+
+### 1.2 资产 → 未来能力映射
+
+| 现有资产 | 位置 | 喂给 |
+|---|---|---|
+| SimHash 全家（`Fingerprint/Distance/Similar/FingerprintDOM`） | `simhash/` | 去重、模板簇、漂移检测、独立性折叠 |
+| 多引擎竞速（http→rod→rod-stealth 梯次）+ 自适应页池 | `engine/` | /verify 低成本重访 |
+| 清洗管线 9 文件（readability/pruning/markdown/citations/selector/tokens） | `cleaner/` | 证据对齐的文本底座 |
+| goquery + cascadia（已是直接依赖） | go.mod | 编译式提取器执行，零新增浏览器依赖 |
+| klauspost/compress（间接依赖，含 zstd） | go.mod | 快照压缩，转直接依赖即可 |
+| araddon/dateparse（间接依赖） | go.mod | 日期 transform |
+| mcp-go v0.44 HTTP 代理型 MCP（`mcp.NewTool` 注册模式） | `cmd/purify-mcp/` | verify_fact / search_web 新工具 |
+| webhook 投递 | `webhook/` | fact.changed / extractor.promoted 事件 |
+| BYOK LLM 客户端（OpenAI 兼容） | `llm/openai.go` | 编译期真值提取 |
+
+### 1.3 短板（Phase 0 逐一补掉）
+
+- `llm/openai.go` 只有 prompt + `json_object`：schema 靠嘴约束，不校验、无 strict structured outputs、无修复重试。
+- `cache/` 纯内存、容量满随机驱逐、1h TTL——**没有任何持久层**。
+- extract 不存快照、无证据、无溯源字段。
+- 无 SQLite/磁盘存储，无签名密钥体系。
+
+> **EN —** 7,164 lines of Go with six endpoints. Reusable assets map directly onto the roadmap: simhash → dedup/drift/independence, the racing engine → cheap re-verification, goquery/cascadia → LLM-free extractor execution, mcp-go → new agent tools. Gaps: no schema validation, no persistence, no snapshots, no signing.
+
+---
+
+## 2. 目标架构与全局技术决策 · Target Architecture
+
+### 2.1 终态包图
+
+```text
+现有: api/ cleaner/ engine/ scraper/ llm/ models/ cache/ proxy/ simhash/ webhook/ config/ cmd/
+新增: snapshot/    内容寻址快照库 (CAS)
+      evidence/    值→锚点对齐器
+      receipts/    Ed25519 签名收据
+      ledger/      SQLite 统一持久层 (migrations)
+      verify/      三态复验服务
+      compiler/    提取器 IR 编译与执行、模板簇、漂移、自愈
+      consensus/   多源合并 + N_eff
+      search/      Search 服务 + providers/ + answer (Phase 4+)
+      watch/       常设 FactSpec 调度 (Phase 6)
+```
+
+### 2.2 数据流
+
+```text
+scrape ─▶ snapshot.Put(raw HTML) ─▶ clean ─▶ extract ──compiled──▶ compiler.Execute
+   │                                          └──llm──▶ llm.Extract → validate → repair
+   │                                                        │
+   └────────────────────────────────────────────▶ evidence.AlignAll ─▶ receipts.Sign
+                                                            │
+/verify ◀── claims/receipt ── 重访(engine) ── 判定三态 ──▶ ledger.verifications
+/watch  ──▶ scheduler ──▶ /verify ──▶ ledger.facts(双时态) ──▶ webhook fact.changed
+```
+
+### 2.3 存储决策（定案）
+
+- **快照 = 磁盘 CAS**：`$PURIFY_DATA_DIR/snapshots/<sha[0:2]>/<sha[2:4]>/<sha256>.html.zst` + 同名 `.json` sidecar（url/fetched_at/engine/status_code/content_type）。zstd 单例 Encoder/Decoder。临时文件+rename 原子写。成本账：20KB/页（zstd 后），100 万页 ≈ 20GB——量级无忧，留 retention 配置。
+- **结构化 = SQLite**（`modernc.org/sqlite`，纯 Go 无 CGO，不破坏现有单二进制发布与 GitHub Actions release 流程）。`ledger/db.go` 统一持有连接：WAL 模式、`busy_timeout=5000`、写操作过单 goroutine（channel 序列化）或全局写锁。migrations = 内嵌 `[]string` 按序执行，`schema_migrations(version)` 记录。
+- **为什么不是 Postgres**：单人、单机、单二进制阶段，嵌入式先赢；表设计保持可平移（无 SQLite 特有语法），并发瓶颈出现时迁移。
+
+### 2.4 新依赖（只加 3 个）
+
+| 依赖 | 用途 | 理由 |
+|---|---|---|
+| `github.com/santhosh-tekuri/jsonschema/v6` | 服务端 JSON Schema 校验 | 现有 invopop/jsonschema 只做生成不做校验 |
+| `modernc.org/sqlite` | 嵌入式持久层 | 纯 Go 无 CGO |
+| `github.com/klauspost/compress`（间接→直接） | zstd | 已在依赖树 |
+
+签名不引 jose 全家桶：标准库 `crypto/ed25519` + 自实现紧凑 JWS（见 P0-5）。eTLD+1 用 `golang.org/x/net/publicsuffix`（x/net 已是直接依赖）。
+
+### 2.5 config 扩展总表（照 `config.go` 的 `envOr` 模式）
+
+| Env | 默认 | 用途 | 引入阶段 |
+|---|---|---|---|
+| `PURIFY_DATA_DIR` | `./data` | CAS + SQLite 根目录 | P0 |
+| `PURIFY_SNAPSHOT_ENABLED` | `true` | 快照开关 | P0 |
+| `PURIFY_SIGNING_KEY` | 空（自动生成） | Ed25519 seed hex | P0 |
+| `PURIFY_COMPILER_ENABLED` | `true` | 编译引擎开关 | P2 |
+| `PURIFY_SEARCH_BRAVE_KEY` | 空 | 首个 search provider | P4 |
+| `PURIFY_WATCH_ENABLED` | `false` | watch 调度器 | P6 |
+
+> **EN —** Storage is decided: content-addressed snapshots on disk (zstd, ~20KB/page) plus a single embedded SQLite ledger (modernc.org/sqlite, WAL, serialized writes) so the binary stays self-contained. Only three new dependencies; signing uses stdlib Ed25519 with a hand-rolled compact JWS. All new env vars follow the existing `envOr` pattern.
+
+---
+
+## 3. Phase 0 — 地基：校验 + 快照 + 证据 + 收据（W1–W2）
+
+**目标一句话**：让 `/extract` 的每个字段能出示收据，同时把 schema 从"嘴上约束"变成硬校验。做完这一阶段，产品叙事"带收据的 JSON"即成立。
+
+### 任务卡 P0-1 · 严格 schema 校验 + 修复重试
+
+**完成什么**：LLM 输出必须过服务端 JSON Schema 校验；不过则带着违规清单重试一次；仍不过则如实标注 partial。
+
+**交付什么**：
+- 新文件 `llm/schema.go`：`ValidateAgainstSchema`
+- `llm/openai.go`：`json_schema (strict)` 支持 + provider 能力探测降级 + `ExtractWithRepair`
+- `api/handler/extract.go`：校验-修复流程接线
+- `llm/schema_test.go`：5 用例矩阵
+
+**验收标准**：
+- [ ] 类型不符 / 缺 required / 枚举越界 / 嵌套数组错误 / 多余字段 五类均能报出 `Violation{Path,Message}`
+- [ ] 修复重试最多 1 次；两次均败时响应 `partial:true` + `violations[]`，而非假装成功
+- [ ] 对不支持 `response_format: json_schema` 的 provider（400 报错含 "response_format"）自动降级 `json_object` 并缓存该 baseURL 的能力
+- [ ] `go test ./...` 全绿
+
+**实现参考**：
+
+```go
+// llm/schema.go
+type Violation struct{ Path, Message string }
+func ValidateAgainstSchema(schema, data json.RawMessage) ([]Violation, error)
+// santhosh-tekuri/jsonschema/v6: Compile → Validate → 展平 ValidationError.Causes
+
+// llm/openai.go 增量
+var rfSupport sync.Map // baseURL → bool（json_schema 能力缓存）
+func (c *Client) ExtractWithRepair(ctx context.Context, content string,
+    schema, prev json.RawMessage, viol []Violation, p ExtractParams) (*ExtractResult, error)
+// system prompt 附违规清单与上次输出，要求只修不改对的字段
+```
+
+extract.go 步骤 4 之后：
+
+```text
+viol := ValidateAgainstSchema(req.Schema, llmResult.Data)
+if len(viol) > 0:
+    llmResult = ExtractWithRepair(...)   // 第二次调用
+    viol = ValidateAgainstSchema(...)    // 复检
+resp.Partial = len(viol) > 0 ; resp.Violations = viol
+```
+
+### 任务卡 P0-2 · snapshot/ 内容寻址快照库
+
+**完成什么**：每次成功抓取的原始 HTML 落盘为内容寻址快照——证据体系与未来时间账本的物理地基。
+
+**交付什么**：
+- 新包 `snapshot/`：`store.go` + `store_test.go`
+- `config.go`：`StorageConfig{DataDir, SnapshotEnabled, SigningKey}`
+- `api/handler/scrape.go`、`extract.go` 接入（`DoScrape` 成功后 `Put`）；`api.NewRouter` 与 `cmd/purify/main.go` 增参
+
+**验收标准**：
+- [ ] 同内容重复 `Put` 返回同 ID，磁盘只有一份（幂等）
+- [ ] `Put`→`Get` 往返字节一致，Meta 完整
+- [ ] 写入是原子的（tmp+rename），损坏文件 `Get` 报错不 panic
+- [ ] `PURIFY_SNAPSHOT_ENABLED=false` 时零磁盘写入，主流程不受影响
+
+**实现参考**：
+
+```go
+type ID string // "sha256:<hex64>"
+type Meta struct {
+    URL string; FetchedAt time.Time; Engine string
+    StatusCode int; ContentType string
+}
+func NewStore(dir string) (*Store, error)
+func (s *Store) Put(html []byte, m Meta) (ID, error)
+func (s *Store) Get(id ID) ([]byte, Meta, error)
+func (s *Store) Has(id ID) bool
+// 路径: snapshots/ab/cd/<sha256>.html.zst + <sha256>.json
+// zstd: 包级共享 *zstd.Encoder/Decoder（klauspost/compress/zstd）
+```
+
+### 任务卡 P0-3 · evidence/ 值→锚点对齐器
+
+**完成什么**：LLM 提取出的每个叶子值，在清洗文本与原始 HTML 里定位出"收据"：原文引文、字符区间、CSS 选择器。定位失败如实标 `unlocated`——**unlocated 率 = 免费的幻觉检测器**，这是别家给不出的指标。
+
+**交付什么**：
+- 新包 `evidence/`：`align.go`（三级匹配）+ `selector.go`（goquery 反查）+ `align_test.go`
+- extract.go：`req.Evidence == true` 时挂载
+
+**验收标准**：
+- [ ] 表驱动 8 用例全过：精确命中 / 空白差异 / 千分位价格（"1,299" vs "1299"）/ 全角半角 / 改写句 fuzzy 命中 / 不存在值 → unlocated / 嵌套数组路径 `items.0.name` / selector 在文档内唯一
+- [ ] `AlignAll` 返回 basis 与 unlocated 率；响应可见
+- [ ] evidence:true 的 P95 额外延迟 < 30ms（用 `scripts/benchmark` 量测）
+
+**实现参考**：
+
+```go
+type Method string // "exact" | "normalized" | "fuzzy" | "unlocated"
+type Anchor struct {
+    Quote     string    `json:"quote"`
+    TextRange [2]int    `json:"text_range"`
+    Selector  string    `json:"selector,omitempty"`
+    Method    Method    `json:"method"`
+    SnapshotID string   `json:"snapshot_id"`
+    FetchedAt time.Time `json:"fetched_at"`
+}
+func AlignValue(value, cleaned, rawHTML string) Anchor
+func AlignAll(data json.RawMessage, cleaned, rawHTML, snapID string) (map[string]Anchor, float64)
+// 叶子路径键: "price" / "items.0.name"（点号+下标）
+```
+
+AlignValue 算法（编号执行）：
+
+```text
+1 exact      strings.Index(cleaned, value) 命中即取区间
+2 normalized 双方归一化: 折叠空白/lower/全角→半角/去千分位与货币符号;
+             归一化过程同步构建 offset 映射表, 命中后回原文区间
+3 fuzzy      value 分词; cleaned 词级滑窗(窗宽 len±2); Jaccard ≥ 0.8 取最优窗
+4 selector   goquery 遍历文本节点找含 Quote 的最深元素;
+             生成最短唯一 CSS 路径: 优先 #id; 否则 tag.class:nth-of-type 链;
+             以 doc.Find(sel).Length()==1 验唯一
+5 全部失败   Method = unlocated（进 unlocated 率统计）
+```
+
+### 任务卡 P0-4 · models 扩展与响应契约
+
+**完成什么**：extract 请求/响应模型承载证据与校验结果，公开契约固定下来。
+
+**交付什么**：`models/extract.go` 增量字段；文档级响应示例。
+
+**验收标准**：
+- [ ] 未开 evidence 时响应与现状**完全向后兼容**（新字段全 omitempty）
+- [ ] 响应示例进 README/文档
+
+**实现参考**（响应契约）：
+
+```jsonc
+// POST /api/v1/extract  请求增: "evidence": true
+{
+  "success": true,
+  "data": { "price": "$29.99", "title": "Pro Plan" },
+  "partial": false,
+  "snapshot_id": "sha256:9f2c…",
+  "unlocated_rate": 0.0,
+  "basis": {
+    "price": {
+      "quote": "Pro plan — $29.99/month, billed annually",
+      "text_range": [1204, 1246],
+      "selector": "div.pricing-card:nth-of-type(2) .amount",
+      "method": "exact",
+      "snapshot_id": "sha256:9f2c…",
+      "fetched_at": "2026-08-09T08:00:00Z"
+    }
+  },
+  "receipts": { "price": "eyJhbGciOiJFZERTQSJ9.…" },
+  "extractor": null,          // Phase 2 起填充
+  "metadata": { "…": "现有字段不动" }
+}
+```
+
+### 任务卡 P0-5 · receipts/ 可携带签名收据
+
+**完成什么**：证据升维成可流通对象——Ed25519 签名、自包含、离线可验；公共验证端点对所有人免费（获客漏斗 + "Verified by Purify" 徽章的地基）。
+
+**交付什么**：
+- 新包 `receipts/`：`receipts.go`（Sign/Verify）+ `keys.go`（密钥加载）+ 测试
+- `api/handler/receipts.go`：公开 `POST /api/v1/receipts/verify`、`GET /api/v1/receipts/pubkey`（router 放 health 同级，不鉴权）
+- extract 响应 `receipts` 字段（evidence:true 时）
+
+**验收标准**：
+- [ ] 签→验往返成功；篡改 payload 任一字节验签失败；错误公钥验签失败
+- [ ] 无 `PURIFY_SIGNING_KEY` 时首次启动自动生成 `data/signing.key`（0600）并告日志
+- [ ] 验证端点无需 API key 可调
+
+**实现参考**：
+
+```go
+type Payload struct {
+    V string `json:"v"` // "purify-receipt/1"
+    URL, Path string
+    Value  json.RawMessage
+    Anchor evidence.Anchor
+    ExtractorVersion string
+    IssuedAt time.Time
+    KID string // 公钥前 8 字节 hex
+}
+func Sign(p Payload, priv ed25519.PrivateKey) (string, error)
+// b64url(header{"alg":"EdDSA","kid":…}) + "." + b64url(payload) + "." + b64url(sig)
+func Verify(token string, pub ed25519.PublicKey) (*Payload, error)
+func LoadOrCreateKey(cfg config.StorageConfig) (ed25519.PrivateKey, string, error)
+```
+
+### 3.6 Phase 0 提交序列
+
+每个 commit 前：`go test ./...` + `git diff --check`；单一关注；**不带任何 AI 署名尾注**。
+
+```text
+feat(llm): enforce json schema validation with repair retry
+feat(snapshot): content-addressed page store
+feat(evidence): field-level anchor alignment
+feat(receipts): signed portable fact receipts
+docs(scrape): document evidence mode and receipts
+```
+
+> **EN —** Phase 0 delivers the foundation: hard server-side schema validation with one repair retry, a content-addressed snapshot store, a three-level value-to-anchor aligner whose `unlocated` rate doubles as a free hallucination metric, and Ed25519-signed portable receipts with a free public verification endpoint. After this phase the "JSON you can prove" story is shippable.
+
+---
+
+## 4. Phase 1 — /verify 复验端点 + MCP（W3）
+
+**目标一句话**：把"事实"变成可以随时重新执行的断言；每次裁决落库，校准数据从第一天开始积累。
+
+### 任务卡 P1-1 · verify/ 三态复验服务
+
+**完成什么**：给定 URL + 旧值（claims 或直接给收据），重访页面，裁决 confirmed / changed / gone，附新证据与整页相似度。
+
+**交付什么**：
+- 新包 `verify/`：`service.go` + `service_test.go`
+- `models/verify.go`：完整请求/响应模型
+
+**验收标准**：
+- [ ] 三态判定表全覆盖（fixtures 驱动）：值未变 / 值变 / 字段消失 / 整页 404 / selector 失效但 quote 仍在
+- [ ] `page_similarity` 来自 `simhash.FingerprintDOM` 距离
+- [ ] 传收据时自动解签还原 claim，无需手填
+
+**实现参考**：
+
+```go
+type Claim struct {
+    Path string; Value json.RawMessage
+    Quote, Selector string // 来自原 Anchor
+}
+type VerifyRequest struct {
+    URL string; Claims []Claim
+    Receipt string // 与 Claims 二选一
+}
+type ClaimResult struct {
+    Path string
+    Status string // "confirmed" | "changed" | "gone"
+    NewValue json.RawMessage `json:",omitempty"`
+    Evidence *evidence.Anchor
+    Receipt  string // 新签收据
+}
+type VerifyResponse struct {
+    Results []ClaimResult
+    PageSimilarity float64
+    SnapshotID string
+    VerifiedAt time.Time
+}
+```
+
+判定表：
+
+| 观测 | 裁决 |
+|---|---|
+| fetch 404/410 | 全部 claims → `gone`（page 级） |
+| selector 命中，规范化比较相等（数值解析后比、字符串归一化比） | `confirmed` |
+| selector 命中，值不等 | `changed`（新值 + 新锚 + 新收据） |
+| selector 失效，`AlignValue(旧 Quote)` 命中 | `confirmed` |
+| selector 与 quote 双失效 | `gone`（field 级；`page_similarity` 提示是否整页改版） |
+
+### 任务卡 P1-2 · ledger/ 持久层起步
+
+**完成什么**：SQLite 统一持久层 + 第一张表 `verifications`。
+
+**交付什么**：`ledger/db.go`（Open/WAL/单写序列化/migrations 机制）+ `migrations.go`（001）。
+
+**验收标准**：
+- [ ] 重复启动 migrations 幂等；并发写不 `SQLITE_BUSY`（压测 100 并发 verify 落库）
+- [ ] 每次 /verify 的每条 claim 裁决一行入库
+
+**实现参考**（migration 001）：
+
+```sql
+CREATE TABLE verifications(
+  id INTEGER PRIMARY KEY,
+  url TEXT NOT NULL, path TEXT,
+  old_value TEXT, new_value TEXT,
+  outcome TEXT CHECK(outcome IN('confirmed','changed','gone')),
+  page_similarity REAL,
+  verified_at TEXT NOT NULL,
+  receipt TEXT
+);
+CREATE INDEX idx_verifications_url ON verifications(url, verified_at);
+```
+
+### 任务卡 P1-3 · HTTP + MCP + webhook 接线
+
+**交付什么**：
+- router：`protected.POST("/verify", handler.Verify(vs))`
+- `cmd/purify-mcp/main.go`：`verify_fact` 工具（照 `scrape_url` 的 `mcp.NewTool` 模式；参数 `url` + `claims` JSON 字符串）
+- webhook 事件 `fact.changed`（复用现有投递约定）
+
+**验收标准**：
+- [ ] MCP 客户端可调 verify_fact 并拿到三态结果
+- [ ] changed 时 webhook 收到新旧值成对
+
+**提交序列**：
+
+```text
+feat(ledger): sqlite store with migrations
+feat(verify): three-state fact re-verification
+feat(mcp): verify_fact tool
+docs(scrape): verify endpoint guide
+```
+
+> **EN —** /verify turns facts into re-executable assertions: three-state verdicts (confirmed/changed/gone) driven by a decision table over selector hits, quote alignment, and DOM simhash similarity. Every verdict lands in the new SQLite ledger — calibration data accrues from day one. MCP gains `verify_fact`.
+
+---
+
+## 5. Phase 2 — compiler/ 编译式提取器（W4–W6）
+
+**目标一句话**：LLM 合成一次、确定性执行 N 次；与 Firecrawl deterministicJson 同路，但**透明**——版本、验证分、漂移全部亮牌。热路径纯 Go，毫秒级，边际成本≈0。
+
+### 任务卡 P2-1 · IR 定义与确定性执行
+
+**交付什么**：`compiler/ir.go` + `execute.go` + `transforms.go` + 测试。
+
+**验收标准**：
+- [ ] `Execute` 单次 goquery 解析全字段；selector 命中即产出 Anchor（Method="compiled"）
+- [ ] transforms 注册表内置：trim / collapse_ws / lower / parse_number / parse_date（用已有 dateparse）/ currency_amount
+- [ ] 恶意/畸形 selector 不 panic（cascadia 解析失败即字段报错）
+
+**实现参考**：
+
+```go
+type FieldRule struct {
+    Name, Selector string
+    Attr  string   // 空 = 取 text
+    Regex string   // 可选，捕获组 1
+    Transforms []string
+    Type string    // string|number|boolean|date
+    Required bool
+}
+type IR struct{ Version int; Fields []FieldRule }
+func Execute(ir IR, html string) (json.RawMessage, map[string]evidence.Anchor, error)
+```
+
+### 任务卡 P2-2 · LLM 引导编译 + 验证报告
+
+**完成什么**：用快照样本编译出 IR，并给出可公示的验证分——**validation ≥ 0.9 才允许启用**。
+
+**交付什么**：`compiler/compile.go` + 测试（fixtures：同站 3 页）。
+
+**实现参考**（编号伪码）：
+
+```text
+Compile(samples ≥3, schema, llmClient):
+1 每样本 LLM 直提 → 真值集
+2 每字段×样本 evidence.AlignValue 定位 → 候选 selector 集
+3 跨样本泛化: 一致处剥 nth-of-type、偏好稳定 class/#id; cascadia 验合法
+4 每字段选跨样本命中率最高的 selector
+5 按 schema type 推断 transforms
+6 Report: Execute(IR) vs 真值 逐字段一致率（规范化比较）
+返回 (IR, Report{PerField, Overall, Samples})
+```
+
+### 任务卡 P2-3 · 提取器仓库：缓存键、模板簇、漂移信号
+
+**交付什么**：`compiler/store.go` + migration 002。
+
+**验收标准**：
+- [ ] 缓存键 `(host=eTLD+1, schema_hash=sha256(规范化 schema), 模板簇)` 命中正确；同站不同模板（列表页/详情页）各自成器
+- [ ] 漂移双信号可触发 state=stale：模板 simhash 距离 > 6；required 字段近 20 次空值率 > 30%
+
+**实现参考**（migration 002）：
+
+```sql
+CREATE TABLE extractors(
+  id INTEGER PRIMARY KEY,
+  host TEXT, schema_hash TEXT, template_simhash INTEGER,
+  ir TEXT, version INTEGER, validation REAL,
+  state TEXT CHECK(state IN('active','stale','retired')),
+  empty_window TEXT DEFAULT '[]',   -- 长 20 环形 JSON
+  created_at TEXT, last_used_at TEXT
+);
+CREATE UNIQUE INDEX idx_extractors_key ON extractors(host, schema_hash, version);
+```
+
+模板匹配：当前页 `FingerprintDOM` 与库内 `template_simhash` 取最近且距离 ≤ 6。
+
+### 任务卡 P2-4 · extract 接线：auto 引擎与降级链
+
+**完成什么**：`engine: "auto"|"compiled"|"llm"`（默认 auto）；compiled 优先、llm 兜底、编译异步进行；响应亮牌 extractor 元数据。
+
+**验收标准**：
+- [ ] compiled 命中路径 P95 < 50ms、**零 LLM 调用**（日志佐证）
+- [ ] 响应含 `"extractor":{"id","version","compiled_at","validation","mode"}`
+- [ ] 现有 extract 全部测试不回归；`engine:"llm"` 行为与今天完全一致
+
+**实现参考**（接线伪码）：
+
+```text
+if engine != "llm" and 有 active extractor(键命中):
+    data, basis, err := compiler.Execute(ex.IR, rawHTML)
+    if err == nil and required 字段齐:
+        respond(mode="compiled", extractor 元数据); store.Touch; return
+    store.RecordEmpty(ex)          // 喂漂移窗口
+# LLM 路径照旧（P0 的校验+修复+证据）
+成功后: go store.MaybeCompile(host, schemaHash)
+        # 门槛: 该键快照 ≥3 且无进行中编译 (singleflight)
+```
+
+**提交序列**：
+
+```text
+feat(compiler): extractor IR and deterministic execution
+feat(compiler): llm-guided compilation with validation report
+feat(compiler): sqlite store, template clustering and drift signals
+feat(extract): compiled engine with auto fallback
+docs(scrape): compiled extraction guide
+```
+
+> **EN —** The compiler synthesizes a deterministic extractor IR from ≥3 snapshots with an LLM-graded validation report (enabled only at ≥0.9), executes it via goquery in pure Go (<50ms P95, zero LLM on the hot path), keys the cache by (eTLD+1, schema hash, DOM-simhash template cluster), and exposes extractor id/version/validation/mode in every response — the transparency Firecrawl's deterministicJson lacks.
+
+---
+
+## 6. Phase 3 — 自愈闭环 + consensus/（W7–W8）
+
+**目标一句话**：漂移→影子重编译→快照回归→晋级或告警，闭环全程留痕；多源提取给出 N_eff 与带证据的冲突集。
+
+### 任务卡 P3-1 · 自愈：回归晋级制
+
+**交付什么**：`compiler/selfheal.go`：`Heal(ctx, key)`；stale 自动触发 + `POST /api/v1/extractors/:id/heal` 手动触发；webhook `extractor.promoted|degraded`。
+
+**验收标准**：
+- [ ] 晋级门槛：新 IR 对 `verifications` 中该 host 的 confirmed 记录重放复现率 ≥ 90%
+- [ ] 回归不过：保持降级 LLM 路径 + 告警，绝不静默换版本
+- [ ] 全程事件可查（版本号单调递增，旧版本 state=retired 保留）
+
+**实现参考**（伪码）：
+
+```text
+Heal(key):
+1 取该键最近 ≤5 快照
+2 Compile → 新 IR + Report
+3 回归: 对 confirmed 历史事实重放 Execute, 复现率 r
+4 r ≥ 0.9 → version+1, state=active, webhook promoted
+  else   → 保持 stale/降级, webhook degraded
+```
+
+### 任务卡 P3-2 · consensus/ 多源合并与 N_eff v0
+
+**完成什么**：N 源同 schema 各自提取，字段级合并；**十个镜像 = 1 路独立证据**；冲突不裁决、带证据全暴露。
+
+**交付什么**：`consensus/merge.go` + `merge_test.go`。
+
+**验收标准**：
+- [ ] 表驱动用例：全一致 / 通稿镜像折叠（simhash 相似 → 独立根数=1）/ 真分歧（conflicts 按根数降序）/ 部分源失败
+- [ ] `agreement:{pages, independent_roots}` 出现在响应
+
+**实现参考**：
+
+```go
+type SourceResult struct {
+    URL, Root string          // Root = publicsuffix eTLD+1
+    Data json.RawMessage
+    Basis map[string]evidence.Anchor
+    SimText uint64            // simhash.Fingerprint(清洗文本)
+}
+type Agreement struct{ Pages, IndependentRoots int }
+type Conflict struct{ Value json.RawMessage; Sources []string; Evidence []evidence.Anchor }
+type FieldConsensus struct{ Value json.RawMessage; Agreement Agreement; Conflicts []Conflict }
+func Merge(rs []SourceResult) map[string]FieldConsensus
+```
+
+Merge 伪码：
+
+```text
+1 字段值按 Type 规范化后分组
+2 通稿折叠: 两两 simhash.Similar(SimText, 3) → 并查集 → 簇
+3 IndependentRoots = 不同 (Root ∪ 簇) 数
+4 多数簇为 Value; 其余入 Conflicts(按根数降序, 各带 evidence)
+```
+
+### 任务卡 P3-3 · sources[] 接线
+
+**交付什么**：`ExtractRequest.Sources []string`（≤8）；errgroup `SetLimit(4)` 并发；响应加 `consensus` 块与 per-source 失败清单。
+
+**验收标准**：
+- [ ] 单源失败不拖垮整体，失败源与原因在响应中可见
+
+**提交序列**：
+
+```text
+feat(compiler): verified self-healing loop
+feat(consensus): multi-source merge with independence accounting
+feat(extract): multi-source consensus extraction
+docs(scrape): consensus extraction
+```
+
+> **EN —** Self-healing recompiles in shadow and promotes only after replaying ≥90% of previously confirmed facts from stored snapshots — never a silent swap. Consensus extraction merges N sources per field, collapses syndicated mirrors via simhash union-find so ten copies count as one independent root, and exposes every conflict with its evidence.
+
+---
+
+## 7. Phase 4 — Verified Search（W9–W10，分支 `codex/search-api-v1`）
+
+**目标一句话**：按 `SEARCH.md` M0–M4 落地 provider 中立的 Search，再叠三个别人没有的参数：`verify` / simhash 去重 / `schema`。
+
+### 任务卡 P4-1 · M0–M1：契约、服务、首个 provider
+
+**完成什么**：`SEARCH.md` 的请求/响应契约照建；provider 接口 + Brave 适配器。
+
+**交付什么**：`search/service.go`、`search/providers/brave.go`、`models/search.go`、`api/handler/search.go`、router 注册。
+
+**验收标准**（含 SEARCH.md 自带 DoD）：
+- [ ] 公开契约零 provider 痕迹；超时/取消/错误映射齐（429→`ErrCodeRateLimited`）
+- [ ] 默认测试套件不需要真实 key（provider 打桩）
+
+**实现参考**：
+
+```go
+type Query struct{ Text string; Limit int; Domains []string; Freshness string }
+type Result struct{ Title, URL, Snippet string; Score float64; PublishedAt *time.Time }
+type Provider interface {
+    Name() string
+    Search(ctx context.Context, q Query) ([]Result, error)
+}
+// Brave: GET api.search.brave.com/res/v1/web/search
+// header X-Subscription-Token = cfg.Search.BraveKey；字段映射表写在 brave.go 顶部注释
+```
+
+### 任务卡 P4-2 · 差异化三参数
+
+**完成什么**：
+1. `verify: true`——top_k ≤ 5 并发实抓（复用 scraper），`AlignValue(snippet 主张 → 页面文本)`，404/失效结果剔除，命中附收据；
+2. simhash 去重——`Distance(title+snippet 指纹) ≤ 3` 视为同文只留一条；
+3. `schema: {...}`——逐结果走 extract（engine auto），搜索直接实体化。
+
+**验收标准**：
+- [ ] verify:true 时响应每条含 `verified: true|false` 与 `receipt`；被剔除数量可见（`dropped_stale: n`）
+- [ ] 站群通稿在结果中只出现一次
+- [ ] schema 模式复用 compiler 缓存（同站二次搜索显著变快）
+
+### 任务卡 P4-3 · MCP `search_web`
+
+照 SEARCH.md M3：同一 Search 服务，不另写逻辑。
+
+**提交序列**：沿用 `SEARCH.md` 的 8-commit map，差异化三参数并入 `feat(search): verified results and dedup`、`feat(search): schema-shaped results` 两个增量 commit。
+
+> **EN —** Phase 4 executes SEARCH.md's M0–M4 (provider-neutral contract, Brave first, MCP `search_web`) and adds the three differentiators nobody ships: `verify:true` (re-fetch top-k, align the snippet claim, drop dead results, attach receipts), simhash dedup of syndicated copies, and `schema` for entity-shaped results reusing the compiled-extractor cache.
+
+---
+
+## 8. Phase 5–7 — 北极星：/answer、/watch、预测式新鲜度（2026Q4–2027Q1）
+
+**Gate**：Phase 0–4 全部验收 + 出现付费流量后启动。
+
+### 任务卡 P5 · /answer 信念模式
+
+**完成什么**：search → 多源 extract → consensus → 信念响应；**n_eff 不足时诚实返回 unknown**。
+
+**实现参考**（两形态契约，管线 = 已有件组装）：
+
+```jsonc
+// POST /api/v1/answer
+{ "spec": { "subject": "anthropic claude-fable-5",
+            "predicate": "price_per_mtok_input",
+            "freshness": "7d",
+            "min_independent_sources": 2,
+            "on_conflict": "expose" } }
+
+// 形态 A
+{ "belief": { "value": "$…", "confidence": "high",
+    "agreement": { "pages": 6, "independent_roots": 3 },
+    "as_of": "2026-11-02T02:10:00Z",
+    "evidence": [ { "quote": "…", "selector": "…", "snapshot_id": "sha256:…", "root": "anthropic.com" } ],
+    "receipts": { "…": "…" } } }
+
+// 形态 B（行业没人敢返回的那种）
+{ "belief": null, "status": "unknown",
+  "needs": { "more_independent_sources": 1 },
+  "closest": { "value": "$…", "independent_roots": 1, "note": "single syndicated root" } }
+```
+
+**验收**：n_eff < spec.min 时必须走形态 B；confidence 字样只用档位（high/medium/low），**"calibrated" 一词在校准数据成熟前禁止出现在文档与响应**。
+
+### 任务卡 P6 · /watch + 双时态事实账本 + as_of
+
+**交付什么**：migration 003；`watch/scheduler.go`；watch CRUD 端点；`GET /api/v1/facts?subject&predicate&as_of`。
+
+**实现参考**（migration 003 + 调度伪码）：
+
+```sql
+CREATE TABLE facts(
+  id INTEGER PRIMARY KEY,
+  subject TEXT, predicate TEXT, value TEXT, root TEXT, receipt TEXT,
+  observed_at TEXT,          -- 我们何时看到（transaction time）
+  valid_from TEXT, valid_to TEXT,  -- 网页世界何时如此（valid time）
+  superseded_by INTEGER
+);
+CREATE INDEX idx_facts_sp ON facts(subject, predicate, valid_from);
+
+CREATE TABLE watches(
+  id INTEGER PRIMARY KEY,
+  spec TEXT, state TEXT,
+  next_check_at TEXT, ewma_interval_s REAL,
+  last_change_at TEXT, created_at TEXT
+);
+```
+
+```text
+scheduler (30s tick):
+  due = watches where next_check_at <= now
+  对每个 due: 走 verify 管线
+    changed  → 旧 fact 封口(valid_to=now, superseded_by=新id) + 插新行
+               ewma = 0.3*observed_interval + 0.7*ewma
+               next = now + clamp(ewma/2, 10m, 7d)
+    unchanged→ next = now + clamp(ewma*1.5, 10m, 7d)
+as_of 查询: WHERE valid_from <= :t AND (valid_to IS NULL OR valid_to > :t)
+```
+
+**Commons 冷启动**（/watch 上线第一天启动，不可回填的历史从此积累）：首批公开垂类 = AI 厂商 pricing/models/limits。spec 示例：
+
+```jsonc
+{ "subject": "anthropic.com claude-fable-5", "predicate": "price_per_mtok_input",
+  "url": "https://www.anthropic.com/pricing", "freshness": "1d",
+  "schema": { "type": "object", "properties": { "price_per_mtok_input": { "type": "string" } } } }
+// 同构 spec: openai.com 模型价格页、deepseek.com 定价页 …… 首批 ≥30 条
+```
+
+### 任务卡 P7 · 预测式新鲜度与租约
+
+**完成什么**：staleness 重定义为置信衰减；所有事实响应带租约块；freshness SLA 产品化。
+
+**实现参考**：
+
+```jsonc
+"lease": { "expires_at": "…",                  // verified_at + clamp(ewma/2, …) 或默认 24h
+           "renew_url": "/api/v1/verify",
+           "confidence_halflife_s": 604800 }
+```
+
+> **EN —** The north-star phases compose existing organs: /answer returns beliefs with independent-root agreement and an honest `unknown` shape; /watch writes verified changes into a bitemporal facts ledger with `as_of` queries, seeded from day one by a public commons (AI-vendor pricing/models/limits); freshness becomes an EWMA-scheduled lease (`expires_at`, `renew_url`) instead of a TTL guess. The word "calibrated" is banned until the calibration dataset is real.
+
+---
+
+## 9. 极限层工件排期 · Limit-Tier Instruments
+
+| 工件 | 最小可发布形态 | 前置数据条件 | 落点 |
+|---|---|---|---|
+| 事实收据 | JWS 收据 + 免费公共验证端点（已含于 P0-5）；规范独立成文档 + 开源验证 CLI | 无 | Phase 0 内置；spec 开源在 W4 前后 |
+| 信念租约 | 响应 `lease` 块 + /verify 续租语义 | /verify 上线 | Phase 5 起默认携带 |
+| 传播制图 | `facts.observed_at` 先后推导"谁抄谁"（SQL 分析即可起步）；产品化：原创检测、上游源推荐 | watch 语料 ≥ 3 个月 | 2027Q1 v0 |
+| 追溯审计 | `POST /api/v1/audit`：claims[] + timestamp → 逐条 true-then / false-then / changed-since / uncovered | 账本覆盖 ≥ 5 垂类 | 2027Q1 预览 |
+| 真值担保 | 高置信答案 100× 请求价赔付额度（封顶）；先跑**影子赔付**（内部记账不对外承诺） | 校准损失表 ≥ 6 个月 + 法务审 | 压轴 |
+
+zkTLS（Reclaim/TLSNotary）定位一句话：**它证传输，我们证语义与新鲜度**——互补轨道，后期给收据加共同见证选项，不自研密码学。
+
+> **EN —** Five instruments ride the dependency ladder: receipts (built in Phase 0, spec open-sourced), leases (free once /verify exists), propagation cartography (emerges from ≥3 months of watch data via observed_at precedence), retroactive audit (needs ledger coverage), and the truth warranty last (≥6 months of shadow-payout loss data plus legal review). zkTLS proves transport; we prove semantics — complementary, adopt later.
+
+---
+
+## 10. 评测与 CI · Evaluation & CI
+
+**完成什么**：速度基准之外补准确率基准；准确率回退在 CI 红灯。
+
+**交付什么**：
+- `scripts/benchmark` 增 `accuracy` 子命令：
+  - `-dataset replay`：`testdata/pages/` 快照重放（**修一个提取 bug 就固化一个 fixture**，永不删）
+  - `-dataset swde -sample 5`：SWDE 子集（8 垂类 × 5 站，语料放 `testdata/swde/`），输出逐字段 F1
+- CI：现有 release/docker workflows 之上加 test job——replay 必跑（快、无网络）；swde nightly
+
+**验收标准**：
+- [ ] replay 集在 CI 每次 PR 必跑，任何字段 F1 下降即失败
+- [ ] SWDE 基线数字写进本文档 §11 并随版本更新
+
+> **EN —** Extend `scripts/benchmark` with an `accuracy` subcommand: a snapshot-replay fixture set (every extraction bugfix adds a permanent fixture) gating every PR, plus a sampled SWDE suite (8 verticals × 5 sites) running nightly with per-field F1.
+
+---
+
+## 11. KPI 指标体系 · KPIs
+
+| 指标 | 目标 | 口径 |
+|---|---|---|
+| unlocated 率 | < 5% | evidence:true 响应的滑动 7 日均值 |
+| compiled 命中率（重复站点） | > 70% | 同 (host, schema) 第 ≥4 次请求走 compiled 的比例 |
+| compiled 路径延迟 | P95 < 50ms | Execute 段计时，零 LLM 调用 |
+| /verify 延迟 | P95 < 3s | 端到端（多引擎竞速内） |
+| SWDE F1 | 不回退 | §10 基线 |
+| LLM 成本 / 千次提取 | 持续下降 | compiled 占比上升驱动 |
+| 收据外部验证调用 | 增长 | 免费端点 = 获客漏斗（无 key 调用数） |
+| watch 存量 / commons 垂类 | ≥30 条起步 | P6 上线日起 |
+| 校准样本量 | 单调增长 | verifications 表行数（confirmed+changed） |
+
+> **EN —** Nine KPIs: unlocated <5%, compiled hit-rate >70% on repeat sites at P95 <50ms, verify P95 <3s, SWDE F1 never regresses, LLM cost per 1k extractions trending down, free receipt-verification calls as the top-of-funnel metric, watch inventory, and monotonically growing calibration samples.
+
+---
+
+## 12. 风险登记册 · Risk Register
+
+| 风险 | 影响 | 缓解 |
+|---|---|---|
+| Firecrawl 功能跟进快 | 单点功能被抄 | 壁垒押在数据复利（快照史/验证史/传播图）而非功能本身；每 Phase 独立可发布抢时间窗 |
+| 存储增长 | 磁盘成本 | zstd 后 ~20KB/页，100 万页 ≈20GB；retention 配置 + CAS 天然去重 |
+| 反爬升级 | verify 成本上升 | 多引擎竞速 + stealth 已有；watch 调度让重访频率∝变化率而非轮询 |
+| 担保法务 | 赔付条款风险 | 影子赔付先行 ≥6 个月；上线前法务审；封顶额度 |
+| 单人带宽 | 进度风险 | 任务卡粒度独立可发布、可独立创收；严禁跨卡并行超过 2 张 |
+| SQLite 并发上限 | 高并发写瓶颈 | WAL + 单写序列化；表设计无 SQLite 专有语法，可平移 Postgres |
+| LLM provider 依赖 | 编译/修复不可用 | BYOK 多供应商（OpenAI 兼容面）已缓解 |
+
+> **EN —** Top risks: fast-following competitors (mitigated by data-compounding moats, not features), storage growth (trivial at zstd scale), anti-bot escalation (racing engine + change-rate scheduling), warranty legal exposure (shadow payouts first), solo bandwidth (independently shippable cards), SQLite write ceiling (WAL now, Postgres-portable schema later).
+
+---
+
+## 13. 边界与工程纪律 · Boundaries & Discipline
+
+1. **AGENTS.md 全文有效**：Search 工作在 `codex/search-api-v1`；scrape 线在 `codex/scrape-v1` 系分支。
+2. 每 commit 单一关注；code commit 前 `go test ./...` + `git diff --check`；提交前 `git status --short` 排除无关文件。
+3. **所有 commit 不带任何 AI 署名 / Co-Authored-By 尾注。**
+4. 不 push、不 merge、不 tag、不部署，除非明确决定。
+5. LCI/lithium、多模态、DataOS/同化引擎代码**一律不进本仓库**；同化引擎只借鉴接口语义（FactSpec/N_eff/证据收据），在 purify 全新实现。
+6. 措辞纪律：校准数据成熟前，任何对外文案与 API 响应不得使用 "calibrated"；担保上线前不得预售"保证正确"。
+7. 公开契约向后兼容：新增字段一律 `omitempty`，已有字段不改名不删除。
+
+> **EN —** AGENTS.md governs: search on its own branch, one concern per commit, tests before every code commit, no AI attribution in commit messages, no push/merge/deploy without an explicit decision, no LCI/multimodal/DataOS code in this repo, no "calibrated" wording before the data exists, and strictly additive public contracts.
+
+---
+
+## 14. 里程碑时间线 · Timeline
+
+| 周 | 里程碑 | 可对外发布物 | 验收口径 |
+|---|---|---|---|
+| W1–W2 | Phase 0 地基 | "每个字段带收据"+免费收据验证端点 | §3 五卡全勾，evidence P95 +<30ms |
+| W3 | Phase 1 复验 | /verify + MCP verify_fact | §4 三卡全勾，裁决入库 |
+| W4–W6 | Phase 2 编译 | "透明确定性提取"（对标 deterministicJson 黑盒） | compiled P95<50ms、validation 亮牌 |
+| W7–W8 | Phase 3 自愈+共识 | n_eff 独立性计数 + 冲突暴露 | 回归晋级制生效 |
+| W9–W10 | Phase 4 搜索 | Verified Search（verify/去重/schema 三参数） | SEARCH.md DoD + 三参数验收 |
+| 2026 Q4 | Phase 5–6 | /answer（敢答 unknown）+ /watch + commons ≥30 垂类上线 | 形态 B 可复现；账本开始积累 |
+| 2027 Q1 | Phase 7 + 极限层前两件后续 | freshness SLA + 传播制图 v0 + 审计预览 | lease 默认携带；as_of 查询公开 |
+
+**第一行动（本周）**：开卡 P0-1 严格 schema 校验——它同时是当前 `/extract` 最大质量短板与整个证据体系的第一块砖。
+
+> **EN —** Ten weeks to ship tiers one through four milestone by milestone — receipts (W2), /verify (W3), transparent compiled extraction (W6), independence accounting (W8), verified search (W10) — then the north-star quarter (answers, watches, commons) and the 2027Q1 limit-tier openers. First action: task card P0-1, strict schema validation.
