@@ -1,0 +1,385 @@
+package engine
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
+	"math/big"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestHTTPEngineHonorsHeadersCookiesAndDefaultNetworkWait(t *testing.T) {
+	wait := true
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+		cookie, err := request.Cookie("session")
+		if err != nil {
+			t.Errorf("request cookie: %v", err)
+		}
+		fmt.Fprintf(writer, "<html><head><title>fixture</title></head><body>%s|%s</body></html>", request.Header.Get("X-Purify-Test"), cookie.Value)
+	}))
+	t.Cleanup(server.Close)
+
+	engine := NewHTTPEngine("")
+	request := &FetchRequest{
+		URL:                server.URL,
+		Headers:            map[string]string{"X-Purify-Test": "header-value"},
+		Cookies:            []http.Cookie{{Name: "session", Value: "cookie-value"}},
+		Timeout:            time.Second,
+		WaitForNetworkIdle: &wait,
+	}
+	if !engine.Supports(request) {
+		t.Fatal("default wait_for_network_idle=true must not disable the HTTP-first candidate")
+	}
+
+	result, err := engine.Fetch(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Fetch() error = %v", err)
+	}
+	if !strings.Contains(result.HTML, "header-value|cookie-value") {
+		t.Fatalf("Fetch() HTML = %q, want propagated header and cookie", result.HTML)
+	}
+	if result.Title != "fixture" || result.FinalURL != server.URL || result.StatusCode != http.StatusOK {
+		t.Fatalf("Fetch() metadata = %+v", result)
+	}
+}
+
+func TestHTTPEngineRequestTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		writer.Header().Set("Content-Type", "text/html")
+		_, _ = writer.Write([]byte("<html><body>late</body></html>"))
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := NewHTTPEngine("").Fetch(context.Background(), &FetchRequest{
+		URL:     server.URL,
+		Timeout: 25 * time.Millisecond,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Fetch() error = %v, want context deadline exceeded", err)
+	}
+}
+
+func TestHTTPEngineConcurrentPerRequestProxySelection(t *testing.T) {
+	proxyA := proxyFixture(t, "proxy-a")
+	proxyB := proxyFixture(t, "proxy-b")
+	engine := NewHTTPEngine(proxyA.URL)
+
+	type testCase struct {
+		name      string
+		override  string
+		wantProxy string
+	}
+	tests := []testCase{
+		{name: "default", wantProxy: "proxy-a"},
+		{name: "override", override: proxyB.URL, wantProxy: "proxy-b"},
+	}
+
+	const attempts = 24
+	var waitGroup sync.WaitGroup
+	errorsChannel := make(chan error, attempts*len(tests))
+	for attempt := 0; attempt < attempts; attempt++ {
+		for _, test := range tests {
+			test := test
+			waitGroup.Add(1)
+			go func() {
+				defer waitGroup.Done()
+				result, err := engine.Fetch(context.Background(), &FetchRequest{
+					URL:      "http://purify-proxy-target.invalid/page",
+					ProxyURL: test.override,
+					Timeout:  time.Second,
+				})
+				if err != nil {
+					errorsChannel <- fmt.Errorf("%s Fetch(): %w", test.name, err)
+					return
+				}
+				if !strings.Contains(result.HTML, test.wantProxy) {
+					errorsChannel <- fmt.Errorf("%s HTML = %q, want %q", test.name, result.HTML, test.wantProxy)
+				}
+			}()
+		}
+	}
+	waitGroup.Wait()
+	close(errorsChannel)
+	for err := range errorsChannel {
+		t.Error(err)
+	}
+}
+
+func proxyFixture(t *testing.T, marker string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Host != "purify-proxy-target.invalid" {
+			t.Errorf("proxy target host = %q", request.URL.Host)
+		}
+		writer.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(writer, "<html><body>%s</body></html>", marker)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestHTTPEngineSupportsBrowserOnlyOptions(t *testing.T) {
+	wait := true
+	engine := NewHTTPEngine("")
+	if !engine.Supports(&FetchRequest{WaitForNetworkIdle: &wait}) {
+		t.Fatal("network-idle preference applies to browser candidates and must preserve HTTP-first")
+	}
+	for name, request := range map[string]*FetchRequest{
+		"stealth":         {Stealth: true},
+		"remove overlays": {RemoveOverlays: true},
+		"block ads":       {BlockAds: true},
+		"actions":         {Actions: []Action{{Type: "click"}}},
+		"CDP":             {CDPURL: "ws://browser.invalid/devtools/browser/test"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if engine.Supports(request) {
+				t.Fatalf("Supports(%s) = true, want explicit browser-only skip", name)
+			}
+			_, err := engine.Fetch(context.Background(), request)
+			if !errors.Is(err, ErrUnsupportedRequest) {
+				t.Fatalf("Fetch(%s) error = %v, want ErrUnsupportedRequest", name, err)
+			}
+		})
+	}
+}
+
+func TestDialViaHTTPSProxyUsesTLSValidationSNIAndAuth(t *testing.T) {
+	proxy := newTLSConnectProxy(t)
+	parsed, err := url.Parse(proxy.url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed.User = url.UserPassword("proxy-user", "proxy-pass")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	conn, err := dialViaHTTPConnectWithTLSConfig(ctx, parsed, "target.test:443", &tls.Config{RootCAs: proxy.roots})
+	if err != nil {
+		t.Fatalf("dialViaHTTPConnectWithTLSConfig() error = %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatalf("tunnel write: %v", err)
+	}
+	echo := make([]byte, 4)
+	if _, err := io.ReadFull(conn, echo); err != nil {
+		t.Fatalf("tunnel read: %v", err)
+	}
+	if string(echo) != "ping" {
+		t.Fatalf("tunnel echo = %q", echo)
+	}
+	if got := <-proxy.sni; got != "localhost" {
+		t.Fatalf("HTTPS proxy SNI = %q, want localhost", got)
+	}
+	if got := <-proxy.authorization; got != "Basic cHJveHktdXNlcjpwcm94eS1wYXNz" {
+		t.Fatalf("Proxy-Authorization = %q", got)
+	}
+}
+
+func TestHTTPEngineFetchesHTTPSViaVerifiedHTTPSProxy(t *testing.T) {
+	target := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/html")
+		_, _ = writer.Write([]byte("<html><body>verified-https-proxy</body></html>"))
+	}))
+	t.Cleanup(target.Close)
+	proxy := newTLSForwardProxy(t)
+	roots := proxy.roots.Clone()
+	roots.AddCert(target.Certificate())
+	parsedProxy, _ := url.Parse(proxy.url)
+	parsedProxy.User = url.UserPassword("proxy-user", "proxy-pass")
+	client, err := newHTTPClientWithTLSConfig(parsedProxy.String(), &tls.Config{RootCAs: roots})
+	if err != nil {
+		t.Fatalf("newHTTPClientWithTLSConfig() error = %v", err)
+	}
+	engine := &HTTPEngine{client: client, defaultProxyURL: parsedProxy.String()}
+	result, err := engine.Fetch(context.Background(), &FetchRequest{URL: target.URL, Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("Fetch() error = %v", err)
+	}
+	if !strings.Contains(result.HTML, "verified-https-proxy") {
+		t.Fatalf("Fetch() HTML = %q", result.HTML)
+	}
+	if got := <-proxy.sni; got != "localhost" {
+		t.Fatalf("HTTPS proxy SNI = %q, want localhost", got)
+	}
+	if got := <-proxy.authorization; got != "Basic cHJveHktdXNlcjpwcm94eS1wYXNz" {
+		t.Fatalf("Proxy-Authorization = %q", got)
+	}
+}
+
+func TestDialViaHTTPSProxyRejectsUntrustedCertificate(t *testing.T) {
+	proxy := newTLSConnectProxy(t)
+	parsed, _ := url.Parse(proxy.url)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := dialViaHTTPConnectWithTLSConfig(ctx, parsed, "target.test:443", &tls.Config{RootCAs: x509.NewCertPool()})
+	if err == nil || !strings.Contains(err.Error(), "certificate") {
+		t.Fatalf("dial error = %v, want certificate validation failure", err)
+	}
+}
+
+func TestDialViaHTTPSProxyHandshakeHonorsContext(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			defer conn.Close()
+			time.Sleep(time.Second)
+		}
+	}()
+	parsed, _ := url.Parse("https://" + listener.Addr().String())
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	_, err = dialViaHTTPConnect(ctx, parsed, "target.test:443")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("dial error = %v, want context deadline exceeded", err)
+	}
+}
+
+type tlsConnectProxy struct {
+	url           string
+	roots         *x509.CertPool
+	sni           chan string
+	authorization chan string
+}
+
+func newTLSForwardProxy(t *testing.T) tlsConnectProxy {
+	t.Helper()
+	certificate, root := localhostCertificate(t)
+	sni := make(chan string, 4)
+	authorization := make(chan string, 4)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		authorization <- request.Header.Get("Proxy-Authorization")
+		destination, err := net.DialTimeout("tcp", request.Host, time.Second)
+		if err != nil {
+			http.Error(writer, err.Error(), http.StatusBadGateway)
+			return
+		}
+		connection, buffered, err := writer.(http.Hijacker).Hijack()
+		if err != nil {
+			_ = destination.Close()
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer connection.Close()
+		defer destination.Close()
+		_, _ = buffered.WriteString("HTTP/1.1 200 Connection Established\r\nContent-Length: 0\r\n\r\n")
+		_ = buffered.Flush()
+		var waitGroup sync.WaitGroup
+		waitGroup.Add(2)
+		go func() { defer waitGroup.Done(); _, _ = io.Copy(destination, buffered) }()
+		go func() { defer waitGroup.Done(); _, _ = io.Copy(connection, destination) }()
+		waitGroup.Wait()
+	}))
+	server.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{certificate},
+		GetConfigForClient: func(info *tls.ClientHelloInfo) (*tls.Config, error) {
+			sni <- info.ServerName
+			return nil, nil
+		},
+	}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	parsed, _ := url.Parse(server.URL)
+	_, port, _ := net.SplitHostPort(parsed.Host)
+	parsed.Host = net.JoinHostPort("localhost", port)
+	return tlsConnectProxy{url: parsed.String(), roots: root, sni: sni, authorization: authorization}
+}
+
+func newTLSConnectProxy(t *testing.T) tlsConnectProxy {
+	t.Helper()
+	certificate, root := localhostCertificate(t)
+	sni := make(chan string, 4)
+	authorization := make(chan string, 4)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		authorization <- request.Header.Get("Proxy-Authorization")
+		connection, buffered, err := writer.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer connection.Close()
+		_, _ = buffered.WriteString("HTTP/1.1 200 Connection Established\r\nContent-Length: 0\r\n\r\n")
+		_ = buffered.Flush()
+		payload := make([]byte, 4)
+		if _, err := io.ReadFull(buffered, payload); err == nil {
+			_, _ = connection.Write(payload)
+		}
+	}))
+	server.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{certificate},
+		GetConfigForClient: func(info *tls.ClientHelloInfo) (*tls.Config, error) {
+			sni <- info.ServerName
+			return nil, nil
+		},
+	}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	parsed, _ := url.Parse(server.URL)
+	_, port, _ := net.SplitHostPort(parsed.Host)
+	parsed.Host = net.JoinHostPort("localhost", port)
+	return tlsConnectProxy{url: parsed.String(), roots: root, sni: sni, authorization: authorization}
+}
+
+func localhostCertificate(t *testing.T) (tls.Certificate, *x509.CertPool) {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "localhost test proxy"},
+		DNSNames:              []string{"localhost"},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := tls.X509KeyPair(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	parsed, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots.AddCert(parsed)
+	return certificate, roots
+}

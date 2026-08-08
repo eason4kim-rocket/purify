@@ -3,6 +3,7 @@ package engine
 import (
 	"bufio"
 	"context"
+	stdtls "crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -13,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	tls "github.com/refraction-networking/utls"
+	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/html"
 	"golang.org/x/net/proxy"
 )
@@ -22,16 +23,17 @@ import (
 // It is the fastest option, suitable for static pages that don't need
 // JavaScript rendering.
 type HTTPEngine struct {
-	client   *http.Client
-	proxyURL string
+	client          *http.Client
+	defaultProxyURL string
+	clientErr       error
 }
 
 // chromeH1Spec is a Chrome-like TLS ClientHello with ALPN forced to http/1.1
 // only. Computed once at init time and reused for every connection.
-var chromeH1Spec tls.ClientHelloSpec
+var chromeH1Spec utls.ClientHelloSpec
 
 func init() {
-	spec, err := tls.UTLSIdToSpec(tls.HelloChrome_Auto)
+	spec, err := utls.UTLSIdToSpec(utls.HelloChrome_Auto)
 	if err != nil {
 		// Fallback: if spec generation fails, use HelloChrome_Auto as-is.
 		// (Should never happen with a valid utls version.)
@@ -41,7 +43,7 @@ func init() {
 	// never negotiates HTTP/2 (which Go's http.Transport cannot handle
 	// over a utls connection).
 	for i, ext := range spec.Extensions {
-		if alpn, ok := ext.(*tls.ALPNExtension); ok {
+		if alpn, ok := ext.(*utls.ALPNExtension); ok {
 			alpn.AlpnProtocols = []string{"http/1.1"}
 			spec.Extensions[i] = alpn
 			break
@@ -56,23 +58,41 @@ func init() {
 // If proxyURL is non-empty, all connections are routed through the proxy
 // (SOCKS5 with optional username/password auth is supported).
 func NewHTTPEngine(proxyURL string) *HTTPEngine {
+	client, err := newHTTPClient(proxyURL)
+	if proxyURL != "" {
+		slog.Info("http_engine: proxy configured", "proxy", redactProxy(proxyURL))
+	}
+	return &HTTPEngine{
+		client:          client,
+		defaultProxyURL: proxyURL,
+		clientErr:       err,
+	}
+}
+
+func newHTTPClient(proxyURL string) (*http.Client, error) {
+	return newHTTPClientWithTLSConfig(proxyURL, nil)
+}
+
+func newHTTPClientWithTLSConfig(proxyURL string, tlsConfig *stdtls.Config) (*http.Client, error) {
+	if err := validateProxyURL(proxyURL); err != nil {
+		return nil, err
+	}
+
 	transport := &http.Transport{
-		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		ForceAttemptHTTP2: false,
+	}
+	if proxyURL == "" {
+		transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			var conn net.Conn
 			var err error
-
-			if proxyURL != "" {
-				conn, err = dialViaProxy(ctx, proxyURL, network, addr)
-			} else {
-				dialer := &net.Dialer{Timeout: 10 * time.Second}
-				conn, err = dialer.DialContext(ctx, network, addr)
-			}
+			dialer := &net.Dialer{Timeout: 10 * time.Second}
+			conn, err = dialer.DialContext(ctx, network, addr)
 			if err != nil {
 				return nil, err
 			}
 
 			host, _, _ := net.SplitHostPort(addr)
-			tlsConn := tls.UClient(conn, &tls.Config{ServerName: host}, tls.HelloCustom)
+			tlsConn := utls.UClient(conn, &utls.Config{ServerName: host}, utls.HelloCustom)
 			if err := tlsConn.ApplyPreset(&chromeH1Spec); err != nil {
 				conn.Close()
 				return nil, fmt.Errorf("http_engine: apply tls spec: %w", err)
@@ -82,32 +102,49 @@ func NewHTTPEngine(proxyURL string) *HTTPEngine {
 				return nil, err
 			}
 			return tlsConn, nil
-		},
-		ForceAttemptHTTP2: false,
-	}
-
-	// Route plain HTTP through the proxy via Go's standard Proxy mechanism.
-	if proxyURL != "" {
-		if pu, err := url.Parse(proxyURL); err == nil {
-			transport.Proxy = http.ProxyURL(pu)
 		}
+	} else {
+		proxy, _ := url.Parse(proxyURL) // validated above
+		transport.Proxy = http.ProxyURL(proxy)
+		config := &stdtls.Config{MinVersion: stdtls.VersionTLS12}
+		if tlsConfig != nil {
+			config = tlsConfig.Clone()
+			if config.MinVersion == 0 {
+				config.MinVersion = stdtls.VersionTLS12
+			}
+		}
+		// net/http applies ServerName separately for the HTTPS proxy and the
+		// tunneled target while preserving certificate verification.
+		transport.TLSClientConfig = config
 	}
 
-	if proxyURL != "" {
-		slog.Info("http_engine: proxy configured", "proxy", redactProxy(proxyURL))
-	}
-
-	return &HTTPEngine{
-		client: &http.Client{
-			Transport: transport,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 10 {
-					return fmt.Errorf("too many redirects")
-				}
-				return nil
-			},
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("too many redirects")
+			}
+			return nil
 		},
-		proxyURL: proxyURL,
+	}, nil
+}
+
+func validateProxyURL(rawURL string) error {
+	if rawURL == "" {
+		return nil
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("http_engine: parse proxy url: %w", err)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("http_engine: proxy URL has no host")
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+		return nil
+	default:
+		return fmt.Errorf("http_engine: unsupported proxy scheme: %s", u.Scheme)
 	}
 }
 
@@ -153,10 +190,49 @@ func dialViaSocks5(ctx context.Context, u *url.URL, network, addr string) (net.C
 
 // dialViaHTTPConnect creates a tunnel through an HTTP proxy using CONNECT.
 func dialViaHTTPConnect(ctx context.Context, u *url.URL, addr string) (net.Conn, error) {
+	return dialViaHTTPConnectWithTLSConfig(ctx, u, addr, nil)
+}
+
+func dialViaHTTPConnectWithTLSConfig(ctx context.Context, u *url.URL, addr string, tlsConfig *stdtls.Config) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", u.Host)
 	if err != nil {
 		return nil, fmt.Errorf("http_engine: connect to http proxy: %w", err)
+	}
+	connectionOK := false
+	defer func() {
+		if !connectionOK {
+			_ = conn.Close()
+		}
+	}()
+
+	if u.Scheme == "https" {
+		config := &stdtls.Config{ //nolint:gosec -- certificate verification remains enabled.
+			MinVersion: stdtls.VersionTLS12,
+			ServerName: u.Hostname(),
+		}
+		if tlsConfig != nil {
+			config = tlsConfig.Clone()
+			if config.ServerName == "" {
+				config.ServerName = u.Hostname()
+			}
+			if config.MinVersion == 0 {
+				config.MinVersion = stdtls.VersionTLS12
+			}
+		}
+		tlsConn := stdtls.Client(conn, config)
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			return nil, fmt.Errorf("http_engine: TLS handshake with HTTPS proxy: %w", err)
+		}
+		conn = tlsConn
+	}
+
+	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClose()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			return nil, fmt.Errorf("http_engine: set proxy CONNECT deadline: %w", err)
+		}
 	}
 
 	// Build CONNECT request with Basic auth.
@@ -170,21 +246,22 @@ func dialViaHTTPConnect(ctx context.Context, u *url.URL, addr string) (net.Conn,
 	req += "\r\n"
 
 	if _, err := conn.Write([]byte(req)); err != nil {
-		conn.Close()
 		return nil, fmt.Errorf("http_engine: send CONNECT: %w", err)
 	}
 
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, &http.Request{Method: "CONNECT"})
 	if err != nil {
-		conn.Close()
 		return nil, fmt.Errorf("http_engine: read CONNECT response: %w", err)
 	}
 	if resp.StatusCode != 200 {
-		conn.Close()
 		return nil, fmt.Errorf("http_engine: CONNECT rejected: %s", resp.Status)
 	}
 
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return nil, fmt.Errorf("http_engine: clear proxy CONNECT deadline: %w", err)
+	}
+	connectionOK = true
 	return conn, nil
 }
 
@@ -202,8 +279,38 @@ func redactProxy(rawURL string) string {
 
 func (e *HTTPEngine) Name() string { return "http" }
 
+// Supports rejects options that require a rendered browser document. A false
+// value is an explicit signal to dispatchers to skip HTTP rather than silently
+// returning a response that did not honor the request.
+func (e *HTTPEngine) Supports(req *FetchRequest) bool {
+	if req == nil {
+		return false
+	}
+	return !req.Stealth &&
+		!req.RemoveOverlays &&
+		!req.BlockAds &&
+		len(req.Actions) == 0 &&
+		req.CDPURL == ""
+}
+
 func (e *HTTPEngine) Fetch(ctx context.Context, req *FetchRequest) (*FetchResult, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, req.URL, nil)
+	if req == nil {
+		return nil, fmt.Errorf("http_engine: nil fetch request")
+	}
+	if !e.Supports(req) {
+		return nil, fmt.Errorf("%w: http engine cannot honor browser-only options", ErrUnsupportedRequest)
+	}
+
+	fetchCtx, cancel := requestContext(ctx, req.Timeout)
+	defer cancel()
+
+	client, cleanup, err := e.clientForRequest(req.ProxyURL)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	httpReq, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, req.URL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("http_engine: build request: %w", err)
 	}
@@ -224,7 +331,7 @@ func (e *HTTPEngine) Fetch(ctx context.Context, req *FetchRequest) (*FetchResult
 		httpReq.AddCookie(&req.Cookies[i])
 	}
 
-	resp, err := e.client.Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("http_engine: do request: %w", err)
 	}
@@ -257,6 +364,24 @@ func (e *HTTPEngine) Fetch(ctx context.Context, req *FetchRequest) (*FetchResult
 		EngineName:  e.Name(),
 		ContentType: ct,
 	}, nil
+}
+
+// clientForRequest returns an immutable client for the selected proxy. The
+// shared default client is reused only when no override is requested; override
+// clients and transports are request-local, making concurrent proxy selection
+// race-free.
+func (e *HTTPEngine) clientForRequest(proxyOverride string) (*http.Client, func(), error) {
+	if proxyOverride == "" || proxyOverride == e.defaultProxyURL {
+		if e.clientErr != nil {
+			return nil, func() {}, e.clientErr
+		}
+		return e.client, func() {}, nil
+	}
+	client, err := newHTTPClient(proxyOverride)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	return client, client.CloseIdleConnections, nil
 }
 
 // isHTMLContentType returns true if the content-type header looks like HTML.

@@ -35,12 +35,15 @@ func NewDispatcher(engines []Engine, escalationDelays []time.Duration, memory *D
 // Dispatch runs the multi-engine race for the given request and returns
 // the first successful result. If all engines fail, it returns the last error.
 func (d *Dispatcher) Dispatch(ctx context.Context, req *FetchRequest) (*FetchResult, error) {
+	if req == nil {
+		return nil, fmt.Errorf("dispatcher: nil fetch request")
+	}
 	domain := extractDomain(req.URL)
 
 	// Check domain memory for a previously successful engine.
-	if remembered := d.memory.Get(domain); remembered != "" {
+	if remembered := d.rememberedEngine(domain); remembered != "" {
 		for _, eng := range d.engines {
-			if eng.Name() == remembered {
+			if eng.Name() == remembered && eng.Supports(req) {
 				slog.Debug("domain memory hit", "domain", domain, "engine", remembered)
 				result, err := eng.Fetch(ctx, req)
 				if err == nil {
@@ -49,7 +52,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req *FetchRequest) (*FetchRes
 				// Memory entry failed; delete it and fall through to full race.
 				slog.Info("domain memory miss (engine failed), running full race",
 					"domain", domain, "engine", remembered, "error", err)
-				d.memory.Delete(domain)
+				if d.memory != nil {
+					d.memory.Delete(domain)
+				}
 				break
 			}
 		}
@@ -68,11 +73,36 @@ func (d *Dispatcher) race(ctx context.Context, req *FetchRequest, domain string)
 	raceCtx, raceCancel := context.WithCancel(ctx)
 	defer raceCancel()
 
-	results := make(chan raceResult, len(d.engines))
+	type candidate struct {
+		engine Engine
+		delay  time.Duration
+	}
+	candidates := make([]candidate, 0, len(d.engines))
+	var firstDelay time.Duration
+	for i, eng := range d.engines {
+		if !eng.Supports(req) {
+			slog.Debug("engine skipped: unsupported request options", "engine", eng.Name(), "url", req.URL)
+			continue
+		}
+		delay := d.escalationDelays[i]
+		if len(candidates) == 0 {
+			firstDelay = delay
+		}
+		if delay > firstDelay {
+			delay -= firstDelay
+		} else {
+			delay = 0
+		}
+		candidates = append(candidates, candidate{engine: eng, delay: delay})
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("%w: no configured engine supports request for %s", ErrUnsupportedRequest, req.URL)
+	}
+
+	results := make(chan raceResult, len(candidates))
 	var wg sync.WaitGroup
 
-	for i, eng := range d.engines {
-		delay := d.escalationDelays[i]
+	for _, candidate := range candidates {
 		wg.Add(1)
 		go func(e Engine, d time.Duration) {
 			defer wg.Done()
@@ -99,7 +129,7 @@ func (d *Dispatcher) race(ctx context.Context, req *FetchRequest, domain string)
 				slog.Debug("engine failed", "engine", e.Name(), "url", req.URL, "error", err)
 			}
 			results <- raceResult{result: result, err: err}
-		}(eng, delay)
+		}(candidate.engine, candidate.delay)
 	}
 
 	// Close results channel when all goroutines finish.
@@ -117,7 +147,9 @@ func (d *Dispatcher) race(ctx context.Context, req *FetchRequest, domain string)
 		// First success wins — cancel all other engines.
 		raceCancel()
 		slog.Info("engine won race", "engine", rr.result.EngineName, "url", req.URL)
-		d.memory.Set(domain, rr.result.EngineName)
+		if d.memory != nil {
+			d.memory.Set(domain, rr.result.EngineName)
+		}
 		return rr.result, nil
 	}
 
@@ -125,6 +157,13 @@ func (d *Dispatcher) race(ctx context.Context, req *FetchRequest, domain string)
 		lastErr = fmt.Errorf("dispatcher: all engines failed for %s", req.URL)
 	}
 	return nil, lastErr
+}
+
+func (d *Dispatcher) rememberedEngine(domain string) string {
+	if d.memory == nil {
+		return ""
+	}
+	return d.memory.Get(domain)
 }
 
 // extractDomain parses the hostname from a URL string.

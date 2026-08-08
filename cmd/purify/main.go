@@ -16,7 +16,6 @@ import (
 	"github.com/use-agent/purify/config"
 	"github.com/use-agent/purify/engine"
 	"github.com/use-agent/purify/llm"
-	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/receipts"
 	"github.com/use-agent/purify/scraper"
 	"github.com/use-agent/purify/snapshot"
@@ -76,13 +75,7 @@ func main() {
 		// Rod callback: wraps the scraper's DoScrapeRod (bypasses the dispatcher).
 		// This closure avoids a circular import (engine/ never imports scraper/).
 		rodFetch := func(ctx context.Context, req *engine.FetchRequest) (*engine.FetchResult, error) {
-			scrapeReq := &models.ScrapeRequest{
-				URL:     req.URL,
-				Timeout: int(req.Timeout.Seconds()),
-				Stealth: req.Stealth,
-				Headers: req.Headers,
-			}
-			scrapeReq.Defaults()
+			scrapeReq := scraper.ScrapeRequestFromFetchRequest(req)
 
 			result, err := sc.DoScrapeRod(ctx, scrapeReq)
 			if err != nil {

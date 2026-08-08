@@ -4,17 +4,14 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"time"
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/go-rod/stealth"
-	"github.com/use-agent/purify/engine"
 	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/snapshot"
-	"github.com/ysmood/gson"
 )
 
 // DoScrape is the top-level orchestrator.
@@ -32,23 +29,7 @@ func (s *Scraper) DoScrape(ctx context.Context, req *models.ScrapeRequest) (*Scr
 	// If the dispatcher is configured AND the request has no Actions AND
 	// no CDPURL, delegate to the multi-engine dispatcher for a faster path.
 	if s.dispatcher != nil && len(req.Actions) == 0 && req.CDPURL == "" {
-		cookies := make([]http.Cookie, len(req.Cookies))
-		for i, c := range req.Cookies {
-			cookies[i] = http.Cookie{
-				Name:   c.Name,
-				Value:  c.Value,
-				Domain: c.Domain,
-				Path:   c.Path,
-			}
-		}
-
-		fetchReq := &engine.FetchRequest{
-			URL:     req.URL,
-			Headers: req.Headers,
-			Cookies: cookies,
-			Timeout: timeout,
-			Stealth: req.Stealth,
-		}
+		fetchReq := FetchRequestFromScrapeRequest(req, timeout)
 
 		result, err := s.dispatcher.Dispatch(requestCtx, fetchReq)
 		if err == nil {
@@ -158,6 +139,12 @@ func (s *Scraper) doScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 	if req.CDPURL != "" {
 		return s.doScrapeWithCDP(ctx, req)
 	}
+	// A request proxy must never mutate the shared Chrome process. Cookies are
+	// isolated for the same reason: Chromium stores them at browser-context
+	// scope, not page scope.
+	if req.ProxyURL != "" || len(req.Cookies) > 0 {
+		return s.doScrapeInRequestContext(ctx, req)
+	}
 
 	// ── 2. Acquire page from pool ─────────────────────────────────────
 	s.activePages.Add(1)
@@ -190,10 +177,11 @@ func (s *Scraper) doScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 		}
 		s.pagePool.Put(page)
 	}()
+	p := page.Context(ctx)
 
 	// ── 4. Stealth injection ──────────────────────────────────────────
 	if req.Stealth {
-		if _, evalErr := page.EvalOnNewDocument(stealth.JS); evalErr != nil {
+		if _, evalErr := p.EvalOnNewDocument(stealth.JS); evalErr != nil {
 			slog.Warn("stealth injection failed, proceeding without stealth",
 				"error", evalErr,
 			)
@@ -201,19 +189,13 @@ func (s *Scraper) doScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 	}
 
 	// ── 4b. Build extra headers (custom + Google Referer) ────────────
-	extraHeaders := make(map[string]string, len(req.Headers)+1)
-	if _, hasReferer := req.Headers["Referer"]; !hasReferer {
-		if u, parseErr := url.Parse(req.URL); parseErr == nil {
-			extraHeaders["Referer"] = "https://www.google.com/search?q=" + url.QueryEscape(u.Hostname())
-		}
-	}
-	for k, v := range req.Headers {
-		extraHeaders[k] = v
-	}
+	extraHeaders := browserHeaders(req)
 	if len(extraHeaders) > 0 {
-		_ = proto.NetworkSetExtraHTTPHeaders{
-			Headers: toHeadersMap(extraHeaders),
-		}.Call(page)
+		restoreHeaders, headerErr := setBrowserHeaders(p, extraHeaders)
+		if headerErr != nil {
+			return nil, categorizeError(headerErr, "failed to set request headers")
+		}
+		defer restoreHeaders()
 	}
 
 	// ── 4c. Custom cookies ──────────────────────────────────────────
@@ -221,29 +203,29 @@ func (s *Scraper) doScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 		domain := cookie.Domain
 		if domain == "" {
 			if u, parseErr := url.Parse(req.URL); parseErr == nil {
-				domain = u.Host
+				domain = u.Hostname()
 			}
 		}
 		path := cookie.Path
 		if path == "" {
 			path = "/"
 		}
-		_, _ = proto.NetworkSetCookie{
+		_, cookieErr := (proto.NetworkSetCookie{
 			Name:   cookie.Name,
 			Value:  cookie.Value,
 			Domain: domain,
 			Path:   path,
-		}.Call(page)
+		}).Call(p)
+		if cookieErr != nil {
+			return nil, categorizeError(cookieErr, "failed to set request cookie")
+		}
 	}
 
 	// ── 5. Mount hijack router (blocks Image/Stylesheet/Font/Media + ads) ──
-	router := setupHijack(page, s.scraperCfg.BlockedResourceTypes, req.BlockAds)
+	router := setupHijack(p, s.scraperCfg.BlockedResourceTypes, req.BlockAds)
 	if router != nil {
 		defer func() { _ = router.Stop() }()
 	}
-
-	// ── 6. Bind request context to page ───────────────────────────────
-	p := page.Context(ctx)
 
 	// ── 7. Install network activity tracking BEFORE navigation ────────
 	// CDP WaitRequestIdle conflicts with Fetch-domain request hijacking on
@@ -432,104 +414,29 @@ func evalIntOrZero(page *rod.Page, js string) int {
 	return res.Value.Int()
 }
 
-// toHeadersMap converts a plain string map to the proto.NetworkHeaders type
-// (map[string]gson.JSON) required by NetworkSetExtraHTTPHeaders.
-func toHeadersMap(headers map[string]string) proto.NetworkHeaders {
-	m := make(proto.NetworkHeaders, len(headers))
-	for k, v := range headers {
-		m[k] = gson.New(v)
-	}
-	return m
-}
-
 // doScrapeWithCDP connects to a user-provided CDP endpoint, creates a
 // temporary page, scrapes it, and disconnects (without killing the browser).
 func (s *Scraper) doScrapeWithCDP(ctx context.Context, req *models.ScrapeRequest) (*ScrapeResult, error) {
-	browser := rod.New().ControlURL(req.CDPURL)
-	if err := browser.Connect(); err != nil {
+	browser, disconnect, err := connectCDP(ctx, req.CDPURL)
+	if err != nil {
 		return nil, models.NewScrapeError(
 			models.ErrCodeBrowserCrash,
 			"failed to connect to CDP URL",
 			err,
 		)
 	}
-	// Disconnect closes the WebSocket but does NOT kill the browser process.
-	defer browser.Close()
+	defer disconnect()
 
-	page, err := browser.Page(proto.TargetCreateTarget{})
+	isolated, cleanup, err := newIsolatedBrowserContext(ctx, browser, req.ProxyURL)
 	if err != nil {
 		return nil, models.NewScrapeError(
 			models.ErrCodeBrowserCrash,
-			"failed to create page on CDP browser",
+			"failed to create isolated CDP browser context",
 			err,
 		)
 	}
-	defer func() {
-		_ = page.Close()
-	}()
-
-	// Bind context for timeout.
-	p := page.Context(ctx)
-	if networkIdleRequested(req) {
-		removeTracker, trackerErr := installNetworkTracker(p)
-		if trackerErr != nil {
-			return nil, categorizeError(trackerErr, "failed to install network idle tracker")
-		}
-		defer func() { _ = removeTracker() }()
-	}
-
-	// Navigate.
-	if err := p.Navigate(req.URL); err != nil {
-		return nil, categorizeError(err, "navigation to target URL failed")
-	}
-
-	if waitErr := waitForDocument(p, networkIdleRequested(req)); waitErr != nil {
-		return nil, categorizeError(waitErr, "document did not become ready")
-	}
-
-	// Remove overlays if requested.
-	if req.RemoveOverlays {
-		removeOverlays(p)
-	}
-
-	// Execute actions if any.
-	if len(req.Actions) > 0 {
-		if err := executeActions(ctx, page, req.Actions); err != nil {
-			return nil, err
-		}
-		if waitErr := waitForPostActionStability(p, networkIdleRequested(req)); waitErr != nil {
-			return nil, categorizeError(waitErr, "document did not stabilize after actions")
-		}
-	}
-
-	// Extract.
-	rawHTML, htmlErr := p.HTML()
-	if htmlErr != nil {
-		return nil, categorizeError(htmlErr, "failed to extract page HTML")
-	}
-
-	title := evalStringOrEmpty(p, `() => document.title`)
-	finalURL := evalStringOrEmpty(p, `() => window.location.href`)
-	statusCode := evalIntOrZero(p, `() => {
-		try {
-			const entries = performance.getEntriesByType("navigation");
-			return entries.length > 0 ? (entries[0].responseStatus || 0) : 0;
-		} catch(e) { return 0; }
-	}`)
-	contentType := evalStringOrEmpty(p, `() => document.contentType`)
-	if finalURL == "" {
-		finalURL = req.URL
-	}
-
-	return &ScrapeResult{
-		RawHTML:     rawHTML,
-		Title:       title,
-		StatusCode:  statusCode,
-		FinalURL:    finalURL,
-		EngineUsed:  "cdp",
-		FetchMethod: "browser",
-		ContentType: contentType,
-	}, nil
+	defer cleanup()
+	return s.scrapeStandalonePage(ctx, isolated, req, "cdp")
 }
 
 // removeOverlays injects JS to remove fixed/sticky positioned elements with

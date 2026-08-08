@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bufio"
+	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
@@ -24,6 +26,12 @@ type Relay struct {
 	listener    net.Listener
 	externalURL string
 	done        chan struct{}
+	serveDone   chan struct{}
+	ctx         context.Context
+	cancel      context.CancelFunc
+	closeOnce   sync.Once
+	closeErr    error
+	handlers    sync.WaitGroup
 }
 
 // StartRelay creates a local SOCKS5 relay on 127.0.0.1 (random port)
@@ -35,10 +43,14 @@ func StartRelay(externalProxyURL string) (*Relay, error) {
 		return nil, fmt.Errorf("proxy relay: listen: %w", err)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	r := &Relay{
 		listener:    listener,
 		externalURL: externalProxyURL,
 		done:        make(chan struct{}),
+		serveDone:   make(chan struct{}),
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 
 	go r.serve()
@@ -53,11 +65,18 @@ func (r *Relay) Addr() string {
 
 // Close stops the relay.
 func (r *Relay) Close() error {
-	close(r.done)
-	return r.listener.Close()
+	r.closeOnce.Do(func() {
+		r.cancel()
+		close(r.done)
+		r.closeErr = r.listener.Close()
+		<-r.serveDone
+		r.handlers.Wait()
+	})
+	return r.closeErr
 }
 
 func (r *Relay) serve() {
+	defer close(r.serveDone)
 	for {
 		conn, err := r.listener.Accept()
 		if err != nil {
@@ -68,12 +87,18 @@ func (r *Relay) serve() {
 				continue
 			}
 		}
-		go r.handle(conn)
+		r.handlers.Add(1)
+		go func() {
+			defer r.handlers.Done()
+			r.handle(conn)
+		}()
 	}
 }
 
 func (r *Relay) handle(client net.Conn) {
 	defer client.Close()
+	stopClientClose := context.AfterFunc(r.ctx, func() { _ = client.Close() })
+	defer stopClientClose()
 
 	// ── SOCKS5 handshake (no auth) ──────────────────────────────────
 	buf := make([]byte, 258)
@@ -135,13 +160,17 @@ func (r *Relay) handle(client net.Conn) {
 	}
 
 	// ── Connect through external proxy ──────────────────────────────
-	remote, err := dialExternal(r.externalURL, target)
+	dialCtx, cancel := context.WithTimeout(r.ctx, 10*time.Second)
+	remote, err := dialExternal(dialCtx, r.externalURL, target)
+	cancel()
 	if err != nil {
 		slog.Debug("proxy relay: dial failed", "target", target, "error", err)
 		client.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
 	defer remote.Close()
+	stopRemoteClose := context.AfterFunc(r.ctx, func() { _ = remote.Close() })
+	defer stopRemoteClose()
 
 	// 4. Reply: success
 	client.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
@@ -155,7 +184,7 @@ func (r *Relay) handle(client net.Conn) {
 }
 
 // dialExternal connects to the target through the external proxy.
-func dialExternal(proxyURL, target string) (net.Conn, error) {
+func dialExternal(ctx context.Context, proxyURL, target string) (net.Conn, error) {
 	u, err := url.Parse(proxyURL)
 	if err != nil {
 		return nil, err
@@ -163,15 +192,15 @@ func dialExternal(proxyURL, target string) (net.Conn, error) {
 
 	switch u.Scheme {
 	case "socks5", "socks5h":
-		return dialExternalSocks5(u, target)
+		return dialExternalSocks5(ctx, u, target)
 	case "http", "https":
-		return dialExternalHTTPConnect(u, target)
+		return dialExternalHTTPConnect(ctx, u, target)
 	default:
 		return nil, fmt.Errorf("unsupported proxy scheme: %s", u.Scheme)
 	}
 }
 
-func dialExternalSocks5(u *url.URL, target string) (net.Conn, error) {
+func dialExternalSocks5(ctx context.Context, u *url.URL, target string) (net.Conn, error) {
 	var auth *xproxy.Auth
 	if u.User != nil {
 		pass, _ := u.User.Password()
@@ -182,13 +211,56 @@ func dialExternalSocks5(u *url.URL, target string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	if contextDialer, ok := dialer.(xproxy.ContextDialer); ok {
+		return contextDialer.DialContext(ctx, "tcp", target)
+	}
 	return dialer.Dial("tcp", target)
 }
 
-func dialExternalHTTPConnect(u *url.URL, target string) (net.Conn, error) {
-	conn, err := net.DialTimeout("tcp", u.Host, 10*time.Second)
+func dialExternalHTTPConnect(ctx context.Context, u *url.URL, target string) (net.Conn, error) {
+	return dialExternalHTTPConnectWithTLSConfig(ctx, u, target, nil)
+}
+
+func dialExternalHTTPConnectWithTLSConfig(ctx context.Context, u *url.URL, target string, tlsConfig *tls.Config) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", u.Host)
 	if err != nil {
 		return nil, fmt.Errorf("connect to proxy: %w", err)
+	}
+	connectionOK := false
+	defer func() {
+		if !connectionOK {
+			_ = conn.Close()
+		}
+	}()
+
+	if u.Scheme == "https" {
+		config := &tls.Config{ //nolint:gosec -- certificate verification remains enabled.
+			MinVersion: tls.VersionTLS12,
+			ServerName: u.Hostname(),
+		}
+		if tlsConfig != nil {
+			config = tlsConfig.Clone()
+			if config.ServerName == "" {
+				config.ServerName = u.Hostname()
+			}
+			if config.MinVersion == 0 {
+				config.MinVersion = tls.VersionTLS12
+			}
+		}
+		tlsConn := tls.Client(conn, config)
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			return nil, fmt.Errorf("TLS handshake with HTTPS proxy: %w", err)
+		}
+		conn = tlsConn
+	}
+
+	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClose()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			return nil, fmt.Errorf("set proxy CONNECT deadline: %w", err)
+		}
 	}
 
 	// Build CONNECT request with Basic auth
@@ -202,20 +274,21 @@ func dialExternalHTTPConnect(u *url.URL, target string) (net.Conn, error) {
 	req += "\r\n"
 
 	if _, err := conn.Write([]byte(req)); err != nil {
-		conn.Close()
 		return nil, fmt.Errorf("send CONNECT: %w", err)
 	}
 
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, &http.Request{Method: "CONNECT"})
 	if err != nil {
-		conn.Close()
 		return nil, fmt.Errorf("read CONNECT response: %w", err)
 	}
 	if resp.StatusCode != 200 {
-		conn.Close()
 		return nil, fmt.Errorf("CONNECT rejected: %s", resp.Status)
 	}
 
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return nil, fmt.Errorf("clear proxy CONNECT deadline: %w", err)
+	}
+	connectionOK = true
 	return conn, nil
 }
