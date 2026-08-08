@@ -22,7 +22,7 @@ import (
 //	API:     Auth (if enabled) → RateLimit
 //
 // Health and receipt verification endpoints are intentionally outside auth.
-func NewRouter(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient *llm.Client, receiptSigner *receipts.Signer, cfg *config.Config, cc *cache.Cache, startTime time.Time) *gin.Engine {
+func NewRouter(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient *llm.Client, receiptSigner *receipts.Signer, cfg *config.Config, cc *cache.Cache, startTime time.Time, scrapeRunner handler.ScrapeRunner) *gin.Engine {
 	gin.SetMode(cfg.Server.Mode)
 
 	r := gin.New()
@@ -46,7 +46,7 @@ func NewRouter(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient *llm.Client, 
 	protected.Use(middleware.RateLimit(cfg.RateLimit))
 
 	// Scrape
-	protected.POST("/scrape", handler.Scrape(sc, cl, cc))
+	protected.POST("/scrape", handler.Scrape(scrapeRunner))
 
 	// Extract (structured extraction via LLM)
 	protected.POST("/extract", handler.Extract(sc, cl, llmClient, receiptSigner))

@@ -17,6 +17,7 @@ import (
 	"github.com/use-agent/purify/engine"
 	"github.com/use-agent/purify/llm"
 	"github.com/use-agent/purify/receipts"
+	"github.com/use-agent/purify/scrape"
 	"github.com/use-agent/purify/scraper"
 	"github.com/use-agent/purify/snapshot"
 )
@@ -70,53 +71,26 @@ func main() {
 		slog.Info("snapshot store disabled")
 	}
 
-	// ── 3b. Initialise multi-engine dispatcher ─────────────────────
-	if cfg.Engine.EnableMultiEngine {
-		// Rod callback: wraps the scraper's DoScrapeRod (bypasses the dispatcher).
-		// This closure avoids a circular import (engine/ never imports scraper/).
-		rodFetch := func(ctx context.Context, req *engine.FetchRequest) (*engine.FetchResult, error) {
-			scrapeReq := scraper.ScrapeRequestFromFetchRequest(req)
-
-			result, err := sc.DoScrapeRod(ctx, scrapeReq)
-			if err != nil {
-				return nil, err
-			}
-			return &engine.FetchResult{
-				HTML:        result.RawHTML,
-				Title:       result.Title,
-				StatusCode:  result.StatusCode,
-				FinalURL:    result.FinalURL,
-				ContentType: result.ContentType,
-			}, nil
-		}
-
-		httpEngine := engine.NewHTTPEngine(cfg.Browser.DefaultProxy)
-		rodEngine := engine.NewRodEngine(rodFetch, false)
-		rodStealthEngine := engine.NewRodEngine(rodFetch, true)
-
-		engines := []engine.Engine{httpEngine, rodEngine, rodStealthEngine}
-		memory := engine.NewDomainMemory(24 * time.Hour)
-		dispatcher := engine.NewDispatcher(engines, cfg.Engine.EscalationDelays, memory)
-
-		sc.SetDispatcher(dispatcher)
-		slog.Info("multi-engine dispatcher enabled",
-			"engines", len(engines),
-			"delays", cfg.Engine.EscalationDelays,
-		)
-	}
-
 	// ── 4. Initialise cleaner ───────────────────────────────────────
 	cl := cleaner.NewCleaner()
 
 	// ── 4b. Initialise cache ────────────────────────────────────────
 	cc := cache.New(cfg.Cache.MaxEntries)
+	defer cc.Close()
 
-	// ── 4c. Initialise LLM client ───────────────────────────────────
+	// ── 4c. Initialise the canonical ordered scrape service ─────────
+	scrapeService, err := newCanonicalScrapeService(sc, cl, cc, cfg)
+	if err != nil {
+		slog.Error("failed to initialise canonical scrape service", "error", err)
+		os.Exit(1)
+	}
+
+	// ── 4d. Initialise LLM client ───────────────────────────────────
 	llmClient := llm.NewClient(nil)
 
 	// ── 5. Setup router ─────────────────────────────────────────────
 	startTime := time.Now()
-	router := api.NewRouter(sc, cl, llmClient, receiptSigner, cfg, cc, startTime)
+	router := api.NewRouter(sc, cl, llmClient, receiptSigner, cfg, cc, startTime, scrapeService)
 
 	// ── 6. Start HTTP server ────────────────────────────────────────
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -151,6 +125,60 @@ func main() {
 
 	// sc.Close() runs via defer — drains page pool and kills Chrome.
 	slog.Info("purify stopped")
+}
+
+func newCanonicalScrapeService(sc *scraper.Scraper, cl *cleaner.Cleaner, cc *cache.Cache, cfg *config.Config) (*scrape.Service, error) {
+	if sc == nil || cl == nil || cfg == nil {
+		return nil, fmt.Errorf("canonical scrape service requires scraper, cleaner, and config")
+	}
+
+	// Rod callbacks bypass the legacy dispatcher. The canonical service owns
+	// ordered escalation and persists only the quality-selected candidate.
+	rodFetch := func(ctx context.Context, request *engine.FetchRequest) (*engine.FetchResult, error) {
+		scrapeRequest := scraper.ScrapeRequestFromFetchRequest(request)
+		result, err := sc.DoScrapeRod(ctx, scrapeRequest)
+		if err != nil {
+			return nil, err
+		}
+		return &engine.FetchResult{
+			HTML:        result.RawHTML,
+			Title:       result.Title,
+			StatusCode:  result.StatusCode,
+			FinalURL:    result.FinalURL,
+			ContentType: result.ContentType,
+		}, nil
+	}
+
+	rodEngine := engine.NewRodEngine(rodFetch, false)
+	stealthEngine := engine.NewRodEngine(rodFetch, true)
+	backends := []engine.Engine{rodEngine, stealthEngine}
+	if cfg.Engine.EnableMultiEngine {
+		httpEngine := engine.NewHTTPEngine(cfg.Browser.DefaultProxy)
+		backends = []engine.Engine{httpEngine, rodEngine, stealthEngine}
+
+		// Batch/Crawl/Extract still call Scraper.DoScrape during their staged
+		// migration. Keep their dispatcher configured until those adapters move
+		// to the canonical service as well.
+		memory := engine.NewDomainMemory(24 * time.Hour)
+		sc.SetDispatcher(engine.NewDispatcher(backends, cfg.Engine.EscalationDelays, memory))
+		slog.Info("legacy multi-engine dispatcher enabled during service migration",
+			"engines", len(backends),
+			"delays", cfg.Engine.EscalationDelays,
+		)
+	}
+
+	fetchers := make([]scrape.Fetcher, 0, len(backends))
+	for _, backend := range backends {
+		fetcher, err := scrape.NewEngineFetcher(backend)
+		if err != nil {
+			return nil, err
+		}
+		fetchers = append(fetchers, fetcher)
+	}
+
+	return scrape.NewService(fetchers, cl, cc, sc, scrape.Config{
+		MaximumTimeout: cfg.Scraper.MaxTimeout,
+	})
 }
 
 func openSnapshotStore(cfg config.StorageConfig) (*snapshot.Store, error) {

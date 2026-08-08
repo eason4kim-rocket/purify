@@ -40,7 +40,7 @@ func TestReceiptRoutesRemainPublicWhenAPIAuthIsEnabled(t *testing.T) {
 		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
 		RateLimit: config.RateLimitConfig{RequestsPerSecond: 100, Burst: 100},
 	}
-	router := NewRouter(nil, nil, nil, signer, cfg, cache.New(1), time.Now())
+	router := NewRouter(nil, nil, nil, signer, cfg, cache.New(1), time.Now(), nil)
 
 	requestBody, _ := json.Marshal(map[string]string{"receipt": token})
 	verifyRequest := httptest.NewRequest(http.MethodPost, "/api/v1/receipts/verify", bytes.NewReader(requestBody))

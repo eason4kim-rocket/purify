@@ -226,8 +226,39 @@ func TestServiceReturnsContentUnusableAfterAllCandidatesRejected(t *testing.T) {
 		t.Fatalf("Run() error = %#v, want CONTENT_UNUSABLE", err)
 	}
 	assertEventTypes(t, events, []EventType{EventStarted, EventAttempt, EventAttempt, EventError})
-	if events[len(events)-1].Response == nil || events[len(events)-1].Response.Error.Code != models.ErrCodeContentUnusable {
+	terminal := events[len(events)-1].Response
+	if terminal == nil || terminal.Error.Code != models.ErrCodeContentUnusable {
 		t.Fatalf("error event = %#v", events[len(events)-1])
+	}
+	if terminal.Quality == nil || terminal.Quality.Status != models.QualityStatusUnusable ||
+		len(terminal.Quality.FetchAttempts) != 2 || terminal.Quality.FetchAttempts[1].Reason != models.QualityReasonChallengePage {
+		t.Fatalf("terminal quality = %#v", terminal.Quality)
+	}
+}
+
+func TestServiceErrorEventIncludesFailedFetchAttempts(t *testing.T) {
+	fetchErr := errors.New("dial failed")
+	service := mustService(t, []Fetcher{
+		&fakeFetcher{name: "http", supported: true, err: fetchErr},
+		&fakeFetcher{name: "rod", supported: true, err: fetchErr},
+	}, &fakeCleaner{}, nil, nil)
+	var terminal *models.ScrapeResponse
+	_, err := service.Run(context.Background(), &models.ScrapeRequest{URL: "https://example.com"}, func(event Event) {
+		if event.Type == EventError {
+			terminal = event.Response
+		}
+	})
+	if err == nil {
+		t.Fatal("Run() error = nil")
+	}
+	if terminal == nil || terminal.Quality == nil || terminal.Quality.Status != models.QualityStatusUnusable ||
+		terminal.Quality.Warnings == nil || len(terminal.Quality.FetchAttempts) != 2 {
+		t.Fatalf("terminal response = %#v", terminal)
+	}
+	for _, attempt := range terminal.Quality.FetchAttempts {
+		if attempt.Outcome != models.FetchAttemptFailed {
+			t.Fatalf("attempt = %#v, want failed", attempt)
+		}
 	}
 }
 

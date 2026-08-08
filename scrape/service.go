@@ -257,7 +257,7 @@ func (s *Service) Run(ctx context.Context, request *models.ScrapeRequest, observ
 	}
 
 	terminalErr := terminalError(requestCtx, supported, lastErr, lastRejected)
-	s.emitError(observe, req.URL, startedAt, terminalErr)
+	s.emitErrorWithQuality(observe, req.URL, startedAt, terminalErr, terminalQualityInfo(attempts, lastRejected))
 	return nil, terminalErr
 }
 
@@ -269,13 +269,35 @@ func (s *Service) finalize(req *models.ScrapeRequest, source *scraper.ScrapeResu
 }
 
 func (s *Service) emitError(observe Observer, target string, startedAt time.Time, err error) {
+	s.emitErrorWithQuality(observe, target, startedAt, err, nil)
+}
+
+func (s *Service) emitErrorWithQuality(observe Observer, target string, startedAt time.Time, err error, qualityInfo *models.QualityInfo) {
 	scrapeErr := asScrapeError(err)
 	response := &models.ScrapeResponse{
 		Success: false,
 		Error:   scrapeErr.ToDetail(),
+		Quality: qualityInfo,
 		Timing:  models.TimingInfo{TotalMs: elapsedMilliseconds(startedAt, s.now())},
 	}
 	emit(observe, Event{Type: EventError, URL: target, Response: response})
+}
+
+func terminalQualityInfo(attempts []models.FetchAttempt, lastRejected *quality.Assessment) *models.QualityInfo {
+	if len(attempts) == 0 {
+		return nil
+	}
+	info := models.QualityInfo{
+		Status:        models.QualityStatusUnusable,
+		Warnings:      []models.QualityReason{},
+		FetchAttempts: slices.Clone(attempts),
+	}
+	if lastRejected != nil {
+		info = lastRejected.Info
+		info.Warnings = slices.Clone(lastRejected.Info.Warnings)
+		info.FetchAttempts = slices.Clone(attempts)
+	}
+	return &info
 }
 
 func emit(observer Observer, event Event) {
