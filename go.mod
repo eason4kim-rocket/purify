@@ -12,6 +12,7 @@ require (
 	github.com/go-shiori/go-readability v0.0.0-20251205110129-5db1dc9836f0
 	github.com/mark3labs/mcp-go v0.44.0
 	github.com/refraction-networking/utls v1.8.2
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/ysmood/gson v0.7.3
 	golang.org/x/net v0.47.0
 	golang.org/x/time v0.14.0

@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -11,6 +13,11 @@ import (
 	"github.com/use-agent/purify/scraper"
 )
 
+type structuredExtractor interface {
+	Extract(context.Context, string, json.RawMessage, llm.ExtractParams) (*llm.ExtractResult, error)
+	ExtractWithRepair(context.Context, string, json.RawMessage, json.RawMessage, []llm.Violation, llm.ExtractParams) (*llm.ExtractResult, error)
+}
+
 // Extract returns a handler for POST /api/v1/extract.
 //
 // Flow:
@@ -19,7 +26,7 @@ import (
 //  3. Clean (with optional CSS selector) → content.
 //  4. LLM Extract → structured JSON.
 //  5. Assemble response with timing and LLM usage.
-func Extract(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient *llm.Client) gin.HandlerFunc {
+func Extract(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient structuredExtractor) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		totalStart := time.Now()
 
@@ -36,6 +43,20 @@ func Extract(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient *llm.Client) gi
 			return
 		}
 		req.Defaults()
+		normalizedSchema, err := llm.NormalizeSchema(req.Schema)
+		if err != nil {
+			respondExtractError(c, models.NewScrapeError(models.ErrCodeInvalidInput, "invalid JSON schema", err), models.ExtractTimingInfo{
+				TotalMs: time.Since(totalStart).Milliseconds(),
+			})
+			return
+		}
+		if err := llm.ValidateSchema(normalizedSchema); err != nil {
+			respondExtractError(c, models.NewScrapeError(models.ErrCodeInvalidInput, "invalid JSON schema", err), models.ExtractTimingInfo{
+				TotalMs: time.Since(totalStart).Milliseconds(),
+			})
+			return
+		}
+		req.Schema = normalizedSchema
 
 		// ── 2. Scrape ───────────────────────────────────────────────
 		scrapeReq := req.ToScrapeRequest()
@@ -81,7 +102,7 @@ func Extract(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient *llm.Client) gi
 
 		// ── 4. LLM Extract ──────────────────────────────────────────
 		extractStart := time.Now()
-		llmResult, err := llmClient.Extract(c.Request.Context(), scrapeResp.Content, req.Schema, llm.ExtractParams{
+		llmResult, violations, err := extractWithValidation(c.Request.Context(), llmClient, scrapeResp.Content, req.Schema, llm.ExtractParams{
 			APIKey:  req.LLMAPIKey,
 			Model:   req.LLMModel,
 			BaseURL: req.LLMBaseURL,
@@ -90,29 +111,83 @@ func Extract(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient *llm.Client) gi
 
 		if err != nil {
 			respondExtractError(c, err, models.ExtractTimingInfo{
-				TotalMs:        time.Since(totalStart).Milliseconds(),
-				NavigationMs:   navigationMs,
-				CleaningMs:     cleaningMs,
-				ExtractionMs:   extractionMs,
+				TotalMs:      time.Since(totalStart).Milliseconds(),
+				NavigationMs: navigationMs,
+				CleaningMs:   cleaningMs,
+				ExtractionMs: extractionMs,
 			})
 			return
 		}
 
 		// ── 5. Assemble response ────────────────────────────────────
 		c.JSON(http.StatusOK, models.ExtractResponse{
-			Success:  true,
-			Data:     llmResult.Data,
-			Metadata: scrapeResp.Metadata,
-			Tokens:   scrapeResp.Tokens,
+			Success:    true,
+			Data:       llmResult.Data,
+			Partial:    len(violations) > 0,
+			Violations: violations,
+			Metadata:   scrapeResp.Metadata,
+			Tokens:     scrapeResp.Tokens,
 			Timing: models.ExtractTimingInfo{
-				TotalMs:        time.Since(totalStart).Milliseconds(),
-				NavigationMs:   navigationMs,
-				CleaningMs:     cleaningMs,
-				ExtractionMs:   extractionMs,
+				TotalMs:      time.Since(totalStart).Milliseconds(),
+				NavigationMs: navigationMs,
+				CleaningMs:   cleaningMs,
+				ExtractionMs: extractionMs,
 			},
 			LLMUsage: llmResult.Usage,
 		})
 	}
+}
+
+// extractWithValidation performs exactly one initial extraction and, only
+// when necessary, one repair attempt. It returns the best valid JSON value and
+// any violations that remain after the bounded repair.
+func extractWithValidation(
+	ctx context.Context,
+	client structuredExtractor,
+	content string,
+	schema json.RawMessage,
+	params llm.ExtractParams,
+) (*llm.ExtractResult, []llm.Violation, error) {
+	result, err := client.Extract(ctx, content, schema, params)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	violations, err := llm.ValidateAgainstSchema(schema, result.Data)
+	if err != nil {
+		return nil, nil, models.NewScrapeError(models.ErrCodeInvalidInput, "invalid JSON schema", err)
+	}
+	if len(violations) == 0 {
+		return result, nil, nil
+	}
+
+	repaired, err := client.ExtractWithRepair(ctx, content, schema, result.Data, violations, params)
+	if err != nil {
+		return nil, nil, err
+	}
+	repaired.Usage = addLLMUsage(result.Usage, repaired.Usage)
+
+	remaining, err := llm.ValidateAgainstSchema(schema, repaired.Data)
+	if err != nil {
+		return nil, nil, models.NewScrapeError(models.ErrCodeInvalidInput, "invalid JSON schema", err)
+	}
+	return repaired, remaining, nil
+}
+
+func addLLMUsage(first, second *models.LLMUsage) *models.LLMUsage {
+	if first == nil && second == nil {
+		return nil
+	}
+	total := &models.LLMUsage{}
+	for _, usage := range []*models.LLMUsage{first, second} {
+		if usage == nil {
+			continue
+		}
+		total.PromptTokens += usage.PromptTokens
+		total.CompletionTokens += usage.CompletionTokens
+		total.TotalTokens += usage.TotalTokens
+	}
+	return total
 }
 
 // respondExtractError maps a ScrapeError to the correct HTTP status and writes

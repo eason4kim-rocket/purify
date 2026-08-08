@@ -45,7 +45,6 @@ type ExtractRequest struct {
 
 	// ProxyURL overrides the default proxy for this request.
 	ProxyURL string `json:"proxy_url,omitempty" binding:"omitempty,url"`
-
 }
 
 // Defaults applies default values to unset fields.
@@ -93,6 +92,13 @@ type ExtractResponse struct {
 	// Data is the structured JSON extracted by the LLM.
 	Data json.RawMessage `json:"data,omitempty"`
 
+	// Partial is true when the best available LLM output still violates the
+	// requested JSON Schema after one bounded repair attempt.
+	Partial bool `json:"partial,omitempty"`
+
+	// Violations explains why a partial response does not satisfy the schema.
+	Violations []SchemaViolation `json:"violations,omitempty"`
+
 	// Metadata contains extracted page metadata.
 	Metadata Metadata `json:"metadata"`
 
@@ -109,12 +115,20 @@ type ExtractResponse struct {
 	Error *ErrorDetail `json:"error,omitempty"`
 }
 
+// SchemaViolation identifies one location where extracted data does not
+// satisfy the caller-provided JSON Schema. Path uses JSON Pointer syntax and
+// "$" denotes the document root.
+type SchemaViolation struct {
+	Path    string `json:"path"`
+	Message string `json:"message"`
+}
+
 // ExtractTimingInfo extends TimingInfo with extraction timing.
 type ExtractTimingInfo struct {
-	TotalMs        int64 `json:"total_ms"`
-	NavigationMs   int64 `json:"navigation_ms"`
-	CleaningMs     int64 `json:"cleaning_ms"`
-	ExtractionMs   int64 `json:"extraction_ms"`
+	TotalMs      int64 `json:"total_ms"`
+	NavigationMs int64 `json:"navigation_ms"`
+	CleaningMs   int64 `json:"cleaning_ms"`
+	ExtractionMs int64 `json:"extraction_ms"`
 }
 
 // LLMUsage reports token consumption from the LLM call.

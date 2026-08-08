@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/use-agent/purify/models"
 )
@@ -54,7 +56,14 @@ type chatMessage struct {
 }
 
 type responseFormat struct {
-	Type string `json:"type"`
+	Type       string            `json:"type"`
+	JSONSchema *jsonSchemaFormat `json:"json_schema,omitempty"`
+}
+
+type jsonSchemaFormat struct {
+	Name   string          `json:"name"`
+	Strict bool            `json:"strict"`
+	Schema json.RawMessage `json:"schema"`
 }
 
 // chatResponse is the minimal OpenAI chat completion response we need.
@@ -80,18 +89,103 @@ type chatErrorResponse struct {
 	} `json:"error"`
 }
 
+// rfSupport caches whether an OpenAI-compatible base URL accepts strict
+// response_format=json_schema. Unknown providers are probed on first use.
+var rfSupport sync.Map // normalized baseURL -> bool
+
+type providerResponseError struct {
+	status int
+	body   []byte
+}
+
+func (e *providerResponseError) Error() string {
+	return fmt.Sprintf("LLM API returned HTTP %d", e.status)
+}
+
 // Extract sends the cleaned content + schema to the LLM and returns structured JSON.
 func (c *Client) Extract(ctx context.Context, content string, schema json.RawMessage, params ExtractParams) (*ExtractResult, error) {
-	systemPrompt := buildSystemPrompt(schema)
+	return c.extract(ctx, schema, params, []chatMessage{
+		{Role: "system", Content: buildSystemPrompt(schema)},
+		{Role: "user", Content: content},
+	})
+}
+
+// ExtractWithRepair performs the one allowed schema-repair attempt. The
+// previous output and concrete violations are supplied so the model can make
+// the smallest necessary correction without rewriting valid fields.
+func (c *Client) ExtractWithRepair(
+	ctx context.Context,
+	content string,
+	schema, previous json.RawMessage,
+	violations []Violation,
+	params ExtractParams,
+) (*ExtractResult, error) {
+	return c.extract(ctx, schema, params, []chatMessage{
+		{Role: "system", Content: buildRepairPrompt(schema, violations)},
+		{Role: "user", Content: fmt.Sprintf("Source content:\n%s\n\nPrevious JSON output:\n%s", content, previous)},
+	})
+}
+
+func (c *Client) extract(ctx context.Context, schema json.RawMessage, params ExtractParams, messages []chatMessage) (*ExtractResult, error) {
+	baseURL := strings.TrimRight(params.BaseURL, "/")
+	strict := true
+	if supported, ok := rfSupport.Load(baseURL); ok {
+		strict = supported.(bool)
+	}
+
+	result, err := c.sendChat(ctx, schema, params, messages, strict)
+	if err == nil {
+		if strict {
+			rfSupport.Store(baseURL, true)
+		}
+		return result, nil
+	}
+
+	var providerErr *providerResponseError
+	if strict && errors.As(err, &providerErr) && providerErr.status == http.StatusBadRequest &&
+		strings.Contains(strings.ToLower(string(providerErr.body)), "response_format") {
+		rfSupport.Store(baseURL, false)
+		result, fallbackErr := c.sendChat(ctx, schema, params, messages, false)
+		if fallbackErr != nil {
+			return nil, normalizeProviderError(fallbackErr)
+		}
+		return result, nil
+	}
+	return nil, normalizeProviderError(err)
+}
+
+func normalizeProviderError(err error) error {
+	var providerErr *providerResponseError
+	if errors.As(err, &providerErr) {
+		return classifyLLMError(providerErr.status, providerErr.body)
+	}
+	return err
+}
+
+func (c *Client) sendChat(
+	ctx context.Context,
+	schema json.RawMessage,
+	params ExtractParams,
+	messages []chatMessage,
+	strict bool,
+) (*ExtractResult, error) {
+	format := &responseFormat{Type: "json_object"}
+	if strict {
+		format = &responseFormat{
+			Type: "json_schema",
+			JSONSchema: &jsonSchemaFormat{
+				Name:   "purify_extract",
+				Strict: true,
+				Schema: schema,
+			},
+		}
+	}
 
 	reqBody := chatRequest{
-		Model: params.Model,
-		Messages: []chatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: content},
-		},
+		Model:          params.Model,
+		Messages:       messages,
 		Temperature:    0,
-		ResponseFormat: &responseFormat{Type: "json_object"},
+		ResponseFormat: format,
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
@@ -122,7 +216,7 @@ func (c *Client) Extract(ctx context.Context, content string, schema json.RawMes
 
 	// Handle error status codes.
 	if resp.StatusCode != http.StatusOK {
-		return nil, classifyLLMError(resp.StatusCode, respBody)
+		return nil, &providerResponseError{status: resp.StatusCode, body: respBody}
 	}
 
 	var chatResp chatResponse
@@ -162,6 +256,24 @@ Rules:
 - Return ONLY valid JSON, no markdown fences or explanation.
 - If a field cannot be found in the content, use null.
 - Extract exactly the fields specified in the schema.`, string(schema))
+}
+
+func buildRepairPrompt(schema json.RawMessage, violations []Violation) string {
+	violationJSON, _ := json.Marshal(violations)
+	return fmt.Sprintf(`You repair structured extraction JSON. Return a corrected JSON value that strictly matches the schema.
+
+Schema:
+%s
+
+Validation violations from the previous output:
+%s
+
+Rules:
+- Return ONLY valid JSON, with no markdown fences or explanation.
+- Preserve every field from the previous output that is already correct.
+- Change only fields needed to resolve the listed violations.
+- Use the source content as the sole factual basis.
+- Include exactly the fields allowed by the schema.`, string(schema), string(violationJSON))
 }
 
 // classifyLLMError maps HTTP status codes to appropriate error codes.
