@@ -24,15 +24,14 @@ import (
 // with Rod fallback via engine racing). Otherwise it falls through to the
 // direct Rod-based scraping path.
 func (s *Scraper) DoScrape(ctx context.Context, req *models.ScrapeRequest) (*ScrapeResult, error) {
+	timeout := s.scrapeTimeout(req)
+	requestCtx, requestCancel := context.WithTimeout(ctx, timeout)
+	defer requestCancel()
+
 	// ── 0. Multi-engine dispatch ────────────────────────────────────
 	// If the dispatcher is configured AND the request has no Actions AND
 	// no CDPURL, delegate to the multi-engine dispatcher for a faster path.
 	if s.dispatcher != nil && len(req.Actions) == 0 && req.CDPURL == "" {
-		timeout := time.Duration(req.Timeout) * time.Second
-		if timeout > s.scraperCfg.MaxTimeout {
-			timeout = s.scraperCfg.MaxTimeout
-		}
-
 		cookies := make([]http.Cookie, len(req.Cookies))
 		for i, c := range req.Cookies {
 			cookies[i] = http.Cookie{
@@ -51,10 +50,7 @@ func (s *Scraper) DoScrape(ctx context.Context, req *models.ScrapeRequest) (*Scr
 			Stealth: req.Stealth,
 		}
 
-		dispatchCtx, dispatchCancel := context.WithTimeout(ctx, timeout)
-		defer dispatchCancel()
-
-		result, err := s.dispatcher.Dispatch(dispatchCtx, fetchReq)
+		result, err := s.dispatcher.Dispatch(requestCtx, fetchReq)
 		if err == nil {
 			return s.finalizeScrape(req, &ScrapeResult{
 				RawHTML:     result.HTML,
@@ -71,11 +67,25 @@ func (s *Scraper) DoScrape(ctx context.Context, req *models.ScrapeRequest) (*Scr
 			"url", req.URL, "error", err)
 	}
 
-	result, err := s.doScrapeRod(ctx, req)
+	result, err := s.doScrapeRod(requestCtx, req)
 	if err != nil {
 		return nil, err
 	}
 	return s.finalizeScrape(req, result)
+}
+
+func (s *Scraper) scrapeTimeout(req *models.ScrapeRequest) time.Duration {
+	timeout := s.scraperCfg.DefaultTimeout
+	if req != nil && req.Timeout > 0 {
+		timeout = time.Duration(req.Timeout) * time.Second
+	}
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	if s.scraperCfg.MaxTimeout > 0 && timeout > s.scraperCfg.MaxTimeout {
+		timeout = s.scraperCfg.MaxTimeout
+	}
+	return timeout
 }
 
 func (s *Scraper) finalizeScrape(req *models.ScrapeRequest, result *ScrapeResult) (*ScrapeResult, error) {
@@ -125,7 +135,7 @@ func (s *Scraper) DoScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 //  4. Stealth injection      – mask navigator.webdriver etc. (before navigation!)
 //  5. Hijack mount           – block images/CSS/fonts/media (before navigation!)
 //  6. Context binding        – propagate timeout to all Rod operations
-//  7. Idle listener setup    – MUST be registered before Navigate to capture all requests
+//  7. Activity tracker setup – MUST be registered before Navigate to capture fetch/XHR
 //  8. Navigate               – triggers page load
 //  9. Wait                   – network idle or DOM stable
 //  10. Extract               – page.HTML() + document.title
@@ -133,17 +143,14 @@ func (s *Scraper) DoScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 // Why this order matters:
 //   - Steps 4-5 MUST happen before step 8: stealth JS and resource blocking only
 //     take effect for navigations that happen after they are installed.
-//   - Step 7 MUST happen before step 8: WaitRequestIdle sets up a CDP listener;
-//     if we set it up after Navigate, we would miss in-flight requests and the
-//     wait would return instantly (false idle).
+//   - Step 7 MUST happen before step 8: the in-page network tracker wraps
+//     fetch/XHR in every new document, so installing it after Navigate would
+//     miss early requests and could report a false idle.
 //   - Step 3's about:blank uses the ORIGINAL page reference (without request
 //     context), so cleanup succeeds even if the request context has expired.
 func (s *Scraper) doScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*ScrapeResult, error) {
 	// ── 1. Timeout guard ──────────────────────────────────────────────
-	timeout := time.Duration(req.Timeout) * time.Second
-	if timeout > s.scraperCfg.MaxTimeout {
-		timeout = s.scraperCfg.MaxTimeout
-	}
+	timeout := s.scrapeTimeout(req)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -231,10 +238,17 @@ func (s *Scraper) doScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 	// ── 6. Bind request context to page ───────────────────────────────
 	p := page.Context(ctx)
 
-	// ── 7. Set up network idle waiter BEFORE navigation ───────────────
-	// NOTE: WaitRequestIdle uses the Fetch domain which conflicts with
-	// HijackRequests on Chromium 145+. Use WaitDOMStable as fallback.
-	var waitIdle func()
+	// ── 7. Install network activity tracking BEFORE navigation ────────
+	// CDP WaitRequestIdle conflicts with Fetch-domain request hijacking on
+	// recent Chromium. The in-page tracker observes fetch/XHR without enabling
+	// a second interception domain and lets us honor wait_for_network_idle.
+	if networkIdleRequested(req) {
+		removeTracker, trackerErr := installNetworkTracker(p)
+		if trackerErr != nil {
+			return nil, categorizeError(trackerErr, "failed to install network idle tracker")
+		}
+		defer func() { _ = removeTracker() }()
+	}
 
 	// ── 7b. Status code capture ──────────────────────────────────────
 	// NOTE: page.EachEvent(NetworkResponseReceived) causes ERR_BLOCKED_BY_CLIENT
@@ -250,15 +264,9 @@ func (s *Scraper) doScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 		return nil, categorizeError(navErr, "navigation to target URL failed")
 	}
 
-	// ── 9. Wait strategy ──────────────────────────────────────────────
-	if waitIdle != nil {
-		waitIdle()
-	} else {
-		if stableErr := p.WaitDOMStable(300*time.Millisecond, 0.1); stableErr != nil {
-			slog.Debug("WaitDOMStable did not converge, proceeding with current DOM",
-				"error", stableErr,
-			)
-		}
+	// ── 9. Wait for a complete, usable document ──────────────────────
+	if waitErr := waitForDocument(p, networkIdleRequested(req)); waitErr != nil {
+		return nil, categorizeError(waitErr, "document did not become ready")
 	}
 
 	// ── 9b. Collect status code via JS (best-effort) ────────────────
@@ -283,6 +291,9 @@ func (s *Scraper) doScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 	if len(req.Actions) > 0 {
 		if err := executeActions(ctx, page, req.Actions); err != nil {
 			return nil, err
+		}
+		if waitErr := waitForPostActionStability(p, networkIdleRequested(req)); waitErr != nil {
+			return nil, categorizeError(waitErr, "document did not stabilize after actions")
 		}
 	}
 
@@ -316,6 +327,82 @@ func rodEngineName(stealthEnabled bool) string {
 		return "rod-stealth"
 	}
 	return "rod"
+}
+
+func networkIdleRequested(req *models.ScrapeRequest) bool {
+	return req != nil && req.WaitForNetworkIdle != nil && *req.WaitForNetworkIdle
+}
+
+const networkTrackerScript = `(() => {
+	if (globalThis.__purifyNetworkTrackerInstalled) return;
+	globalThis.__purifyNetworkTrackerInstalled = true;
+	let pending = 0;
+	Object.defineProperty(globalThis, '__purifyPendingRequests', {
+		configurable: true,
+		get: () => pending
+	});
+	if (typeof globalThis.fetch === 'function') {
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = function(...args) {
+			pending++;
+			try {
+				return Promise.resolve(originalFetch.apply(this, args)).finally(() => { pending = Math.max(0, pending - 1); });
+			} catch (error) {
+				pending = Math.max(0, pending - 1);
+				throw error;
+			}
+		};
+	}
+	if (typeof globalThis.XMLHttpRequest === 'function') {
+		const originalSend = globalThis.XMLHttpRequest.prototype.send;
+		globalThis.XMLHttpRequest.prototype.send = function(...args) {
+			pending++;
+			this.addEventListener('loadend', () => { pending = Math.max(0, pending - 1); }, { once: true });
+			try {
+				return originalSend.apply(this, args);
+			} catch (error) {
+				pending = Math.max(0, pending - 1);
+				throw error;
+			}
+		};
+	}
+})();`
+
+func installNetworkTracker(page *rod.Page) (func() error, error) {
+	return page.EvalOnNewDocument(networkTrackerScript)
+}
+
+func waitForDocument(page *rod.Page, networkIdle bool) error {
+	if _, err := page.Element("body"); err != nil {
+		return err
+	}
+	if err := page.WaitLoad(); err != nil {
+		return err
+	}
+	return waitForPostActionStability(page, networkIdle)
+}
+
+func waitForPostActionStability(page *rod.Page, networkIdle bool) error {
+	if networkIdle {
+		_, err := page.Eval(`() => new Promise(resolve => {
+			const quietForMs = 300;
+			let quietSince = 0;
+			const poll = () => {
+				const pending = Number(globalThis.__purifyPendingRequests || 0);
+				const bodyText = document.body ? (document.body.innerText || '').trim() : '';
+				if (document.body && document.readyState === 'complete' && pending === 0 && bodyText.length > 0) {
+					if (quietSince === 0) quietSince = Date.now();
+					if (Date.now() - quietSince >= quietForMs) return resolve(true);
+				} else {
+					quietSince = 0;
+				}
+				setTimeout(poll, 50);
+			};
+			poll();
+		})`)
+		return err
+	}
+	return page.WaitDOMStable(300*time.Millisecond, 0.1)
 }
 
 // evalStringOrEmpty evaluates a JS expression and returns the string result,
@@ -374,18 +461,21 @@ func (s *Scraper) doScrapeWithCDP(ctx context.Context, req *models.ScrapeRequest
 
 	// Bind context for timeout.
 	p := page.Context(ctx)
+	if networkIdleRequested(req) {
+		removeTracker, trackerErr := installNetworkTracker(p)
+		if trackerErr != nil {
+			return nil, categorizeError(trackerErr, "failed to install network idle tracker")
+		}
+		defer func() { _ = removeTracker() }()
+	}
 
 	// Navigate.
 	if err := p.Navigate(req.URL); err != nil {
 		return nil, categorizeError(err, "navigation to target URL failed")
 	}
 
-	// Wait for network idle or DOM stable.
-	if req.WaitForNetworkIdle != nil && *req.WaitForNetworkIdle {
-		waitIdle := p.WaitRequestIdle(300*time.Millisecond, nil, nil, nil)
-		waitIdle()
-	} else {
-		_ = p.WaitDOMStable(300*time.Millisecond, 0.1)
+	if waitErr := waitForDocument(p, networkIdleRequested(req)); waitErr != nil {
+		return nil, categorizeError(waitErr, "document did not become ready")
 	}
 
 	// Remove overlays if requested.
@@ -397,6 +487,9 @@ func (s *Scraper) doScrapeWithCDP(ctx context.Context, req *models.ScrapeRequest
 	if len(req.Actions) > 0 {
 		if err := executeActions(ctx, page, req.Actions); err != nil {
 			return nil, err
+		}
+		if waitErr := waitForPostActionStability(p, networkIdleRequested(req)); waitErr != nil {
+			return nil, categorizeError(waitErr, "document did not stabilize after actions")
 		}
 	}
 
