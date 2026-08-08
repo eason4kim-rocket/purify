@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/use-agent/purify/cleaner"
+	"github.com/use-agent/purify/evidence"
 	"github.com/use-agent/purify/llm"
 	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/scraper"
@@ -120,13 +121,25 @@ func Extract(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient structuredExtra
 		}
 
 		// ── 5. Assemble response ────────────────────────────────────
+		var basis map[string]evidence.Anchor
+		var unlocatedRate *float64
+		var snapshotID string
+		if req.Evidence {
+			aligned, rate := evidence.AlignAll(llmResult.Data, scrapeResp.Content, result.RawHTML, string(result.SnapshotID), result.FetchedAt)
+			basis = aligned
+			unlocatedRate = &rate
+			snapshotID = string(result.SnapshotID)
+		}
 		c.JSON(http.StatusOK, models.ExtractResponse{
-			Success:    true,
-			Data:       llmResult.Data,
-			Partial:    len(violations) > 0,
-			Violations: violations,
-			Metadata:   scrapeResp.Metadata,
-			Tokens:     scrapeResp.Tokens,
+			Success:       true,
+			Data:          llmResult.Data,
+			Partial:       len(violations) > 0,
+			Violations:    violations,
+			SnapshotID:    snapshotID,
+			UnlocatedRate: unlocatedRate,
+			Basis:         basis,
+			Metadata:      scrapeResp.Metadata,
+			Tokens:        scrapeResp.Tokens,
 			Timing: models.ExtractTimingInfo{
 				TotalMs:      time.Since(totalStart).Milliseconds(),
 				NavigationMs: navigationMs,

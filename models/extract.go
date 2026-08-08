@@ -1,6 +1,10 @@
 package models
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/use-agent/purify/evidence"
+)
 
 // ExtractRequest is the payload for POST /api/v1/extract.
 // It wraps a scrape operation with LLM-based structured data extraction.
@@ -45,6 +49,10 @@ type ExtractRequest struct {
 
 	// ProxyURL overrides the default proxy for this request.
 	ProxyURL string `json:"proxy_url,omitempty" binding:"omitempty,url"`
+
+	// Evidence asks Purify to align every extracted leaf value to source text
+	// and raw HTML and include field-level basis in the response.
+	Evidence bool `json:"evidence,omitempty"`
 }
 
 // Defaults applies default values to unset fields.
@@ -98,6 +106,15 @@ type ExtractResponse struct {
 
 	// Violations explains why a partial response does not satisfy the schema.
 	Violations []SchemaViolation `json:"violations,omitempty"`
+
+	// SnapshotID identifies the raw HTML used for evidence alignment.
+	SnapshotID string `json:"snapshot_id,omitempty"`
+
+	// UnlocatedRate is present in evidence mode, including when the rate is 0.
+	UnlocatedRate *float64 `json:"unlocated_rate,omitempty"`
+
+	// Basis maps JSON leaf paths to source anchors.
+	Basis map[string]evidence.Anchor `json:"basis,omitempty"`
 
 	// Metadata contains extracted page metadata.
 	Metadata Metadata `json:"metadata"`

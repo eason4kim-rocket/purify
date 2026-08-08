@@ -5,19 +5,23 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/use-agent/purify/evidence"
 )
 
 // CLI flags
 var (
-	apiURL  = flag.String("api-url", "http://localhost:8080", "Purify API base URL")
-	apiKey  = flag.String("api-key", "", "API key for authenticated requests")
-	runs    = flag.Int("runs", 3, "Number of runs per URL for averaging")
-	output  = flag.String("output", "benchmark-results.json", "JSON output file path")
+	apiURL = flag.String("api-url", "http://localhost:8080", "Purify API base URL")
+	apiKey = flag.String("api-key", "", "API key for authenticated requests")
+	runs   = flag.Int("runs", 3, "Number of runs per URL for averaging")
+	output = flag.String("output", "benchmark-results.json", "JSON output file path")
 )
 
 // Test URLs covering 5 site types.
@@ -41,13 +45,13 @@ type scrapeRequest struct {
 }
 
 type scrapeResponse struct {
-	Success    bool       `json:"success"`
-	StatusCode int        `json:"status_code"`
-	Content    string     `json:"content"`
-	Metadata   metadata   `json:"metadata"`
-	Links      links      `json:"links"`
-	Tokens     tokenInfo  `json:"tokens"`
-	Timing     timingInfo `json:"timing"`
+	Success    bool         `json:"success"`
+	StatusCode int          `json:"status_code"`
+	Content    string       `json:"content"`
+	Metadata   metadata     `json:"metadata"`
+	Links      links        `json:"links"`
+	Tokens     tokenInfo    `json:"tokens"`
+	Timing     timingInfo   `json:"timing"`
 	Error      *errorDetail `json:"error,omitempty"`
 }
 
@@ -108,20 +112,28 @@ type urlAverages struct {
 }
 
 type urlResult struct {
-	URL      string      `json:"url"`
-	Label    string      `json:"label"`
-	Runs     []runResult `json:"runs"`
+	URL      string       `json:"url"`
+	Label    string       `json:"label"`
+	Runs     []runResult  `json:"runs"`
 	Averages *urlAverages `json:"averages,omitempty"`
 }
 
 type benchmarkReport struct {
-	Timestamp string      `json:"timestamp"`
-	APIURL    string      `json:"api_url"`
-	RunsPerURL int        `json:"runs_per_url"`
-	Results   []urlResult `json:"results"`
+	Timestamp  string      `json:"timestamp"`
+	APIURL     string      `json:"api_url"`
+	RunsPerURL int         `json:"runs_per_url"`
+	Results    []urlResult `json:"results"`
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "evidence" {
+		if err := runEvidenceBenchmark(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "evidence benchmark failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	flag.Parse()
 
 	fmt.Println("=== Purify Benchmark Suite ===")
@@ -172,6 +184,100 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("\nDetailed results written to %s\n", *output)
+}
+
+type evidenceBenchmarkReport struct {
+	Timestamp       string  `json:"timestamp"`
+	Runs            int     `json:"runs"`
+	FieldsPerRun    int     `json:"fields_per_run"`
+	P50Ms           float64 `json:"p50_ms"`
+	P95Ms           float64 `json:"p95_ms"`
+	P99Ms           float64 `json:"p99_ms"`
+	ThresholdMs     float64 `json:"threshold_ms"`
+	UnlocatedRate   float64 `json:"unlocated_rate"`
+	ThresholdPassed bool    `json:"threshold_passed"`
+}
+
+func runEvidenceBenchmark(args []string) error {
+	flags := flag.NewFlagSet("evidence", flag.ContinueOnError)
+	runCount := flags.Int("runs", 1000, "number of measured AlignAll runs")
+	outputPath := flags.String("output", "", "optional JSON report path")
+	threshold := flags.Float64("threshold-ms", 30, "maximum accepted P95 in milliseconds")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *runCount < 1 {
+		return fmt.Errorf("runs must be at least 1")
+	}
+	if *threshold <= 0 {
+		return fmt.Errorf("threshold-ms must be greater than 0")
+	}
+
+	data := json.RawMessage(`{"title":"Pro Plan","price":"1299","features":["Fast reliable search","Evidence receipts"],"available":true}`)
+	cleaned := "Pro Plan costs $1,299. Fast reliable search with Evidence receipts. Available: true."
+	rawHTML := `<main><article id="pro"><h1>Pro Plan</h1><p>Pro Plan costs $1,299.</p><ul><li>Fast reliable search</li><li>Evidence receipts</li></ul><p>Available: true.</p></article></main>`
+
+	// Warm parser and allocator paths before collecting latency samples.
+	for i := 0; i < 100; i++ {
+		evidence.AlignAll(data, cleaned, rawHTML, "sha256:benchmark")
+	}
+
+	durations := make([]time.Duration, *runCount)
+	var unlocatedRate float64
+	fields := 0
+	for i := range durations {
+		started := time.Now()
+		basis, rate := evidence.AlignAll(data, cleaned, rawHTML, "sha256:benchmark")
+		durations[i] = time.Since(started)
+		fields = len(basis)
+		unlocatedRate = rate
+	}
+	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+
+	report := evidenceBenchmarkReport{
+		Timestamp:     time.Now().UTC().Format(time.RFC3339),
+		Runs:          *runCount,
+		FieldsPerRun:  fields,
+		P50Ms:         durationMilliseconds(percentileDuration(durations, 0.50)),
+		P95Ms:         durationMilliseconds(percentileDuration(durations, 0.95)),
+		P99Ms:         durationMilliseconds(percentileDuration(durations, 0.99)),
+		ThresholdMs:   *threshold,
+		UnlocatedRate: unlocatedRate,
+	}
+	report.ThresholdPassed = report.P95Ms < report.ThresholdMs
+
+	encoded, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(encoded))
+	if *outputPath != "" {
+		if err := os.WriteFile(*outputPath, append(encoded, '\n'), 0644); err != nil {
+			return fmt.Errorf("write report: %w", err)
+		}
+	}
+	if !report.ThresholdPassed {
+		return fmt.Errorf("P95 %.3fms is not below %.3fms", report.P95Ms, report.ThresholdMs)
+	}
+	return nil
+}
+
+func percentileDuration(sorted []time.Duration, quantile float64) time.Duration {
+	if len(sorted) == 0 {
+		return 0
+	}
+	index := int(math.Ceil(quantile*float64(len(sorted)))) - 1
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(sorted) {
+		index = len(sorted) - 1
+	}
+	return sorted[index]
+}
+
+func durationMilliseconds(duration time.Duration) float64 {
+	return float64(duration) / float64(time.Millisecond)
 }
 
 func checkAPI(baseURL string) error {
