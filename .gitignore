@@ -11,6 +11,9 @@ bin/
 *.out
 coverage.html
 
+# Local durable snapshots, ledger, and signing material
+/data/
+
 # Environment
 .env
 

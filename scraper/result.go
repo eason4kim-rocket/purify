@@ -1,5 +1,11 @@
 package scraper
 
+import (
+	"time"
+
+	"github.com/use-agent/purify/snapshot"
+)
+
 // ScrapeResult holds the output of a single scrape operation.
 type ScrapeResult struct {
 	// RawHTML is the raw page HTML.
@@ -20,4 +26,13 @@ type ScrapeResult struct {
 	// FetchMethod records how the page was fetched: "http" or "browser".
 	// Used by the extract handler for metadata.
 	FetchMethod string
+
+	// ContentType is the response content type when known.
+	ContentType string
+
+	// FetchedAt is when the selected fetch completed.
+	FetchedAt time.Time
+
+	// SnapshotID identifies the durable raw-HTML capture when snapshots are enabled.
+	SnapshotID snapshot.ID
 }

@@ -17,6 +17,11 @@ services:
       PURIFY_RATE_BURST: "10"
       # ── Logging ──
       PURIFY_LOG_LEVEL: info
+      # ── Durable evidence storage ──
+      PURIFY_DATA_DIR: "/data"
+      PURIFY_SNAPSHOT_ENABLED: "true"
+    volumes:
+      - purify-data:/data
     # SHM size for Chromium (default 64MB too small, causes crashes).
     shm_size: 512m
     deploy:
@@ -24,3 +29,6 @@ services:
         limits:
           cpus: "2"
           memory: 4g
+
+volumes:
+  purify-data:

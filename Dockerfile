@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Non-root user for security.
 RUN useradd -m -s /bin/bash purify
+RUN mkdir -p /data && chown purify:purify /data
 USER purify
 WORKDIR /home/purify
 

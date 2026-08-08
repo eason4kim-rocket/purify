@@ -13,6 +13,7 @@ import (
 	"github.com/go-rod/stealth"
 	"github.com/use-agent/purify/engine"
 	"github.com/use-agent/purify/models"
+	"github.com/use-agent/purify/snapshot"
 	"github.com/ysmood/gson"
 )
 
@@ -55,21 +56,55 @@ func (s *Scraper) DoScrape(ctx context.Context, req *models.ScrapeRequest) (*Scr
 
 		result, err := s.dispatcher.Dispatch(dispatchCtx, fetchReq)
 		if err == nil {
-			return &ScrapeResult{
+			return s.finalizeScrape(req, &ScrapeResult{
 				RawHTML:     result.HTML,
 				Title:       result.Title,
 				StatusCode:  result.StatusCode,
 				FinalURL:    result.FinalURL,
 				EngineUsed:  result.EngineName,
 				FetchMethod: result.EngineName,
-			}, nil
+				ContentType: result.ContentType,
+			})
 		}
 		// Dispatcher failed entirely — fall through to existing rod logic.
 		slog.Warn("dispatcher failed, falling back to direct rod scrape",
 			"url", req.URL, "error", err)
 	}
 
-	return s.doScrapeRod(ctx, req)
+	result, err := s.doScrapeRod(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return s.finalizeScrape(req, result)
+}
+
+func (s *Scraper) finalizeScrape(req *models.ScrapeRequest, result *ScrapeResult) (*ScrapeResult, error) {
+	result.FetchedAt = time.Now().UTC()
+	if result.FinalURL == "" {
+		result.FinalURL = req.URL
+	}
+	if result.EngineUsed == "" {
+		result.EngineUsed = result.FetchMethod
+	}
+	if result.ContentType == "" {
+		result.ContentType = "text/html"
+	}
+	if s.snapshots == nil {
+		return result, nil
+	}
+
+	id, err := s.snapshots.Put([]byte(result.RawHTML), snapshot.Meta{
+		URL:         result.FinalURL,
+		FetchedAt:   result.FetchedAt,
+		Engine:      result.EngineUsed,
+		StatusCode:  result.StatusCode,
+		ContentType: result.ContentType,
+	})
+	if err != nil {
+		return nil, models.NewScrapeError(models.ErrCodeInternal, "failed to persist page snapshot", err)
+	}
+	result.SnapshotID = id
+	return result, nil
 }
 
 // DoScrapeRod is the direct rod-based scraping path. It is exported so
@@ -260,17 +295,27 @@ func (s *Scraper) doScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 	// ── 11. Extract title and final URL (best-effort) ────────────────
 	title := evalStringOrEmpty(p, `() => document.title`)
 	finalURL := evalStringOrEmpty(p, `() => window.location.href`)
+	contentType := evalStringOrEmpty(p, `() => document.contentType`)
 	if finalURL == "" {
 		finalURL = req.URL
 	}
 
 	return &ScrapeResult{
-		RawHTML:      rawHTML,
-		Title:        title,
-		StatusCode:   statusCode,
-		FinalURL:     finalURL,
-		FetchMethod:  "browser",
+		RawHTML:     rawHTML,
+		Title:       title,
+		StatusCode:  statusCode,
+		FinalURL:    finalURL,
+		EngineUsed:  rodEngineName(req.Stealth),
+		FetchMethod: "browser",
+		ContentType: contentType,
 	}, nil
+}
+
+func rodEngineName(stealthEnabled bool) string {
+	if stealthEnabled {
+		return "rod-stealth"
+	}
+	return "rod"
 }
 
 // evalStringOrEmpty evaluates a JS expression and returns the string result,
@@ -281,6 +326,14 @@ func evalStringOrEmpty(page *rod.Page, js string) string {
 		return ""
 	}
 	return res.Value.Str()
+}
+
+func evalIntOrZero(page *rod.Page, js string) int {
+	res, err := page.Eval(js)
+	if err != nil {
+		return 0
+	}
+	return res.Value.Int()
 }
 
 // toHeadersMap converts a plain string map to the proto.NetworkHeaders type
@@ -355,14 +408,25 @@ func (s *Scraper) doScrapeWithCDP(ctx context.Context, req *models.ScrapeRequest
 
 	title := evalStringOrEmpty(p, `() => document.title`)
 	finalURL := evalStringOrEmpty(p, `() => window.location.href`)
+	statusCode := evalIntOrZero(p, `() => {
+		try {
+			const entries = performance.getEntriesByType("navigation");
+			return entries.length > 0 ? (entries[0].responseStatus || 0) : 0;
+		} catch(e) { return 0; }
+	}`)
+	contentType := evalStringOrEmpty(p, `() => document.contentType`)
 	if finalURL == "" {
 		finalURL = req.URL
 	}
 
 	return &ScrapeResult{
-		RawHTML:  rawHTML,
-		Title:    title,
-		FinalURL: finalURL,
+		RawHTML:     rawHTML,
+		Title:       title,
+		StatusCode:  statusCode,
+		FinalURL:    finalURL,
+		EngineUsed:  "cdp",
+		FetchMethod: "browser",
+		ContentType: contentType,
 	}, nil
 }
 

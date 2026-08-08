@@ -18,6 +18,7 @@ import (
 	"github.com/use-agent/purify/llm"
 	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/scraper"
+	"github.com/use-agent/purify/snapshot"
 )
 
 func main() {
@@ -41,6 +42,21 @@ func main() {
 	}
 	defer sc.Close()
 
+	// ── 3a. Initialise the content-addressed snapshot store ─────────
+	snapshotStore, err := openSnapshotStore(cfg.Storage)
+	if err != nil {
+		slog.Error("failed to initialise snapshot store", "error", err)
+		sc.Close()
+		os.Exit(1)
+	}
+	if snapshotStore != nil {
+		defer snapshotStore.Close()
+		sc.SetSnapshotStore(snapshotStore)
+		slog.Info("snapshot store enabled", "dataDir", cfg.Storage.DataDir)
+	} else {
+		slog.Info("snapshot store disabled")
+	}
+
 	// ── 3b. Initialise multi-engine dispatcher ─────────────────────
 	if cfg.Engine.EnableMultiEngine {
 		// Rod callback: wraps the scraper's DoScrapeRod (bypasses the dispatcher).
@@ -59,10 +75,11 @@ func main() {
 				return nil, err
 			}
 			return &engine.FetchResult{
-				HTML:       result.RawHTML,
-				Title:      result.Title,
-				StatusCode: result.StatusCode,
-				FinalURL:   result.FinalURL,
+				HTML:        result.RawHTML,
+				Title:       result.Title,
+				StatusCode:  result.StatusCode,
+				FinalURL:    result.FinalURL,
+				ContentType: result.ContentType,
 			}, nil
 		}
 
@@ -127,6 +144,13 @@ func main() {
 
 	// sc.Close() runs via defer — drains page pool and kills Chrome.
 	slog.Info("purify stopped")
+}
+
+func openSnapshotStore(cfg config.StorageConfig) (*snapshot.Store, error) {
+	if !cfg.SnapshotEnabled {
+		return nil, nil
+	}
+	return snapshot.NewStore(cfg.DataDir)
 }
 
 // initLogger configures slog based on the LogConfig.

@@ -250,11 +250,12 @@ func (e *HTTPEngine) Fetch(ctx context.Context, req *FetchRequest) (*FetchResult
 	finalURL := resp.Request.URL.String()
 
 	return &FetchResult{
-		HTML:       bodyStr,
-		Title:      title,
-		StatusCode: resp.StatusCode,
-		FinalURL:   finalURL,
-		EngineName: e.Name(),
+		HTML:        bodyStr,
+		Title:       title,
+		StatusCode:  resp.StatusCode,
+		FinalURL:    finalURL,
+		EngineName:  e.Name(),
+		ContentType: ct,
 	}, nil
 }
 

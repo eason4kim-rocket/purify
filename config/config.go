@@ -18,6 +18,14 @@ type Config struct {
 	Log          LogConfig
 	Engine       EngineConfig
 	AdaptivePool AdaptivePoolConfig
+	Storage      StorageConfig
+}
+
+// StorageConfig controls durable snapshots, the ledger, and receipt signing.
+type StorageConfig struct {
+	DataDir         string // default: "./data"
+	SnapshotEnabled bool   // default: true
+	SigningKey      string // optional Ed25519 seed encoded as hex
 }
 
 // EngineConfig controls the multi-engine racing dispatcher.
@@ -166,6 +174,11 @@ func Load() *Config {
 			HardMax:      envIntOr("PURIFY_HARD_MAX_PAGES", 20),
 			MemThreshold: envFloatOr("PURIFY_MEM_THRESHOLD", 0.9),
 			ScaleStep:    envFloatOr("PURIFY_SCALE_STEP", 0.05),
+		},
+		Storage: StorageConfig{
+			DataDir:         envOr("PURIFY_DATA_DIR", "./data"),
+			SnapshotEnabled: envBoolOr("PURIFY_SNAPSHOT_ENABLED", true),
+			SigningKey:      os.Getenv("PURIFY_SIGNING_KEY"),
 		},
 	}
 }

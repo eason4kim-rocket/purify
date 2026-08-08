@@ -26,9 +26,10 @@ type FetchRequest struct {
 
 // FetchResult is the output of a successful engine fetch.
 type FetchResult struct {
-	HTML       string
-	Title      string
-	StatusCode int
-	FinalURL   string
-	EngineName string
+	HTML        string
+	Title       string
+	StatusCode  int
+	FinalURL    string
+	EngineName  string
+	ContentType string
 }

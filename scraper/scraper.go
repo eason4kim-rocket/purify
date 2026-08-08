@@ -13,6 +13,7 @@ import (
 	"github.com/use-agent/purify/engine"
 	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/proxy"
+	"github.com/use-agent/purify/snapshot"
 )
 
 // Scraper manages the global browser lifecycle and the page pool.
@@ -27,6 +28,7 @@ type Scraper struct {
 	startTime   time.Time
 	dispatcher  *engine.Dispatcher
 	relay       *proxy.Relay
+	snapshots   *snapshot.Store
 }
 
 // NewScraper launches a headless browser and initialises the reusable page pool.
@@ -133,6 +135,12 @@ func addrPort(addr string) string {
 // delegate simple requests (no Actions, no CDPURL) to the dispatcher.
 func (s *Scraper) SetDispatcher(d *engine.Dispatcher) {
 	s.dispatcher = d
+}
+
+// SetSnapshotStore enables durable capture of every successful public
+// DoScrape result. Internal engine attempts are not persisted unless selected.
+func (s *Scraper) SetSnapshotStore(store *snapshot.Store) {
+	s.snapshots = store
 }
 
 // Stats returns a snapshot of the pool's current state.
