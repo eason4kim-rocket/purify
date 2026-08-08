@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/use-agent/purify/api"
+	"github.com/use-agent/purify/batch"
 	"github.com/use-agent/purify/cache"
 	"github.com/use-agent/purify/cleaner"
 	"github.com/use-agent/purify/config"
 	"github.com/use-agent/purify/engine"
+	"github.com/use-agent/purify/jobs"
 	"github.com/use-agent/purify/llm"
 	"github.com/use-agent/purify/receipts"
 	"github.com/use-agent/purify/scrape"
@@ -85,12 +87,32 @@ func main() {
 		os.Exit(1)
 	}
 
-	// ── 4d. Initialise LLM client ───────────────────────────────────
+	// ── 4d. Initialise process-wide bounded background work ─────────
+	jobWorkers := cfg.Browser.MaxPages
+	if jobWorkers <= 0 {
+		jobWorkers = 5
+	}
+	jobExecutor, err := jobs.NewExecutor(jobWorkers, 100)
+	if err != nil {
+		slog.Error("failed to initialise background job executor", "error", err)
+		os.Exit(1)
+	}
+	defer jobExecutor.Close()
+
+	batchService, err := batch.NewService(scrapeService, jobExecutor, batch.Config{})
+	if err != nil {
+		slog.Error("failed to initialise batch service", "error", err)
+		jobExecutor.Close()
+		os.Exit(1)
+	}
+	defer batchService.Close()
+
+	// ── 4e. Initialise LLM client ───────────────────────────────────
 	llmClient := llm.NewClient(nil)
 
 	// ── 5. Setup router ─────────────────────────────────────────────
 	startTime := time.Now()
-	router := api.NewRouter(sc, cl, llmClient, receiptSigner, cfg, cc, startTime, scrapeService)
+	router := api.NewRouter(sc, cl, llmClient, receiptSigner, cfg, cc, startTime, scrapeService, batchService)
 
 	// ── 6. Start HTTP server ────────────────────────────────────────
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

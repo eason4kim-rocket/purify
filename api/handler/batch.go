@@ -4,186 +4,102 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"log/slog"
+	"errors"
 	"net/http"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	batchdomain "github.com/use-agent/purify/batch"
 	"github.com/use-agent/purify/cleaner"
+	"github.com/use-agent/purify/jobs"
 	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/scraper"
-	"github.com/use-agent/purify/webhook"
 )
 
-// batchStore holds all in-flight and completed batch jobs.
-var batchStore sync.Map
-
-func init() {
-	// Background goroutine to expire batch jobs older than 1 hour.
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			cutoff := time.Now().Add(-1 * time.Hour).Unix()
-			batchStore.Range(func(key, value any) bool {
-				job := value.(*models.BatchJob)
-				if job.CreatedAt < cutoff {
-					batchStore.Delete(key)
-				}
-				return true
-			})
-		}
-	}()
+// BatchService is the transport-neutral subset of batch.Service used by the
+// HTTP adapter.
+type BatchService interface {
+	Submit(models.BatchRequest) (*models.BatchResponse, error)
+	Get(id string) (*models.BatchStatusResponse, bool)
 }
 
 // PostBatch returns a handler for POST /api/v1/batch/scrape.
-// It validates the request, creates a batch job, and launches goroutines
-// to scrape each URL concurrently.
-func PostBatch(sc *scraper.Scraper, cl *cleaner.Cleaner) gin.HandlerFunc {
+func PostBatch(service BatchService) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var req models.BatchRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
+		var request models.BatchRequest
+		if err := c.ShouldBindJSON(&request); err != nil {
 			c.JSON(http.StatusBadRequest, models.BatchResponse{
 				Status: "failed",
 			})
 			return
 		}
 
-		if len(req.URLs) > 100 {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": models.ErrorDetail{
-					Code:    models.ErrCodeInvalidInput,
-					Message: "maximum 100 URLs per batch",
-				},
-			})
+		if service == nil {
+			writeBatchError(c, http.StatusInternalServerError, models.ErrCodeInternal, "batch service is not configured")
 			return
 		}
 
-		jobID := "batch-" + randomID()
-		job := &models.BatchJob{
-			ID:            jobID,
-			Status:        "processing",
-			Total:         len(req.URLs),
-			Completed:     0,
-			Results:       make([]*models.ScrapeResponse, len(req.URLs)),
-			CreatedAt:     time.Now().Unix(),
-			WebhookURL:    req.WebhookURL,
-			WebhookSecret: req.WebhookSecret,
+		response, err := service.Submit(request)
+		if err != nil {
+			writeBatchSubmitError(c, err)
+			return
 		}
-		batchStore.Store(jobID, job)
+		if response == nil {
+			writeBatchError(c, http.StatusInternalServerError, models.ErrCodeInternal, "batch service returned an empty response")
+			return
+		}
 
-		// Launch scraping in background.
-		go runBatch(sc, cl, job, req)
-
-		c.JSON(http.StatusOK, models.BatchResponse{
-			ID:     jobID,
-			Status: "processing",
-			Total:  len(req.URLs),
-		})
+		c.JSON(http.StatusOK, response)
 	}
 }
 
 // GetBatch returns a handler for GET /api/v1/batch/:id.
-func GetBatch() gin.HandlerFunc {
+func GetBatch(service BatchService) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		jobID := c.Param("id")
-		val, ok := batchStore.Load(jobID)
-		if !ok {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": models.ErrorDetail{
-					Code:    models.ErrCodeInvalidInput,
-					Message: "batch job not found",
-				},
-			})
+		if service == nil {
+			writeBatchError(c, http.StatusInternalServerError, models.ErrCodeInternal, "batch service is not configured")
 			return
 		}
 
-		job := val.(*models.BatchJob)
-		c.JSON(http.StatusOK, models.BatchStatusResponse{
-			ID:        job.ID,
-			Status:    job.Status,
-			Completed: job.Completed,
-			Total:     job.Total,
-			Results:   job.Results,
-		})
+		jobID := c.Param("id")
+		response, ok := service.Get(jobID)
+		if !ok {
+			writeBatchError(c, http.StatusNotFound, models.ErrCodeInvalidInput, "batch job not found")
+			return
+		}
+		if response == nil {
+			writeBatchError(c, http.StatusInternalServerError, models.ErrCodeInternal, "batch service returned an empty response")
+			return
+		}
+
+		c.JSON(http.StatusOK, response)
 	}
 }
 
-// runBatch processes all URLs in a batch job with concurrency limited by a semaphore.
-func runBatch(sc *scraper.Scraper, cl *cleaner.Cleaner, job *models.BatchJob, req models.BatchRequest) {
-	// Use a semaphore to limit concurrency.
-	maxConcurrent := sc.Stats().MaxPages
-	if maxConcurrent <= 0 {
-		maxConcurrent = 5
-	}
-	sem := make(chan struct{}, maxConcurrent)
-
-	var wg sync.WaitGroup
-	var completed atomic.Int32
-	var failed atomic.Int32
-
-	for i, rawURL := range req.URLs {
-		wg.Add(1)
-		go func(idx int, targetURL string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			resp := scrapeOne(sc, cl, targetURL, req.Options)
-			job.Results[idx] = resp
-
-			if resp.Success {
-				completed.Add(1)
-			} else {
-				failed.Add(1)
-			}
-			job.Completed = int(completed.Load()) + int(failed.Load())
-		}(i, rawURL)
-	}
-
-	wg.Wait()
-
-	failedCount := int(failed.Load())
-	completedCount := int(completed.Load())
-
+func writeBatchSubmitError(c *gin.Context, err error) {
 	switch {
-	case failedCount == job.Total:
-		job.Status = "failed"
-	case failedCount > 0:
-		job.Status = "partial"
+	case errors.Is(err, batchdomain.ErrInvalidBatchSize):
+		writeBatchError(c, http.StatusBadRequest, models.ErrCodeInvalidInput, "batch must contain between 1 and 100 URLs")
+	case errors.Is(err, jobs.ErrManagerFull):
+		writeBatchError(c, http.StatusTooManyRequests, models.ErrCodeRateLimited, "batch job capacity is full")
+	case errors.Is(err, jobs.ErrManagerClosed):
+		writeBatchError(c, http.StatusServiceUnavailable, models.ErrCodeInternal, "batch service is unavailable")
 	default:
-		job.Status = "completed"
-	}
-	job.Completed = completedCount + failedCount
-
-	slog.Info("batch job finished",
-		"id", job.ID,
-		"status", job.Status,
-		"completed", completedCount,
-		"failed", failedCount,
-		"total", job.Total,
-	)
-
-	// Send webhook if configured.
-	if job.WebhookURL != "" {
-		webhook.DeliverAsync(job.WebhookURL, job.WebhookSecret, &webhook.Event{
-			Type:      "batch." + job.Status,
-			JobID:     job.ID,
-			Timestamp: time.Now().Unix(),
-			Data: models.BatchStatusResponse{
-				ID:        job.ID,
-				Status:    job.Status,
-				Completed: job.Completed,
-				Total:     job.Total,
-				Results:   job.Results,
-			},
-		})
+		writeBatchError(c, http.StatusInternalServerError, models.ErrCodeInternal, "failed to create batch job")
 	}
 }
 
-// scrapeOne performs a single scrape+clean for one URL using shared batch options.
+func writeBatchError(c *gin.Context, status int, code, message string) {
+	c.JSON(status, gin.H{
+		"error": models.ErrorDetail{
+			Code:    code,
+			Message: message,
+		},
+	})
+}
+
+// scrapeOne is retained only until Crawl migrates to its own canonical scrape
+// service path. Batch HTTP and domain execution no longer use this helper.
 func scrapeOne(sc *scraper.Scraper, cl *cleaner.Cleaner, targetURL string, opts models.BatchOptions) *models.ScrapeResponse {
 	totalStart := time.Now()
 
@@ -256,7 +172,7 @@ func scrapeOne(sc *scraper.Scraper, cl *cleaner.Cleaner, targetURL string, opts 
 	return resp
 }
 
-// randomID generates a short random hex string for job IDs.
+// randomID is retained only until Crawl migrates to its domain job manager.
 func randomID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
