@@ -116,3 +116,53 @@ func TestDispatcherFallbackSharesRequestDeadline(t *testing.T) {
 		t.Fatalf("DoScrape() elapsed = %v, want one 1s request budget", elapsed)
 	}
 }
+
+func TestBrowserRetiresUsedPageAndReplenishesPool(t *testing.T) {
+	if os.Getenv("PURIFY_BROWSER_TEST") != "1" {
+		t.Skip("set PURIFY_BROWSER_TEST=1 with PURIFY_BROWSER_BIN for the fixed Chromium regression")
+	}
+	browserBin := os.Getenv("PURIFY_BROWSER_BIN")
+	if browserBin == "" {
+		t.Fatal("PURIFY_BROWSER_BIN is required for deterministic browser tests")
+	}
+
+	site := testsite.New()
+	t.Cleanup(site.Close)
+	scraper, err := NewScraper(config.BrowserConfig{
+		Headless:   true,
+		MaxPages:   1,
+		BrowserBin: browserBin,
+		NoSandbox:  os.Getenv("CI") == "true",
+	}, config.ScraperConfig{
+		DefaultTimeout: 5 * time.Second,
+		MaxTimeout:     5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewScraper() error = %v", err)
+	}
+	t.Cleanup(scraper.Close)
+	scraper.pagePolicy = pageRetirementPolicy{
+		maxUses:                1,
+		maxConsecutiveFailures: 3,
+		maxAge:                 time.Hour,
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		result, scrapeErr := scraper.DoScrapeRod(context.Background(), &models.ScrapeRequest{
+			URL:     site.URL("/static"),
+			Timeout: 5,
+		})
+		if scrapeErr != nil {
+			t.Fatalf("attempt %d DoScrapeRod() error = %v", attempt+1, scrapeErr)
+		}
+		if !strings.Contains(result.RawHTML, testsite.StaticMarker) {
+			t.Fatalf("attempt %d HTML missing fixture marker", attempt+1)
+		}
+		if active := scraper.Stats().ActivePages; active != 0 {
+			t.Fatalf("attempt %d active pages = %d, want 0", attempt+1, active)
+		}
+	}
+	if retired := scraper.retiredPages.Load(); retired != 2 {
+		t.Fatalf("retired pages = %d, want 2", retired)
+	}
+}

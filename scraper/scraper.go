@@ -3,6 +3,7 @@ package scraper
 import (
 	"log/slog"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -19,16 +20,19 @@ import (
 // Scraper manages the global browser lifecycle and the page pool.
 // It is safe for concurrent use.
 type Scraper struct {
-	browser     *rod.Browser
-	pagePool    rod.Pool[rod.Page]
-	browserCfg  config.BrowserConfig
-	scraperCfg  config.ScraperConfig
-	httpFetcher *httpFetcher
-	activePages atomic.Int32
-	startTime   time.Time
-	dispatcher  *engine.Dispatcher
-	relay       *proxy.Relay
-	snapshots   *snapshot.Store
+	browser      *rod.Browser
+	pagePool     rod.Pool[rod.Page]
+	browserCfg   config.BrowserConfig
+	scraperCfg   config.ScraperConfig
+	httpFetcher  *httpFetcher
+	activePages  atomic.Int32
+	retiredPages atomic.Int64
+	pageHealth   sync.Map
+	pagePolicy   pageRetirementPolicy
+	startTime    time.Time
+	dispatcher   *engine.Dispatcher
+	relay        *proxy.Relay
+	snapshots    *snapshot.Store
 }
 
 // NewScraper launches a headless browser and initialises the reusable page pool.
@@ -116,6 +120,7 @@ func NewScraper(browserCfg config.BrowserConfig, scraperCfg config.ScraperConfig
 		browserCfg:  browserCfg,
 		scraperCfg:  scraperCfg,
 		httpFetcher: newHTTPFetcher(browserCfg.DefaultProxy),
+		pagePolicy:  defaultPageRetirementPolicy(),
 		startTime:   time.Now(),
 		relay:       relay,
 	}, nil
@@ -156,6 +161,7 @@ func (s *Scraper) Stats() models.PoolStats {
 func (s *Scraper) Close() {
 	slog.Info("scraper shutting down: draining page pool")
 	s.pagePool.Cleanup(func(p *rod.Page) {
+		s.pageHealth.Delete(p)
 		_ = p.Close()
 	})
 	slog.Info("scraper shutting down: closing browser")

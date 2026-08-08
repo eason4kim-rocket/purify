@@ -173,13 +173,20 @@ func (s *Scraper) doScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 			acquireErr,
 		)
 	}
+	s.trackPage(page)
 
 	// ── 3. CRITICAL DEFER: prevent DOM memory leak + guarantee pool return
+	pageSucceeded := false
 	defer func() {
-		if navErr := page.Navigate("about:blank"); navErr != nil {
+		cleanupErr := page.Navigate("about:blank")
+		if cleanupErr != nil {
 			slog.Warn("cleanup: failed to navigate to about:blank",
-				"error", navErr,
+				"error", cleanupErr,
 			)
+		}
+		if s.observePageUse(page, pageSucceeded && cleanupErr == nil) || cleanupErr != nil {
+			s.retirePage(page)
+			return
 		}
 		s.pagePool.Put(page)
 	}()
@@ -311,7 +318,7 @@ func (s *Scraper) doScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 		finalURL = req.URL
 	}
 
-	return &ScrapeResult{
+	result := &ScrapeResult{
 		RawHTML:     rawHTML,
 		Title:       title,
 		StatusCode:  statusCode,
@@ -319,7 +326,9 @@ func (s *Scraper) doScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 		EngineUsed:  rodEngineName(req.Stealth),
 		FetchMethod: "browser",
 		ContentType: contentType,
-	}, nil
+	}
+	pageSucceeded = true
+	return result, nil
 }
 
 func rodEngineName(stealthEnabled bool) string {
