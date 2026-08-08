@@ -25,15 +25,7 @@ const minContentLength = 50
 //
 // The caller can tell whether fallback was used by checking article.Title == "".
 func ExtractContent(rawHTML string, sourceURL string) (readability.Article, bool) {
-	parsedURL, err := nurl.Parse(sourceURL)
-	if err != nil {
-		slog.Warn("readability: invalid source URL, falling back to raw HTML",
-			"url", sourceURL, "error", err,
-		)
-		return fallbackArticle(rawHTML), false
-	}
-
-	article, err := readability.FromReader(strings.NewReader(rawHTML), parsedURL)
+	article, err := extractReadabilityArticle(rawHTML, sourceURL)
 	if err != nil {
 		slog.Warn("readability: extraction failed, falling back to raw HTML",
 			"url", sourceURL, "error", err,
@@ -49,6 +41,17 @@ func ExtractContent(rawHTML string, sourceURL string) (readability.Article, bool
 	}
 
 	return article, true
+}
+
+// extractReadabilityArticle returns the actual Readability result without
+// silently substituting raw HTML. Adaptive fallback needs this distinction so
+// it can record the extraction mode that truly produced the selected content.
+func extractReadabilityArticle(rawHTML string, sourceURL string) (readability.Article, error) {
+	parsedURL, err := nurl.Parse(sourceURL)
+	if err != nil {
+		return readability.Article{}, err
+	}
+	return readability.FromReader(strings.NewReader(rawHTML), parsedURL)
 }
 
 // fallbackArticle wraps raw HTML into an Article so the pipeline can proceed

@@ -43,15 +43,24 @@ var negativeClassIDPatterns = []string{
 // If no blocks pass the threshold, the full body content is returned as a
 // fallback so the pipeline never produces empty output.
 func PruneContent(rawHTML, sourceURL string) (string, error) {
+	content, _, err := pruneContentDetailed(rawHTML, sourceURL)
+	return content, err
+}
+
+// pruneContentDetailed is the non-lossy form used by adaptive fallback. The
+// boolean is true only when the pruning scorer retained at least one block. A
+// false value means content contains the legacy raw/body fallback and must not
+// be reported as an actual pruning extraction.
+func pruneContentDetailed(rawHTML, sourceURL string) (content string, extracted bool, err error) {
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(rawHTML))
 	if err != nil {
-		return rawHTML, err
+		return rawHTML, false, err
 	}
 
 	body := doc.Find("body")
 	if body.Length() == 0 {
 		// No <body> tag — return raw HTML unchanged.
-		return rawHTML, nil
+		return rawHTML, false, nil
 	}
 
 	var retained []string
@@ -68,12 +77,12 @@ func PruneContent(rawHTML, sourceURL string) (string, error) {
 	if len(retained) == 0 {
 		html, err := body.Html()
 		if err != nil {
-			return rawHTML, nil
+			return rawHTML, false, nil
 		}
-		return html, nil
+		return html, false, nil
 	}
 
-	return strings.Join(retained, "\n"), nil
+	return strings.Join(retained, "\n"), true, nil
 }
 
 // scoreElement computes a weighted score for a DOM element based on multiple

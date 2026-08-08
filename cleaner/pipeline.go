@@ -1,32 +1,32 @@
 package cleaner
 
 import (
-	"log/slog"
 	"math"
 	"strings"
-	"sync"
 
+	"github.com/JohannesKaufmann/html-to-markdown/v2/converter"
 	"github.com/PuerkitoBio/goquery"
 	readability "github.com/go-shiori/go-readability"
 
-	"github.com/JohannesKaufmann/html-to-markdown/v2/converter"
 	"github.com/use-agent/purify/models"
+	"github.com/use-agent/purify/quality"
 )
 
-// Cleaner orchestrates the two-stage cleaning pipeline:
-//
-//	Stage 1 (readability): extract main content, strip nav/footer/sidebar/ads
-//	Stage 2 (markdown):    convert clean HTML → Markdown (or html/text pass-through)
-//
-// The converter is created once and reused across all requests (goroutine-safe).
+// Cleaner orchestrates adaptive extraction and output-format conversion.
+// The converter and extraction functions are immutable after construction, so
+// a Cleaner can be reused concurrently.
 type Cleaner struct {
-	mdConverter *converter.Converter
+	mdConverter        *converter.Converter
+	extractReadability func(string, string) (readability.Article, error)
+	extractPruning     func(string, string) (string, bool, error)
 }
 
 // NewCleaner initialises the Cleaner with a pre-configured Markdown converter.
 func NewCleaner() *Cleaner {
 	return &Cleaner{
-		mdConverter: newMarkdownConverter(),
+		mdConverter:        newMarkdownConverter(),
+		extractReadability: extractReadabilityArticle,
+		extractPruning:     pruneContentDetailed,
 	}
 }
 
@@ -37,238 +37,319 @@ type CleanOptions struct {
 	CSSSelector string
 }
 
-// Clean runs the full pipeline and returns a partial ScrapeResponse
-// (Content + Metadata + Tokens filled; Timing is left to the API layer).
+type extractionCandidate struct {
+	article    readability.Article
+	assessment quality.Assessment
+	available  bool
+}
+
+// Clean runs the adaptive extraction pipeline and returns a partial
+// ScrapeResponse (Timing and transport fields are left to the scrape service).
 //
-// Flow:
-//  1. Estimate original tokens from raw HTML.
-//  1b. Apply include/exclude tag filters (if provided).
-//  2. Stage 1: go-readability extracts main content.
-//     Fallback: if extraction fails or content is too short, use raw HTML.
-//  3. Stage 2: convert to the requested output format.
-//  4. Estimate cleaned tokens and compute savings.
-//  5. Assemble and return the partial response.
+// Extraction order is deliberately independent of output format:
+//   - default/readability: readability -> pruning -> raw
+//   - auto: score readability and pruning, then use raw only if both are unusable
+//   - pruning: pruning -> raw
+//   - raw: raw only
+//
+// sourceURL is the caller-provided final URL. It is used for Readability,
+// relative Markdown links, extracted links/images, and response metadata.
 func (c *Cleaner) Clean(rawHTML string, sourceURL string, format string, extractMode string, opts ...CleanOptions) (*models.ScrapeResponse, error) {
-	// ── 1. Original token estimate ──────────────────────────────────
 	originalTokens := EstimateTokens(rawHTML)
 
-	// ── 1b. Content filtering (include/exclude tags + CSS selector) ──
-	if len(opts) > 0 {
-		o := opts[0]
-
-		// CSS selector filter (remote feature).
-		if o.CSSSelector != "" {
-			filtered, err := ApplyCSSSelector(rawHTML, o.CSSSelector)
-			if err != nil {
-				return nil, models.NewScrapeError(
-					models.ErrCodeInvalidInput,
-					"invalid CSS selector: "+err.Error(),
-					err,
-				)
-			}
-			rawHTML = filtered
-		}
-
-		// Include/exclude tag filter (Phase 2 feature).
-		rawHTML = FilterContent(rawHTML, o.IncludeTags, o.ExcludeTags)
+	filteredHTML, err := applyCleanOptions(rawHTML, opts)
+	if err != nil {
+		return nil, err
 	}
 
-	// ── 2. Stage 1: Content extraction ──────────────────────────────
-	var article readability.Article
-	switch extractMode {
-	case "raw":
-		// Skip readability; use the full rendered HTML as-is.
-		article = fallbackArticle(rawHTML)
-
-	case "pruning":
-		// Scoring-based content extraction.
-		prunedHTML, err := PruneContent(rawHTML, sourceURL)
-		if err != nil {
-			slog.Warn("pruning: extraction failed, falling back to raw HTML",
-				"url", sourceURL, "error", err,
-			)
-			prunedHTML = rawHTML
-		}
-		// Build an Article from pruned HTML. Metadata comes from
-		// readability on the original HTML so we get title/author/etc.
-		metaArticle, _ := ExtractContent(rawHTML, sourceURL)
-		article = readability.Article{
-			Title:       metaArticle.Title,
-			Byline:      metaArticle.Byline,
-			Excerpt:     metaArticle.Excerpt,
-			SiteName:    metaArticle.SiteName,
-			Language:    metaArticle.Language,
-			Content:     prunedHTML,
-			TextContent: stripTags(prunedHTML),
-		}
-
-	case "auto":
-		// Run both readability and pruning concurrently, pick the
-		// result with more extracted text content.
-		article = autoExtract(rawHTML, sourceURL)
-
-	default:
-		// "readability" (default).
-		article, _ = ExtractContent(rawHTML, sourceURL)
+	selected := c.selectCandidate(filteredHTML, sourceURL, extractMode)
+	content, err := c.convertArticle(selected.article, format, sourceURL)
+	if err != nil {
+		return nil, err
 	}
 
-	// ── 3. Stage 2: Format conversion ───────────────────────────────
-	var content string
-	var err error
-
-	switch format {
-	case "markdown", "":
-		content, err = ToMarkdown(c.mdConverter, article.Content, sourceURL)
-		if err != nil {
-			return nil, models.NewScrapeError(
-				models.ErrCodeReadability,
-				"markdown conversion failed",
-				err,
-			)
-		}
-	case "markdown_citations":
-		content, err = ToMarkdown(c.mdConverter, article.Content, sourceURL)
-		if err != nil {
-			return nil, models.NewScrapeError(
-				models.ErrCodeReadability,
-				"markdown conversion failed",
-				err,
-			)
-		}
-		content = ConvertToCitations(content)
-	case "html":
-		// Return the readability-cleaned HTML as-is.
-		content = article.Content
-	case "text":
-		// Return the plain text extracted by readability.
-		content = article.TextContent
-	default:
-		// Defensive: treat unknown formats as markdown.
-		content, err = ToMarkdown(c.mdConverter, article.Content, sourceURL)
-		if err != nil {
-			return nil, models.NewScrapeError(
-				models.ErrCodeReadability,
-				"markdown conversion failed",
-				err,
-			)
-		}
-	}
-
-	// ── 4. Cleaned token estimate + savings ─────────────────────────
 	cleanedTokens := EstimateTokens(content)
-
 	savingsPercent := 0.0
 	if originalTokens > 0 {
 		savingsPercent = float64(originalTokens-cleanedTokens) / float64(originalTokens) * 100
-		// Round to 2 decimal places.
 		savingsPercent = math.Round(savingsPercent*100) / 100
 	}
 
-	// ── 5. Extract links, images, OG metadata from raw HTML ────────
-	links := ExtractLinks(rawHTML, sourceURL)
-	images := ExtractImages(rawHTML, sourceURL)
-	ogMeta := ExtractOGMetadata(rawHTML)
+	qualityInfo := selected.assessment.Info
+	qualityInfo.Warnings = append([]models.QualityReason(nil), qualityInfo.Warnings...)
+	if qualityInfo.Warnings == nil {
+		qualityInfo.Warnings = []models.QualityReason{}
+	}
 
-	// ── 6. Assemble partial response ────────────────────────────────
 	return &models.ScrapeResponse{
 		Success: true,
 		Content: content,
 		Metadata: models.Metadata{
-			Title:       article.Title,
-			Description: article.Excerpt,
-			SiteName:    article.SiteName,
-			Author:      article.Byline,
-			Language:    article.Language,
+			Title:       selected.article.Title,
+			Description: selected.article.Excerpt,
+			SiteName:    selected.article.SiteName,
+			Author:      selected.article.Byline,
+			Language:    selected.article.Language,
 			SourceURL:   sourceURL,
 		},
-		Links:      links,
-		Images:     images,
-		OGMetadata: ogMeta,
+		Links:      ExtractLinks(filteredHTML, sourceURL),
+		Images:     ExtractImages(filteredHTML, sourceURL),
+		OGMetadata: ExtractOGMetadata(filteredHTML),
 		Tokens: models.TokenInfo{
 			OriginalEstimate: originalTokens,
 			CleanedEstimate:  cleanedTokens,
 			SavingsPercent:   savingsPercent,
 		},
-		// Timing, StatusCode, FinalURL are left zero-valued.
-		// The API handler layer fills them in.
+		Quality: &qualityInfo,
+		// Timing, StatusCode, and FinalURL are populated by the scrape service.
 	}, nil
 }
 
-// autoExtract runs both Readability and Pruning concurrently, then picks the
-// result that extracted more meaningful text content.
-func autoExtract(rawHTML, sourceURL string) readability.Article {
+func applyCleanOptions(rawHTML string, opts []CleanOptions) (string, error) {
+	if len(opts) == 0 {
+		return rawHTML, nil
+	}
+
+	o := opts[0]
+	if o.CSSSelector != "" {
+		filtered, err := ApplyCSSSelector(rawHTML, o.CSSSelector)
+		if err != nil {
+			return "", models.NewScrapeError(
+				models.ErrCodeInvalidInput,
+				"invalid CSS selector: "+err.Error(),
+				err,
+			)
+		}
+		rawHTML = filtered
+	}
+
+	return FilterContent(rawHTML, o.IncludeTags, o.ExcludeTags), nil
+}
+
+func (c *Cleaner) selectCandidate(rawHTML, sourceURL, extractMode string) extractionCandidate {
+	metadata := extractDocumentMetadata(rawHTML)
+
 	var (
-		readabilityArticle readability.Article
-		prunedHTML         string
-		pruneErr           error
+		readabilityCandidate extractionCandidate
+		readabilityArticle   readability.Article
+		readabilityCalled    bool
 	)
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		readabilityArticle, _ = ExtractContent(rawHTML, sourceURL)
-	}()
-
-	go func() {
-		defer wg.Done()
-		prunedHTML, pruneErr = PruneContent(rawHTML, sourceURL)
-	}()
-
-	wg.Wait()
-
-	// If pruning failed, use readability result.
-	if pruneErr != nil {
-		slog.Warn("auto: pruning failed, using readability result",
-			"url", sourceURL, "error", pruneErr,
-		)
-		return readabilityArticle
-	}
-
-	prunedText := stripTags(prunedHTML)
-	readabilityText := strings.TrimSpace(readabilityArticle.TextContent)
-
-	// Pick the result with more extracted text. If readability produced
-	// very little (< minContentLength), prefer pruning, and vice versa.
-	// When both are substantial, prefer whichever has more content.
-	useReadability := len(readabilityText) >= len(prunedText)
-
-	// Quality check: if the longer result is >10x the shorter, it may
-	// contain too much noise — prefer the shorter one if it still has
-	// a reasonable amount of content.
-	if useReadability && len(prunedText) > minContentLength {
-		if len(readabilityText) > 10*len(prunedText) {
-			useReadability = false
+	getReadability := func() extractionCandidate {
+		if readabilityCalled {
+			return readabilityCandidate
 		}
-	} else if !useReadability && len(readabilityText) > minContentLength {
-		if len(prunedText) > 10*len(readabilityText) {
-			useReadability = true
+		readabilityCalled = true
+
+		extractor := c.extractReadability
+		if extractor == nil {
+			extractor = extractReadabilityArticle
+		}
+		article, err := extractor(rawHTML, sourceURL)
+		if err != nil {
+			return extractionCandidate{}
+		}
+		readabilityArticle = article
+		readabilityCandidate = candidateFor("readability", article)
+		return readabilityCandidate
+	}
+
+	getPruning := func() extractionCandidate {
+		extractor := c.extractPruning
+		if extractor == nil {
+			extractor = pruneContentDetailed
+		}
+		prunedHTML, extracted, err := extractor(rawHTML, sourceURL)
+		if err != nil || !extracted {
+			return extractionCandidate{}
+		}
+		return candidateFor("pruning", readability.Article{
+			Content:     prunedHTML,
+			TextContent: stripTags(prunedHTML),
+		})
+	}
+
+	getRaw := func() extractionCandidate {
+		return candidateFor("raw", readability.Article{
+			Content:     rawHTML,
+			TextContent: stripTags(rawHTML),
+		})
+	}
+
+	var selected extractionCandidate
+	switch normalizeExtractMode(extractMode) {
+	case "raw":
+		selected = getRaw()
+	case "pruning":
+		selected = getPruning()
+		if !selected.assessment.Usable() {
+			selected = getRaw()
+		}
+	case "auto":
+		readable := getReadability()
+		pruned := getPruning()
+		selected = selectHigherQuality(readable, pruned)
+		if !selected.assessment.Usable() {
+			selected = getRaw()
+		}
+	default:
+		selected = getReadability()
+		if !selected.assessment.Usable() {
+			selected = getPruning()
+		}
+		if !selected.assessment.Usable() {
+			selected = getRaw()
 		}
 	}
 
-	if useReadability {
-		return readabilityArticle
+	// Preserve the richest metadata independently of the selected extraction
+	// mode. A low-quality Readability body can still carry valid page metadata.
+	if readabilityCalled {
+		metadata = mergeArticleMetadata(readabilityArticle, metadata)
 	}
+	selected.article = mergeArticleMetadata(selected.article, metadata)
+	return selected
+}
 
-	// Build Article from pruned result, with metadata from readability.
-	return readability.Article{
-		Title:       readabilityArticle.Title,
-		Byline:      readabilityArticle.Byline,
-		Excerpt:     readabilityArticle.Excerpt,
-		SiteName:    readabilityArticle.SiteName,
-		Language:    readabilityArticle.Language,
-		Content:     prunedHTML,
-		TextContent: prunedText,
+func normalizeExtractMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "raw":
+		return "raw"
+	case "pruning":
+		return "pruning"
+	case "auto":
+		return "auto"
+	default:
+		return "readability"
 	}
 }
 
-// stripTags is a simple helper that extracts visible text from an HTML
-// fragment by parsing it with goquery. Returns trimmed plain text.
-func stripTags(html string) string {
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
-	if err != nil {
-		return html
+func candidateFor(mode string, article readability.Article) extractionCandidate {
+	text := strings.TrimSpace(article.TextContent)
+	if text == "" {
+		text = stripTags(article.Content)
 	}
-	return strings.TrimSpace(doc.Text())
+	return extractionCandidate{
+		article:    article,
+		assessment: quality.EvaluateCleanedContent(text, mode),
+		available:  true,
+	}
+}
+
+func selectHigherQuality(readable, pruned extractionCandidate) extractionCandidate {
+	readableUsable := readable.available && readable.assessment.Usable()
+	prunedUsable := pruned.available && pruned.assessment.Usable()
+
+	switch {
+	case readableUsable && prunedUsable:
+		// Readability wins an exact score tie. This makes auto deterministic and
+		// preserves the documented extraction order.
+		if pruned.assessment.Info.Score > readable.assessment.Info.Score {
+			return pruned
+		}
+		return readable
+	case readableUsable:
+		return readable
+	case prunedUsable:
+		return pruned
+	default:
+		return extractionCandidate{}
+	}
+}
+
+func (c *Cleaner) convertArticle(article readability.Article, format, sourceURL string) (string, error) {
+	converterInstance := c.mdConverter
+	if converterInstance == nil {
+		converterInstance = newMarkdownConverter()
+	}
+
+	switch format {
+	case "markdown", "":
+		content, err := ToMarkdown(converterInstance, article.Content, sourceURL)
+		if err != nil {
+			return "", models.NewScrapeError(models.ErrCodeReadability, "markdown conversion failed", err)
+		}
+		return content, nil
+	case "markdown_citations":
+		content, err := ToMarkdown(converterInstance, article.Content, sourceURL)
+		if err != nil {
+			return "", models.NewScrapeError(models.ErrCodeReadability, "markdown conversion failed", err)
+		}
+		return ConvertToCitations(content), nil
+	case "html":
+		return article.Content, nil
+	case "text":
+		return strings.TrimSpace(article.TextContent), nil
+	default:
+		content, err := ToMarkdown(converterInstance, article.Content, sourceURL)
+		if err != nil {
+			return "", models.NewScrapeError(models.ErrCodeReadability, "markdown conversion failed", err)
+		}
+		return content, nil
+	}
+}
+
+func extractDocumentMetadata(rawHTML string) readability.Article {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(rawHTML))
+	if err != nil {
+		return readability.Article{}
+	}
+
+	article := readability.Article{
+		Title:    strings.TrimSpace(doc.Find("title").First().Text()),
+		Excerpt:  firstMetaContent(doc, "meta[name='description']", "meta[property='og:description']"),
+		Byline:   firstMetaContent(doc, "meta[name='author']", "meta[property='article:author']"),
+		SiteName: firstMetaContent(doc, "meta[property='og:site_name']"),
+	}
+	if title := firstMetaContent(doc, "meta[property='og:title']"); title != "" {
+		article.Title = title
+	}
+	article.Language, _ = doc.Find("html").First().Attr("lang")
+	article.Language = strings.TrimSpace(article.Language)
+	return article
+}
+
+func firstMetaContent(doc *goquery.Document, selectors ...string) string {
+	for _, selector := range selectors {
+		if content, exists := doc.Find(selector).First().Attr("content"); exists {
+			if content = strings.TrimSpace(content); content != "" {
+				return content
+			}
+		}
+	}
+	return ""
+}
+
+// mergeArticleMetadata fills missing metadata on primary from fallback while
+// leaving primary's extracted content untouched.
+func mergeArticleMetadata(primary, fallback readability.Article) readability.Article {
+	if primary.Title == "" {
+		primary.Title = fallback.Title
+	}
+	if primary.Byline == "" {
+		primary.Byline = fallback.Byline
+	}
+	if primary.Excerpt == "" {
+		primary.Excerpt = fallback.Excerpt
+	}
+	if primary.SiteName == "" {
+		primary.SiteName = fallback.SiteName
+	}
+	if primary.Language == "" {
+		primary.Language = fallback.Language
+	}
+	return primary
+}
+
+// stripTags extracts visible text from an HTML fragment.
+func stripTags(htmlContent string) string {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
+	if err != nil {
+		return strings.TrimSpace(htmlContent)
+	}
+	root := doc.Selection
+	if body := doc.Find("body").First(); body.Length() > 0 {
+		root = body
+	}
+	root.Find("script, style, noscript, template, svg").Remove()
+	return strings.TrimSpace(root.Text())
 }
