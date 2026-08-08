@@ -32,6 +32,11 @@ type ScrapeResponse struct {
 	// Timing provides duration breakdowns for the operation.
 	Timing TimingInfo `json:"timing"`
 
+	// Quality describes the selected candidate's content quality and ordered
+	// fetch attempts. It is optional to preserve the legacy response contract
+	// until the quality-gated scrape service is connected.
+	Quality *QualityInfo `json:"quality,omitempty"`
+
 	// CacheStatus indicates whether the response was served from cache.
 	// Values: "hit", "miss", or empty (caching not requested).
 	CacheStatus string `json:"cache_status,omitempty"`
