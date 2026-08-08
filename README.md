@@ -332,6 +332,9 @@ An evidence response adds fields without changing the existing response:
       "fetched_at": "2026-08-09T08:00:00Z"
     }
   },
+  "receipts": {
+    "price": "eyJhbGciOiJFZERTQSIsImtpZCI6Ii4uLiJ9..."
+  },
   "metadata": {
     "title": "Plans",
     "source_url": "https://example.com/product",
@@ -356,7 +359,46 @@ cleaned content. `unlocated_rate` is the fraction of JSON leaf values Purify
 could not locate. When the single repair attempt still cannot satisfy the
 schema, the endpoint returns the best data with `partial: true` and a
 `violations` array. With `evidence` omitted or false, `snapshot_id`,
-`unlocated_rate`, `basis`, and signed receipt fields are omitted.
+`unlocated_rate`, `basis`, and signed receipt fields are omitted. Evidence mode
+requires `PURIFY_SNAPSHOT_ENABLED=true`; otherwise the endpoint returns
+`EVIDENCE_UNAVAILABLE`.
+
+### Public receipt verification
+
+Receipt verification and the active public key are free public endpoints; they
+do not require an API key.
+
+```bash
+curl -X POST https://purify.verifly.pro/api/v1/receipts/verify \
+  -H "Content-Type: application/json" \
+  -d '{"receipt":"eyJhbGciOiJFZERTQSIsImtpZCI6Ii4uLiJ9..."}'
+```
+
+```json
+{
+  "valid": true,
+  "payload": {
+    "v": "purify-receipt/1",
+    "url": "https://example.com/product",
+    "path": "price",
+    "value": 29.99,
+    "anchor": {
+      "quote": "$29.99",
+      "text_range": [1204, 1210],
+      "method": "exact",
+      "snapshot_id": "sha256:9f2c...",
+      "fetched_at": "2026-08-09T08:00:00Z"
+    },
+    "issued_at": "2026-08-09T08:00:01Z",
+    "kid": "0123456789abcdef"
+  }
+}
+```
+
+`GET /api/v1/receipts/pubkey` returns the current Ed25519 public key as an
+RFC 8037-compatible OKP JWK. Verification failures return HTTP 200 with
+`{"valid":false,"error":{"code":"INVALID_RECEIPT",...}}`; malformed request
+bodies return HTTP 400.
 
 ### Webhook callbacks
 
@@ -388,10 +430,15 @@ All configuration via environment variables:
 | `PURIFY_RATE_RPS` | `5` | Rate limit (requests/sec/key) |
 | `PURIFY_RATE_BURST` | `10` | Rate limit burst |
 | `PURIFY_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `PURIFY_DATA_DIR` | `./data` | Durable snapshots, signing key, and future ledger |
+| `PURIFY_SNAPSHOT_ENABLED` | `true` | Persist content-addressed HTML snapshots |
+| `PURIFY_SIGNING_KEY` | generated | Optional 32-byte Ed25519 seed encoded as hex |
 
 ## Self-hosting
 
-Purify is a single Go binary. No Docker required, no Redis, no database.
+Purify is a single Go binary. No Docker, Redis, or external database is
+required. The data directory stores compressed snapshots and the stable
+receipt-signing identity; persist it across restarts.
 
 ```bash
 # Local development (no auth)
@@ -406,7 +453,7 @@ Runs on any $5/month VPS. No usage limits when self-hosted.
 ### System requirements
 
 - Any Linux, macOS, or Windows machine
-- ~15 MB disk space
+- ~15 MB for the binary, plus snapshot storage in `PURIFY_DATA_DIR`
 - ~30 MB RAM idle
 
 ## Pricing
