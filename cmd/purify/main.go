@@ -17,6 +17,7 @@ import (
 	"github.com/use-agent/purify/engine"
 	"github.com/use-agent/purify/llm"
 	"github.com/use-agent/purify/models"
+	"github.com/use-agent/purify/receipts"
 	"github.com/use-agent/purify/scraper"
 	"github.com/use-agent/purify/snapshot"
 )
@@ -33,6 +34,19 @@ func main() {
 		"mode", cfg.Server.Mode,
 		"maxPages", cfg.Browser.MaxPages,
 	)
+
+	// ── 2a. Initialise durable receipt signing identity ─────────────
+	receiptPrivateKey, receiptKID, err := receipts.LoadOrCreateKey(cfg.Storage)
+	if err != nil {
+		slog.Error("failed to initialise receipt signing key", "error", err)
+		os.Exit(1)
+	}
+	receiptSigner, err := receipts.NewSigner(receiptPrivateKey)
+	if err != nil {
+		slog.Error("failed to initialise receipt signer", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("receipt signing enabled", "kid", receiptKID)
 
 	// ── 3. Initialise scraper (launches browser) ────────────────────
 	sc, err := scraper.NewScraper(cfg.Browser, cfg.Scraper)
@@ -109,7 +123,7 @@ func main() {
 
 	// ── 5. Setup router ─────────────────────────────────────────────
 	startTime := time.Now()
-	router := api.NewRouter(sc, cl, llmClient, cfg, cc, startTime)
+	router := api.NewRouter(sc, cl, llmClient, receiptSigner, cfg, cc, startTime)
 
 	// ── 6. Start HTTP server ────────────────────────────────────────
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

@@ -4,15 +4,17 @@ import "fmt"
 
 // Error codes used in API responses and internal error handling.
 const (
-	ErrCodeTimeout      = "SCRAPE_TIMEOUT"
-	ErrCodeNavigation   = "NAVIGATION_FAILED"
-	ErrCodeReadability  = "CONTENT_EXTRACTION_FAILED"
-	ErrCodeBrowserCrash = "BROWSER_CRASH"
-	ErrCodeInvalidInput = "INVALID_INPUT"
-	ErrCodeRateLimited  = "RATE_LIMITED"
-	ErrCodeUnauthorized = "UNAUTHORIZED"
-	ErrCodeInternal     = "INTERNAL_ERROR"
-	ErrCodeActionFailed = "ACTION_FAILED"
+	ErrCodeTimeout             = "SCRAPE_TIMEOUT"
+	ErrCodeNavigation          = "NAVIGATION_FAILED"
+	ErrCodeReadability         = "CONTENT_EXTRACTION_FAILED"
+	ErrCodeBrowserCrash        = "BROWSER_CRASH"
+	ErrCodeInvalidInput        = "INVALID_INPUT"
+	ErrCodeRateLimited         = "RATE_LIMITED"
+	ErrCodeUnauthorized        = "UNAUTHORIZED"
+	ErrCodeInternal            = "INTERNAL_ERROR"
+	ErrCodeActionFailed        = "ACTION_FAILED"
+	ErrCodeInvalidReceipt      = "INVALID_RECEIPT"
+	ErrCodeEvidenceUnavailable = "EVIDENCE_UNAVAILABLE"
 
 	// LLM-related error codes for /api/v1/extract.
 	ErrCodeLLMFailure     = "LLM_FAILURE"

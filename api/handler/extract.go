@@ -3,7 +3,10 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -11,12 +14,17 @@ import (
 	"github.com/use-agent/purify/evidence"
 	"github.com/use-agent/purify/llm"
 	"github.com/use-agent/purify/models"
+	"github.com/use-agent/purify/receipts"
 	"github.com/use-agent/purify/scraper"
 )
 
 type structuredExtractor interface {
 	Extract(context.Context, string, json.RawMessage, llm.ExtractParams) (*llm.ExtractResult, error)
 	ExtractWithRepair(context.Context, string, json.RawMessage, json.RawMessage, []llm.Violation, llm.ExtractParams) (*llm.ExtractResult, error)
+}
+
+type fieldReceiptSigner interface {
+	Sign(receipts.Payload) (string, error)
 }
 
 // Extract returns a handler for POST /api/v1/extract.
@@ -27,7 +35,7 @@ type structuredExtractor interface {
 //  3. Clean (with optional CSS selector) → content.
 //  4. LLM Extract → structured JSON.
 //  5. Assemble response with timing and LLM usage.
-func Extract(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient structuredExtractor) gin.HandlerFunc {
+func Extract(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient structuredExtractor, receiptSigner fieldReceiptSigner) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		totalStart := time.Now()
 
@@ -122,14 +130,40 @@ func Extract(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient structuredExtra
 
 		// ── 5. Assemble response ────────────────────────────────────
 		var basis *models.EvidenceBasis
+		var fieldReceipts *models.FieldReceipts
 		var unlocatedRate *float64
 		var snapshotID string
 		if req.Evidence {
+			if result.SnapshotID == "" {
+				respondExtractError(c, models.NewScrapeError(models.ErrCodeEvidenceUnavailable, "evidence mode requires snapshot storage", nil), models.ExtractTimingInfo{
+					TotalMs:      time.Since(totalStart).Milliseconds(),
+					NavigationMs: navigationMs,
+					CleaningMs:   cleaningMs,
+					ExtractionMs: extractionMs,
+				})
+				return
+			}
 			aligned, rate := evidence.AlignAll(llmResult.Data, scrapeResp.Content, result.RawHTML, string(result.SnapshotID), result.FetchedAt)
 			typedBasis := models.EvidenceBasis(aligned)
 			basis = &typedBasis
 			unlocatedRate = &rate
 			snapshotID = string(result.SnapshotID)
+			sourceURL := result.FinalURL
+			if sourceURL == "" {
+				sourceURL = req.URL
+			}
+			signed, signErr := signFieldReceipts(llmResult.Data, typedBasis, sourceURL, time.Now().UTC(), receiptSigner)
+			if signErr != nil {
+				respondExtractError(c, models.NewScrapeError(models.ErrCodeInternal, "failed to sign evidence receipts", signErr), models.ExtractTimingInfo{
+					TotalMs:      time.Since(totalStart).Milliseconds(),
+					NavigationMs: navigationMs,
+					CleaningMs:   cleaningMs,
+					ExtractionMs: extractionMs,
+				})
+				return
+			}
+			typedReceipts := models.FieldReceipts(signed)
+			fieldReceipts = &typedReceipts
 		}
 		c.JSON(http.StatusOK, models.ExtractResponse{
 			Success:       true,
@@ -139,6 +173,7 @@ func Extract(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient structuredExtra
 			SnapshotID:    snapshotID,
 			UnlocatedRate: unlocatedRate,
 			Basis:         basis,
+			Receipts:      fieldReceipts,
 			Metadata:      scrapeResp.Metadata,
 			Tokens:        scrapeResp.Tokens,
 			Timing: models.ExtractTimingInfo{
@@ -150,6 +185,50 @@ func Extract(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient structuredExtra
 			LLMUsage: llmResult.Usage,
 		})
 	}
+}
+
+func signFieldReceipts(
+	data json.RawMessage,
+	basis models.EvidenceBasis,
+	sourceURL string,
+	issuedAt time.Time,
+	signer fieldReceiptSigner,
+) (map[string]string, error) {
+	if signer == nil {
+		return nil, errors.New("receipt signer is unavailable")
+	}
+	values, err := evidence.LeafValues(data)
+	if err != nil {
+		return nil, fmt.Errorf("decode leaf values: %w", err)
+	}
+	if len(values) != len(basis) {
+		return nil, fmt.Errorf("evidence/value path count mismatch: %d != %d", len(basis), len(values))
+	}
+	paths := make([]string, 0, len(values))
+	for path := range values {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	tokens := make(map[string]string, len(paths))
+	for _, path := range paths {
+		anchor, ok := basis[path]
+		if !ok {
+			return nil, fmt.Errorf("evidence anchor missing for %q", path)
+		}
+		token, err := signer.Sign(receipts.Payload{
+			URL:      sourceURL,
+			Path:     path,
+			Value:    values[path],
+			Anchor:   anchor,
+			IssuedAt: issuedAt,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("sign %q: %w", path, err)
+		}
+		tokens[path] = token
+	}
+	return tokens, nil
 }
 
 // extractWithValidation performs exactly one initial extraction and, only
@@ -235,6 +314,8 @@ func mapExtractErrorToStatus(e *models.ScrapeError) int {
 		return http.StatusUnauthorized
 	case models.ErrCodeLLMFailure:
 		return http.StatusBadGateway
+	case models.ErrCodeEvidenceUnavailable:
+		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
 	}

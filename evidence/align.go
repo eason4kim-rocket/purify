@@ -6,7 +6,9 @@ package evidence
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -96,10 +98,8 @@ func alignValue(value, cleaned string, findSelector func(string) string) Anchor 
 // four-argument API from the master plan while allowing handlers to attach the
 // real observation time.
 func AlignAll(data json.RawMessage, cleaned, rawHTML, snapshotID string, fetchedAt ...time.Time) (map[string]Anchor, float64) {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
-	var document any
-	if err := decoder.Decode(&document); err != nil {
+	document, err := decodeDocument(data)
+	if err != nil {
 		return map[string]Anchor{}, 1
 	}
 
@@ -127,9 +127,43 @@ func AlignAll(data json.RawMessage, cleaned, rawHTML, snapshotID string, fetched
 	return anchors, float64(unlocated) / float64(len(leaves))
 }
 
+// LeafValues returns every scalar JSON leaf using the same deterministic
+// dot/index paths as AlignAll. Values retain their JSON types and bytes are
+// copied so callers may safely keep them in signed receipts.
+func LeafValues(data json.RawMessage) (map[string]json.RawMessage, error) {
+	document, err := decodeDocument(data)
+	if err != nil {
+		return nil, err
+	}
+	leaves := make([]leaf, 0)
+	flattenLeaves("", document, &leaves)
+	values := make(map[string]json.RawMessage, len(leaves))
+	for _, item := range leaves {
+		values[item.path] = append(json.RawMessage(nil), item.raw...)
+	}
+	return values, nil
+}
+
+func decodeDocument(data json.RawMessage) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var document any
+	if err := decoder.Decode(&document); err != nil {
+		return nil, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("multiple JSON values")
+		}
+		return nil, err
+	}
+	return document, nil
+}
+
 type leaf struct {
 	path  string
 	value string
+	raw   json.RawMessage
 }
 
 func flattenLeaves(path string, value any, leaves *[]leaf) {
@@ -148,16 +182,24 @@ func flattenLeaves(path string, value any, leaves *[]leaf) {
 			flattenLeaves(joinPath(path, strconv.Itoa(index)), child, leaves)
 		}
 	case string:
-		*leaves = append(*leaves, leaf{path: rootPath(path), value: typed})
+		appendLeaf(leaves, path, typed, typed)
 	case json.Number:
-		*leaves = append(*leaves, leaf{path: rootPath(path), value: typed.String()})
+		appendLeaf(leaves, path, typed, typed.String())
 	case bool:
-		*leaves = append(*leaves, leaf{path: rootPath(path), value: strconv.FormatBool(typed)})
+		appendLeaf(leaves, path, typed, strconv.FormatBool(typed))
 	case nil:
-		*leaves = append(*leaves, leaf{path: rootPath(path), value: ""})
+		appendLeaf(leaves, path, nil, "")
 	default:
-		*leaves = append(*leaves, leaf{path: rootPath(path), value: fmt.Sprint(typed)})
+		appendLeaf(leaves, path, typed, fmt.Sprint(typed))
 	}
+}
+
+func appendLeaf(leaves *[]leaf, path string, value any, rendered string) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		raw = json.RawMessage("null")
+	}
+	*leaves = append(*leaves, leaf{path: rootPath(path), value: rendered, raw: raw})
 }
 
 func joinPath(base, component string) string {

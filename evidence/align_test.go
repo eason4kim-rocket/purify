@@ -121,6 +121,33 @@ func TestFindUniqueSelectorUsesDeepestUniqueElement(t *testing.T) {
 	}
 }
 
+func TestLeafValuesPreservesJSONTypesAndPaths(t *testing.T) {
+	values, err := LeafValues(json.RawMessage(`{"items":[{"name":"Alpha","price":10.50}],"active":true,"missing":null}`))
+	if err != nil {
+		t.Fatalf("LeafValues() error = %v", err)
+	}
+	want := map[string]string{
+		"items.0.name":  `"Alpha"`,
+		"items.0.price": `10.50`,
+		"active":        `true`,
+		"missing":       `null`,
+	}
+	if len(values) != len(want) {
+		t.Fatalf("LeafValues() = %#v, want %d values", values, len(want))
+	}
+	for path, expected := range want {
+		if got := string(values[path]); got != expected {
+			t.Fatalf("value %q = %s, want %s", path, got, expected)
+		}
+	}
+}
+
+func TestLeafValuesRejectsTrailingJSON(t *testing.T) {
+	if _, err := LeafValues(json.RawMessage(`{"ok":true} {"extra":true}`)); err == nil {
+		t.Fatal("LeafValues() accepted multiple JSON documents")
+	}
+}
+
 func BenchmarkAlignAll(b *testing.B) {
 	data := json.RawMessage(`{"title":"Pro Plan","price":"1299","features":["Fast reliable search","Evidence receipts"]}`)
 	cleaned := "Pro Plan costs $1,299. Fast reliable search with Evidence receipts."
