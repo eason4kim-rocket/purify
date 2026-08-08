@@ -282,7 +282,10 @@ Discover all URLs on a site without scraping content.
 
 ### POST /api/v1/extract
 
-Structured data extraction using your own LLM key (BYOK).
+Structured data extraction using your own LLM key (BYOK). Purify validates the
+result against JSON Schema and makes at most one repair attempt. Set
+`evidence` to attach the immutable page snapshot and a source anchor for every
+JSON leaf value.
 
 ```bash
 curl -X POST https://purify.verifly.pro/api/v1/extract \
@@ -291,13 +294,69 @@ curl -X POST https://purify.verifly.pro/api/v1/extract \
   -d '{
     "url": "https://example.com/product",
     "schema": {
-      "name": "string",
-      "price": "number",
-      "features": ["string"]
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "price": {"type": "number"},
+        "features": {"type": "array", "items": {"type": "string"}}
+      },
+      "required": ["name", "price"],
+      "additionalProperties": false
     },
-    "llm_api_key": "your-openai-key"
+    "llm_api_key": "your-openai-key",
+    "evidence": true
   }'
 ```
+
+Legacy shorthand schemas such as `{"name":"string","price":"number"}`
+remain accepted and are normalized to JSON Schema server-side.
+
+An evidence response adds fields without changing the existing response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "name": "Pro Plan",
+    "price": 29.99
+  },
+  "snapshot_id": "sha256:9f2c...",
+  "unlocated_rate": 0,
+  "basis": {
+    "price": {
+      "quote": "$29.99",
+      "text_range": [1204, 1210],
+      "selector": ".pricing-card .amount",
+      "method": "exact",
+      "snapshot_id": "sha256:9f2c...",
+      "fetched_at": "2026-08-09T08:00:00Z"
+    }
+  },
+  "metadata": {
+    "title": "Plans",
+    "source_url": "https://example.com/product",
+    "fetch_method": "http"
+  },
+  "tokens": {
+    "original_estimate": 1000,
+    "cleaned_estimate": 250,
+    "savings_percent": 75
+  },
+  "timing": {
+    "total_ms": 820,
+    "navigation_ms": 600,
+    "cleaning_ms": 20,
+    "extraction_ms": 200
+  }
+}
+```
+
+`text_range` is a half-open `[start,end)` range of UTF-8 byte offsets into the
+cleaned content. `unlocated_rate` is the fraction of JSON leaf values Purify
+could not locate. When the single repair attempt still cannot satisfy the
+schema, the endpoint returns the best data with `partial: true` and a
+`violations` array. With `evidence` omitted or false, `snapshot_id`,
+`unlocated_rate`, `basis`, and signed receipt fields are omitted.
 
 ### Webhook callbacks
 

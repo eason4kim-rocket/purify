@@ -121,12 +121,13 @@ func Extract(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient structuredExtra
 		}
 
 		// ── 5. Assemble response ────────────────────────────────────
-		var basis map[string]evidence.Anchor
+		var basis *models.EvidenceBasis
 		var unlocatedRate *float64
 		var snapshotID string
 		if req.Evidence {
 			aligned, rate := evidence.AlignAll(llmResult.Data, scrapeResp.Content, result.RawHTML, string(result.SnapshotID), result.FetchedAt)
-			basis = aligned
+			typedBasis := models.EvidenceBasis(aligned)
+			basis = &typedBasis
 			unlocatedRate = &rate
 			snapshotID = string(result.SnapshotID)
 		}

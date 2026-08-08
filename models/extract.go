@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/use-agent/purify/evidence"
 )
@@ -113,8 +114,17 @@ type ExtractResponse struct {
 	// UnlocatedRate is present in evidence mode, including when the rate is 0.
 	UnlocatedRate *float64 `json:"unlocated_rate,omitempty"`
 
-	// Basis maps JSON leaf paths to source anchors.
-	Basis map[string]evidence.Anchor `json:"basis,omitempty"`
+	// Basis maps JSON leaf paths to source anchors. The pointer distinguishes
+	// evidence mode with zero leaves ({}) from evidence mode being disabled.
+	Basis *EvidenceBasis `json:"basis,omitempty"`
+
+	// Receipts maps the same JSON leaf paths to portable signed receipts. Like
+	// Basis, an empty object remains visible when evidence mode is enabled.
+	Receipts *FieldReceipts `json:"receipts,omitempty"`
+
+	// Extractor identifies the deterministic extractor that served this
+	// response. It is omitted while the LLM path is used.
+	Extractor *ExtractorMetadata `json:"extractor,omitempty"`
 
 	// Metadata contains extracted page metadata.
 	Metadata Metadata `json:"metadata"`
@@ -130,6 +140,22 @@ type ExtractResponse struct {
 
 	// Error is populated only when Success is false.
 	Error *ErrorDetail `json:"error,omitempty"`
+}
+
+// EvidenceBasis is the public path-to-anchor map returned in evidence mode.
+type EvidenceBasis map[string]evidence.Anchor
+
+// FieldReceipts is the public path-to-token map returned in evidence mode.
+type FieldReceipts map[string]string
+
+// ExtractorMetadata describes a compiled extractor selected by the Phase 2
+// auto engine. Nil means no deterministic extractor served the response.
+type ExtractorMetadata struct {
+	ID         int64     `json:"id"`
+	Version    int       `json:"version"`
+	CompiledAt time.Time `json:"compiled_at"`
+	Validation float64   `json:"validation"`
+	Mode       string    `json:"mode"`
 }
 
 // SchemaViolation identifies one location where extracted data does not
