@@ -50,11 +50,17 @@ type ServiceOption interface {
 // domain filtering, deterministic deduplication, and bounded result caching.
 // Optional page enrichment is layered onto this type in later concerns.
 type Service struct {
-	provider        Provider
-	providerName    string
-	cache           *baselineCache
-	now             func() time.Time
-	providerTimeout time.Duration
+	provider          Provider
+	providerName      string
+	cache             *baselineCache
+	now               func() time.Time
+	providerTimeout   time.Duration
+	artifacts         ArtifactService
+	signer            ReceiptSigner
+	enrichmentSlots   chan struct{}
+	enrichmentTimeout time.Duration
+	encodingSlots     chan struct{}
+	encodeSearch      func(any) ([]byte, error)
 }
 
 // NewService constructs a Search service with the fixed one-minute,
@@ -88,8 +94,11 @@ func newService(provider Provider, now func() time.Time, options ...ServiceOptio
 			baselineCacheMaxBytes,
 			now,
 		),
-		now:             now,
-		providerTimeout: providerSearchTimeout,
+		now:               now,
+		providerTimeout:   providerSearchTimeout,
+		enrichmentTimeout: defaultSearchEnrichmentTimeout,
+		encodingSlots:     make(chan struct{}, defaultSearchEncodingSlots),
+		encodeSearch:      json.Marshal,
 	}
 	for _, option := range options {
 		if isNilServiceOption(option) {
@@ -124,7 +133,7 @@ func (service *Service) SearchWithOptions(ctx context.Context, request *models.S
 	if err != nil {
 		return nil, err
 	}
-	if prepared.requiresEnrichment {
+	if prepared.requiresEnrichment && !service.enrichmentAvailable() {
 		return nil, searchUnavailable("requested search capability is unavailable", nil)
 	}
 
@@ -169,14 +178,30 @@ func (service *Service) SearchWithOptions(ctx context.Context, request *models.S
 	if err := runCtx.Err(); err != nil {
 		return nil, searchTimeout(err)
 	}
+	droppedStale := 0
+	partial := false
+	enrichmentMilliseconds := int64(0)
+	if prepared.requiresEnrichment && len(results) > 0 {
+		enrichmentStartedAt := service.now()
+		var additionalDeduplicated int
+		results, droppedStale, additionalDeduplicated, partial = service.enrichResults(runCtx, results, prepared)
+		enrichmentMilliseconds = elapsedMilliseconds(enrichmentStartedAt, service.now())
+		deduplicated += additionalDeduplicated
+		if err := runCtx.Err(); err != nil {
+			return nil, searchTimeout(err)
+		}
+	}
 	return &models.SearchResponse{
 		Success:      true,
 		Query:        prepared.query,
 		Results:      results,
 		Deduplicated: deduplicated,
+		DroppedStale: droppedStale,
+		Partial:      partial,
 		Timing: models.SearchTimingInfo{
-			TotalMs:    elapsedMilliseconds(startedAt, service.now()),
-			ProviderMs: providerMilliseconds,
+			TotalMs:      elapsedMilliseconds(startedAt, service.now()),
+			ProviderMs:   providerMilliseconds,
+			EnrichmentMs: enrichmentMilliseconds,
 		},
 	}, nil
 }
@@ -189,6 +214,13 @@ type preparedSearchRequest struct {
 	deduplicate        bool
 	timeout            time.Duration
 	requiresEnrichment bool
+	includeContent     bool
+	verify             bool
+	schema             json.RawMessage
+	engine             string
+	llmAPIKey          string
+	llmModel           string
+	llmBaseURL         string
 }
 
 func prepareSearchRequest(source *models.SearchRequest) (preparedSearchRequest, error) {
@@ -240,6 +272,13 @@ func prepareSearchRequest(source *models.SearchRequest) (preparedSearchRequest, 
 		deduplicate:        *request.Deduplicate,
 		timeout:            time.Duration(request.Timeout) * time.Second,
 		requiresEnrichment: request.IncludeContent || request.Verify || schemaPresent,
+		includeContent:     request.IncludeContent,
+		verify:             request.Verify,
+		schema:             bytes.Clone(request.Schema),
+		engine:             strings.Clone(request.Engine),
+		llmAPIKey:          strings.Clone(request.LLMAPIKey),
+		llmModel:           strings.Clone(request.LLMModel),
+		llmBaseURL:         strings.Clone(request.LLMBaseURL),
 	}, nil
 }
 
