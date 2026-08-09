@@ -5,6 +5,7 @@ package evidence
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 )
+
+const alignmentContextCheckpointBytes = 4 << 10
 
 // Method identifies how an extracted value was anchored.
 type Method string
@@ -47,25 +50,81 @@ func AlignValue(value, cleaned, rawHTML string) Anchor {
 	return alignValue(value, cleaned, selectors.find)
 }
 
+// AlignValueContext is the context-aware form of AlignValue. It returns the
+// context cancellation or deadline error unchanged so callers can classify it
+// with errors.Is. A nil context is invalid.
+func AlignValueContext(ctx context.Context, value, cleaned, rawHTML string) (Anchor, error) {
+	if ctx == nil {
+		return Anchor{}, errors.New("evidence: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return Anchor{}, err
+	}
+	return alignValueContext(ctx, value, cleaned, func(ctx context.Context, quote string) (string, error) {
+		selectors, err := newSelectorDocumentContext(ctx, rawHTML)
+		if err != nil {
+			return "", err
+		}
+		return selectors.findContext(ctx, quote)
+	})
+}
+
 func alignValue(value, cleaned string, findSelector func(string) string) Anchor {
+	anchor, _ := alignValueContext(
+		context.Background(),
+		value,
+		cleaned,
+		func(_ context.Context, quote string) (string, error) { return findSelector(quote), nil },
+	)
+	return anchor
+}
+
+func alignValueContext(
+	ctx context.Context,
+	value, cleaned string,
+	findSelector func(context.Context, string) (string, error),
+) (Anchor, error) {
+	if err := ctx.Err(); err != nil {
+		return Anchor{}, err
+	}
 	if value == "" {
-		return Anchor{Method: MethodUnlocated}
+		return Anchor{Method: MethodUnlocated}, nil
 	}
 
-	if start := strings.Index(cleaned, value); start >= 0 {
+	start, err := indexStringContext(ctx, cleaned, value)
+	if err != nil {
+		return Anchor{}, err
+	}
+	if start >= 0 {
 		anchor := Anchor{
 			Quote:     cleaned[start : start+len(value)],
 			TextRange: [2]int{start, start + len(value)},
 			Method:    MethodExact,
 		}
-		anchor.Selector = findSelector(anchor.Quote)
-		return anchor
+		anchor.Selector, err = findSelector(ctx, anchor.Quote)
+		if err != nil {
+			return Anchor{}, err
+		}
+		if err := ctx.Err(); err != nil {
+			return Anchor{}, err
+		}
+		return anchor, nil
 	}
 
-	normalizedCleaned := normalizeWithOffsets(cleaned)
-	normalizedValue := normalizeText(value)
+	normalizedCleaned, err := normalizeWithOffsetsContext(ctx, cleaned)
+	if err != nil {
+		return Anchor{}, err
+	}
+	normalizedValue, err := normalizeTextContext(ctx, value)
+	if err != nil {
+		return Anchor{}, err
+	}
 	if normalizedValue != "" {
-		if start := strings.Index(normalizedCleaned.text, normalizedValue); start >= 0 {
+		start, err := indexStringContext(ctx, normalizedCleaned.text, normalizedValue)
+		if err != nil {
+			return Anchor{}, err
+		}
+		if start >= 0 {
 			end := start + len(normalizedValue)
 			originalStart, originalEnd, ok := normalizedCleaned.originalRange(start, end)
 			if ok {
@@ -74,23 +133,42 @@ func alignValue(value, cleaned string, findSelector func(string) string) Anchor 
 					TextRange: [2]int{originalStart, originalEnd},
 					Method:    MethodNormalized,
 				}
-				anchor.Selector = findSelector(anchor.Quote)
-				return anchor
+				anchor.Selector, err = findSelector(ctx, anchor.Quote)
+				if err != nil {
+					return Anchor{}, err
+				}
+				if err := ctx.Err(); err != nil {
+					return Anchor{}, err
+				}
+				return anchor, nil
 			}
 		}
 	}
 
-	if quote, start, end, ok := fuzzyWindow(value, cleaned); ok {
+	quote, start, end, ok, err := fuzzyWindowContext(ctx, value, cleaned)
+	if err != nil {
+		return Anchor{}, err
+	}
+	if ok {
 		anchor := Anchor{
 			Quote:     quote,
 			TextRange: [2]int{start, end},
 			Method:    MethodFuzzy,
 		}
-		anchor.Selector = findSelector(anchor.Quote)
-		return anchor
+		anchor.Selector, err = findSelector(ctx, anchor.Quote)
+		if err != nil {
+			return Anchor{}, err
+		}
+		if err := ctx.Err(); err != nil {
+			return Anchor{}, err
+		}
+		return anchor, nil
 	}
 
-	return Anchor{Method: MethodUnlocated}
+	if err := ctx.Err(); err != nil {
+		return Anchor{}, err
+	}
+	return Anchor{Method: MethodUnlocated}, nil
 }
 
 // AlignAll walks every scalar JSON leaf and returns dot/index-path anchors plus
@@ -223,17 +301,125 @@ type normalizedString struct {
 	ends   []int
 }
 
+type contextScanTicker struct {
+	remaining int
+}
+
+func newContextScanTicker() contextScanTicker {
+	return contextScanTicker{remaining: alignmentContextCheckpointBytes}
+}
+
+func (ticker *contextScanTicker) step(ctx context.Context) error {
+	return ticker.advance(ctx, 1)
+}
+
+func (ticker *contextScanTicker) advance(ctx context.Context, amount int) error {
+	if amount < ticker.remaining {
+		ticker.remaining -= amount
+		return nil
+	}
+	overflow := amount - ticker.remaining
+	ticker.remaining = alignmentContextCheckpointBytes - overflow%alignmentContextCheckpointBytes
+	return ctx.Err()
+}
+
+// indexStringContext is a cancellable byte-exact substring search. Horspool's
+// fixed-size shift table keeps auxiliary memory bounded independently of the
+// caller-controlled value length.
+func indexStringContext(ctx context.Context, text, value string) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return -1, err
+	}
+	if value == "" {
+		return 0, nil
+	}
+	if len(value) > len(text) {
+		if err := ctx.Err(); err != nil {
+			return -1, err
+		}
+		return -1, nil
+	}
+
+	ticker := newContextScanTicker()
+	var shifts [256]int
+	for index := range shifts {
+		shifts[index] = len(value)
+		if err := ticker.step(ctx); err != nil {
+			return -1, err
+		}
+	}
+	for index := 0; index < len(value)-1; index++ {
+		shifts[value[index]] = len(value) - 1 - index
+		if err := ticker.step(ctx); err != nil {
+			return -1, err
+		}
+	}
+
+	for end := len(value) - 1; end < len(text); {
+		valueIndex := len(value) - 1
+		textIndex := end
+		for valueIndex >= 0 && text[textIndex] == value[valueIndex] {
+			if err := ticker.step(ctx); err != nil {
+				return -1, err
+			}
+			valueIndex--
+			textIndex--
+		}
+		if valueIndex < 0 {
+			if err := ctx.Err(); err != nil {
+				return -1, err
+			}
+			return end - len(value) + 1, nil
+		}
+		if err := ticker.step(ctx); err != nil {
+			return -1, err
+		}
+		shift := shifts[text[end]]
+		if err := ticker.advance(ctx, shift); err != nil {
+			return -1, err
+		}
+		end += shift
+	}
+	if err := ctx.Err(); err != nil {
+		return -1, err
+	}
+	return -1, nil
+}
+
 func normalizeText(input string) string {
-	return normalizeWithOffsets(input).text
+	normalized, _ := normalizeTextContext(context.Background(), input)
+	return normalized
 }
 
 func normalizeWithOffsets(input string) normalizedString {
+	normalized, _ := normalizeWithOffsetsContext(context.Background(), input)
+	return normalized
+}
+
+func normalizeTextContext(ctx context.Context, input string) (string, error) {
+	normalized, err := normalizeWithOffsetsContext(ctx, input)
+	return normalized.text, err
+}
+
+func normalizeWithOffsetsContext(ctx context.Context, input string) (normalizedString, error) {
+	if err := ctx.Err(); err != nil {
+		return normalizedString{}, err
+	}
 	var text strings.Builder
 	starts := make([]int, 0, len(input))
 	ends := make([]int, 0, len(input))
 	lastWasSpace := false
+	nextCheckpoint := alignmentContextCheckpointBytes
 
 	for byteOffset, originalRune := range input {
+		if byteOffset >= nextCheckpoint {
+			if err := ctx.Err(); err != nil {
+				return normalizedString{}, err
+			}
+			for nextCheckpoint <= byteOffset {
+				nextCheckpoint += alignmentContextCheckpointBytes
+			}
+		}
 		originalWidth := utf8.RuneLen(originalRune)
 		if originalWidth < 0 {
 			originalWidth = 1
@@ -273,7 +459,10 @@ func normalizeWithOffsets(input string) normalizedString {
 		starts = starts[:len(starts)-1]
 		ends = ends[:len(ends)-1]
 	}
-	return normalizedString{text: result, starts: starts, ends: ends}
+	if err := ctx.Err(); err != nil {
+		return normalizedString{}, err
+	}
+	return normalizedString{text: result, starts: starts, ends: ends}, nil
 }
 
 func (n normalizedString) originalRange(start, end int) (int, int, bool) {
@@ -309,12 +498,29 @@ type wordToken struct {
 }
 
 func fuzzyWindow(value, cleaned string) (string, int, int, bool) {
-	wanted := tokenize(value)
-	available := tokenize(cleaned)
-	if len(wanted) == 0 || len(available) == 0 {
-		return "", 0, 0, false
+	quote, start, end, ok, _ := fuzzyWindowContext(context.Background(), value, cleaned)
+	return quote, start, end, ok
+}
+
+func fuzzyWindowContext(ctx context.Context, value, cleaned string) (string, int, int, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", 0, 0, false, err
 	}
-	wantedSet := tokenSet(wanted)
+	wanted, err := tokenizeContext(ctx, value)
+	if err != nil {
+		return "", 0, 0, false, err
+	}
+	available, err := tokenizeContext(ctx, cleaned)
+	if err != nil {
+		return "", 0, 0, false, err
+	}
+	if len(wanted) == 0 || len(available) == 0 {
+		return "", 0, 0, false, nil
+	}
+	wantedSet, err := tokenSetContext(ctx, wanted)
+	if err != nil {
+		return "", 0, 0, false, err
+	}
 	minWindow := len(wanted) - 2
 	if minWindow < 1 {
 		minWindow = 1
@@ -327,9 +533,24 @@ func fuzzyWindow(value, cleaned string) (string, int, int, bool) {
 	bestScore := 0.0
 	bestStart, bestEnd, bestSize := 0, 0, 0
 	for size := minWindow; size <= maxWindow; size++ {
+		if err := ctx.Err(); err != nil {
+			return "", 0, 0, false, err
+		}
 		for start := 0; start+size <= len(available); start++ {
+			if start%256 == 0 {
+				if err := ctx.Err(); err != nil {
+					return "", 0, 0, false, err
+				}
+			}
 			window := available[start : start+size]
-			score := jaccard(wantedSet, tokenSet(window))
+			windowSet, err := tokenSetContext(ctx, window)
+			if err != nil {
+				return "", 0, 0, false, err
+			}
+			score, err := jaccardContext(ctx, wantedSet, windowSet)
+			if err != nil {
+				return "", 0, 0, false, err
+			}
 			closer := abs(size-len(wanted)) < abs(bestSize-len(wanted))
 			if score > bestScore || (score == bestScore && (bestSize == 0 || closer)) {
 				bestScore = score
@@ -339,16 +560,28 @@ func fuzzyWindow(value, cleaned string) (string, int, int, bool) {
 			}
 		}
 	}
-	if bestScore < 0.8 || bestEnd <= bestStart {
-		return "", 0, 0, false
+	if err := ctx.Err(); err != nil {
+		return "", 0, 0, false, err
 	}
-	return cleaned[bestStart:bestEnd], bestStart, bestEnd, true
+	if bestScore < 0.8 || bestEnd <= bestStart {
+		return "", 0, 0, false, nil
+	}
+	return cleaned[bestStart:bestEnd], bestStart, bestEnd, true, nil
 }
 
 func tokenize(input string) []wordToken {
+	tokens, _ := tokenizeContext(context.Background(), input)
+	return tokens
+}
+
+func tokenizeContext(ctx context.Context, input string) ([]wordToken, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	tokens := make([]wordToken, 0)
 	start := -1
 	var value strings.Builder
+	nextCheckpoint := alignmentContextCheckpointBytes
 	flush := func(end int) {
 		if start < 0 {
 			return
@@ -358,6 +591,14 @@ func tokenize(input string) []wordToken {
 		value.Reset()
 	}
 	for offset, originalRune := range input {
+		if offset >= nextCheckpoint {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			for nextCheckpoint <= offset {
+				nextCheckpoint += alignmentContextCheckpointBytes
+			}
+		}
 		r := unicode.ToLower(foldWidth(originalRune))
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			if start < 0 {
@@ -369,32 +610,69 @@ func tokenize(input string) []wordToken {
 		flush(offset)
 	}
 	flush(len(input))
-	return tokens
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return tokens, nil
 }
 
 func tokenSet(tokens []wordToken) map[string]struct{} {
-	set := make(map[string]struct{}, len(tokens))
-	for _, token := range tokens {
-		set[token.value] = struct{}{}
-	}
+	set, _ := tokenSetContext(context.Background(), tokens)
 	return set
 }
 
+func tokenSetContext(ctx context.Context, tokens []wordToken) (map[string]struct{}, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	set := make(map[string]struct{}, len(tokens))
+	for index, token := range tokens {
+		if index%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		set[token.value] = struct{}{}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return set, nil
+}
+
 func jaccard(left, right map[string]struct{}) float64 {
+	score, _ := jaccardContext(context.Background(), left, right)
+	return score
+}
+
+func jaccardContext(ctx context.Context, left, right map[string]struct{}) (float64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if len(left) == 0 && len(right) == 0 {
-		return 1
+		return 1, nil
 	}
 	intersection := 0
+	processed := 0
 	for item := range left {
+		processed++
+		if processed%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+		}
 		if _, ok := right[item]; ok {
 			intersection++
 		}
 	}
 	union := len(left) + len(right) - intersection
 	if union == 0 {
-		return 0
+		return 0, nil
 	}
-	return float64(intersection) / float64(union)
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return float64(intersection) / float64(union), nil
 }
 
 func abs(value int) int {
