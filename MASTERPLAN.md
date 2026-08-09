@@ -706,77 +706,173 @@ go run ./scripts/benchmark/main.go compiled -runs 1000 -warmup 100
 
 **目标一句话**：漂移→影子重编译→快照回归→晋级或告警，闭环全程留痕；多源提取给出 N_eff 与带证据的冲突集。
 
+> **实况对齐 · 2026-08-10（Phase 3 WIP HEAD `43a1574`）** —— 本节已按提交与磁盘实况回写。图例：✅ 已提交并可用 · 🚧 核心已提交、生产接线未完成 · ⬜ 未开始 · ⟳ 与早期规划不同（以实际接口/状态机为准）。
+> 进度：P3-1 🚧　P3-2 ✅　P3-3 🚧。自愈候选/回放/worker/API 原语、consensus + materialization、REST `sources[]` 与 MCP `sources[]` 均已提交；**唯一未完成的 Phase 3 生产实现**是 `cmd/purify/main.go` 启动 self-heal runtime，并把一个 process-owned safe relay 同时注入 verify revisit 与 multi-source extract。该安全/生命周期接线尚未获得修改授权，因此不得把 Phase 3 或 P3-1/P3-3 伪标为完成。
+
 ### 任务卡 P3-1 · 自愈：回归晋级制
 
-**交付什么**：`compiler/selfheal.go`：`Heal(ctx, key)`；stale 自动触发 + `POST /api/v1/extractors/:id/heal` 手动触发；webhook `extractor.promoted|degraded`。
+**交付什么** ⟳：实际拆成四层：`compiler/candidate.go` 将 synthesis 与 publication 分离并持久化 immutable candidate；`compiler/selfheal.go` 对 confirmed 历史做有界回放并原子晋级；`compiler/heal_worker.go` 轮询 durable run/回收过期 lease；`api/handler/extractor_heal.go` 提供只唤醒既有 run 的手动入口。`ledger` 的 subject-aware outbox 承载 `extractor.promoted|extractor.degraded`。
+
+**状态**：🚧 核心与接线原语已提交：`3590371`、`440bade`、`2f4f715`、`135dba1`。`cmd/purify/heal.go` 也已有 runtime/shared-relay helper 与生命周期测试；但 production `main.go` 尚未实例化 `managedHealRuntime`，`POST /api/v1/extractors/:id/heal` 当前由 nil service fail-closed 为 503，后台也没有实际运行的 heal worker。
 
 **验收标准**：
-- [ ] 晋级门槛：新 IR 对 `verifications` 中该 host 的 confirmed 记录重放复现率 ≥ 90%
-- [ ] 回归不过：保持降级 LLM 路径 + 告警，绝不静默换版本
-- [ ] 全程事件可查（版本号单调递增，旧版本 state=retired 保留）
+- [x] 晋级门槛：candidate 对 exact stale revision 的 confirmed 历史重放，至少 1 fact 且 `matched/total ≥ 0.9`
+- [x] 回归不过或历史不足：run 进入 `degraded`，旧 stale revision 不被静默替换；invalid candidate 进入 `failed`
+- [x] 晋级在一个 `ledger.Update` 内完成：旧 stale revision→retired、新 revision=`source.version+1`→active、页面重绑、run terminal 与可选 outbox event 同事务提交
+- [x] durable lease、过期回收、terminal idempotency、手动 202 scheduling receipt 与 webhook outbox 已有测试
+- [ ] production main 启动 worker、注入 protected route service，并纳入明确 shutdown 顺序
 
-**实现参考**（伪码）：
+⟳ **真实流程不是 `Heal` 内再调用 LLM Compile**。合成结果先经 `SubmitCandidate` 作非破坏性 admission：新 exact cluster 可登记 v1 active；健康 active 保留；可归属 stale lineage 的 candidate 才创建/复用 immutable pending heal run；retired/ambiguous lineage 不复活。随后 Healer 只重放这份已冻结 candidate：
 
 ```text
-Heal(key):
-1 取该键最近 ≤5 快照
-2 Compile → 新 IR + Report
-3 回归: 对 confirmed 历史事实重放 Execute, 复现率 r
-4 r ≥ 0.9 → version+1, state=active, webhook promoted
-  else   → 保持 stale/降级, webhook degraded
+Observe refs → managed synthesis → SubmitCandidate(candidate)
+  new exact cluster                         → v1 active
+  attributable stale source                → pending heal run (immutable)
+  active / retired / ambiguous history      → preserve/reject; never replace in place
+
+HealWorker poll or manual wake
+  → claim pending/expired-replaying run with lease
+  → revalidate frozen schema/IR/report/samples + exact stale source identity
+  → replay bounded confirmed history from immutable snapshots
+  → ratio ≥ 0.9 and total > 0: atomic promoted
+  → otherwise: degraded/failed; stale source remains non-active
 ```
+
+`state=stale` 本身不会凭空创建 candidate/run：必须有后续合格 observation，经 managed synthesis 与 `SubmitCandidate` 形成 pending run；只有在 HealWorker 被 production 启动后，pending/expired run 才会被自动轮询。
+
+**回放与租约边界**：只扫描 candidate `created_at` 之前、同 exact stale source lineage（`extractor_id + schema_hash + source template_cluster_id`）的 `confirmed` facts；SQL 最多扫描 1,000 行，最多计 100 个去重 string/number/bool facts、读取 20 个 snapshot，每份最多 4 MiB、总 snapshot bytes 最多 80 MiB。畸形/超限历史按未匹配计分或跳过执行，缺 provenance、非 2xx observation、URL/time 不符、snapshot 缺失、IR 执行失败均不会制造 match。单次 task 2 分钟、lease 3 分钟、异常释放窗口 5 秒；worker 固定单 goroutine、默认 1 秒轮询，wake channel 只是提示，run identity 始终来自 ledger。
+
+**交付语义是 resource-bounded at-least-once，不是 exactly-once**：进程在 claim 后退出，过期 lease 可被下一 worker 重放；terminal CAS/immutable triggers 与同一事务晋级阻止重复 publication。terminal heal audit 不可删除，promotion 后旧 revision 以 retired 行保留。若配置 lifecycle webhook，terminal run 与 outbox event 原子入库；通用 outbox 以 durable event ID（`X-Purify-Event-ID`）支持下游幂等，retryable failure 的持久预算为 4 次 attempts（1s/5s/30s backoff、单次 10s）。delivery 成功后、落 `delivered_at` 前崩溃仍可能额外重投，所以 webhook 只承诺 duplicate-capable at-least-once，不保证 exactly-once 或最终必达。
+
+**手动 API 的真实含义**：`POST /api/v1/extractors/:id/heal` 必须是空 body；它只解析 exact stale extractor revision 已有的 pending/replaying run，成功返回 202 `{"extractor_id":"…","heal_run_id":"…","status":"accepted"}`，不会凭 extractor ID 推断 compile key，也不会现场合成 candidate。not found→404、没有 ready candidate/歧义→409、worker unavailable→503。
 
 ### 任务卡 P3-2 · consensus/ 多源合并与 N_eff v0
 
 **完成什么**：N 源同 schema 各自提取，字段级合并；**十个镜像 = 1 路独立证据**；冲突不裁决、带证据全暴露。
 
-**交付什么**：`consensus/merge.go` + `merge_test.go`。
+**交付什么**：`consensus/merge.go` + `materialize.go` + 测试。
+
+**状态**：✅ 已提交 `8a30f74 feat(consensus): merge sources with independence accounting` 与 `e0e918c feat(consensus): materialize unambiguous merged data`。
 
 **验收标准**：
-- [ ] 表驱动用例：全一致 / 通稿镜像折叠（simhash 相似 → 独立根数=1）/ 真分歧（conflicts 按根数降序）/ 部分源失败
-- [ ] `agreement:{pages, independent_roots}` 出现在响应
+- [x] 表驱动覆盖全一致、同根/通稿镜像折叠、真分歧、URL 去重冲突与输入顺序无关
+- [x] 每个 winner/conflict 都输出 `agreement:{pages, independent_roots}` 与逐 source support（URL/root/evidence/receipt）
+- [x] top score 并列不擅自裁决；所有候选进入 `conflicts`，`ambiguous:true`
+- [x] typed materialization 覆盖 node kind、object key presence、array length 与 scalar value；任一最高分并列即 aggregate ambiguous
 
-**实现参考**：
+**真实公共类型（简化）**：root 不接受 caller 输入，而由 canonical final URL 推导。
 
 ```go
 type SourceResult struct {
-    URL, Root string          // Root = publicsuffix eTLD+1
-    Data json.RawMessage
-    Basis map[string]evidence.Anchor
-    SimText uint64            // simhash.Fingerprint(清洗文本)
+    URL      string                     // canonical final URL
+    Data     json.RawMessage
+    Basis    map[string]evidence.Anchor
+    Receipts map[string]string
+    SimText  uint64                     // simhash.Fingerprint(cleaned content)
 }
 type Agreement struct{ Pages, IndependentRoots int }
-type Conflict struct{ Value json.RawMessage; Sources []string; Evidence []evidence.Anchor }
-type FieldConsensus struct{ Value json.RawMessage; Agreement Agreement; Conflicts []Conflict }
-func Merge(rs []SourceResult) map[string]FieldConsensus
+type Support struct { URL, Root string; Evidence *evidence.Anchor; Receipt string }
+type Conflict struct { Value json.RawMessage; Agreement Agreement; Supports []Support }
+type FieldConsensus struct {
+    Value json.RawMessage; Agreement Agreement; Supports []Support
+    Conflicts []Conflict; Ambiguous bool
+}
+func Merge([]SourceResult) (Result, error)
+func MergeWithMaterialization([]SourceResult) (Result, Materialization, error)
 ```
 
-Merge 伪码：
+**N_eff 与冲突排序实况**：
 
 ```text
-1 字段值按 Type 规范化后分组
-2 通稿折叠: 两两 simhash.Similar(SimText, 3) → 并查集 → 簇
-3 IndependentRoots = 不同 (Root ∪ 簇) 数
-4 多数簇为 Value; 其余入 Conflicts(按根数降序, 各带 evidence)
+1 canonical URL 完全相同且内容/证据相同 → 去重；同 URL 非同结果 → ErrDuplicateSourceConflict
+2 Root = lowercase publicsuffix eTLD+1；literal IP 使用 Unmap 后地址
+3 两 source 同 Root，或两者 SimText 非零且 Hamming distance ≤ 3 → union-find 同一独立 component（传递闭包）
+4 scalar 按 null / bool / exact-rational number / string 规范化分组
+5 Agreement.Pages = 该 value 的 canonical unique pages
+  Agreement.IndependentRoots = 该 value 覆盖的 union-find components 数（即 N_eff）
+6 value groups 按 IndependentRoots DESC、Pages DESC、deterministic scalar order 排序
+7 前两组同分 → 无 winner，所有 groups 均暴露为 conflicts；否则第一组 winner，其余全部保留为 conflicts
 ```
+
+因此字段名虽为 `independent_roots`，计数实际同时折叠**同 eTLD+1/IP root**与**跨 root 的近重复通稿 component**；不是简单 `COUNT(DISTINCT root)`。
+
+**Materialization**：先 probe 整棵 typed JSON decision tree，不编码 bytes；node kind、对象字段“存在/缺失”、数组长度、scalar value 都使用相同 `(independent_roots, pages)` 排序。任何最高分 tie 都返回成功态 `ambiguous` 且不带 `data`，所以 structural ambiguity 可以发生在没有任何 `field.ambiguous` 的响应中。只有全树唯一决定时才 canonical encode `complete` 数据；materialized `data` 独立上限 4 MiB。`extract` 随后再按 caller schema 校验，失败映射为 `schema_invalid + violations`，而不是把不合 schema 的文档冒充 complete。
+
+**资源边界**：1..8 sources；URL 16 KiB；每源 JSON 4 MiB、合计 32 MiB；每源 depth 64 / nodes 20,000 / scalar leaves 10,000；path 4 KiB；evidence+receipt metadata 合计 32 MiB；field-consensus 完整编码 32 MiB。所有输入先 clone/strict decode，输出与输入顺序无关。
 
 ### 任务卡 P3-3 · sources[] 接线
 
-**交付什么**：`ExtractRequest.Sources []string`（≤8）；errgroup `SetLimit(4)` 并发；响应加 `consensus` 块与 per-source 失败清单。
+**交付什么**：`ExtractRequest.Sources []string`；REST multi-source adapter/service；`MultiExtractResponse`；MCP `extract_data.sources[]`。
+
+**状态**：🚧 REST/服务已提交 `31d44a7 feat(extract): multi-source consensus extraction`，MCP 已提交 **`43a1574 feat(mcp): support multi-source consensus extraction`**。代码与测试完整，但 production `extract.Service` 尚未收到 `SafeProxyURL`，因此当前 main binary 对 `sources[]` 会 fail-closed 为 503 `MULTI_SOURCE_UNAVAILABLE`；待授权的 shared-relay main 接线完成前，本卡不能标 ✅。
 
 **验收标准**：
-- [ ] 单源失败不拖垮整体，失败源与原因在响应中可见
+- [x] 单源失败不拖垮仍有 valid source 的整体；每个 canonical request source 都有 stable、sanitized summary
+- [x] final URL 重复只保留 newest `fetched_at`（同时间按 request URL 排序）的 valid winner，其余标 `duplicate_of=<winner request URL>`
+- [x] aggregate `complete|ambiguous|schema_invalid`、per-source status、schema violations、usage/timing 与 bounded response encoding 已实现
+- [x] MCP 保留 legacy `url` 调用，并完整支持/严格解码 `sources[]`
+- [ ] production main 创建并共享 process-owned safe relay，使 REST/MCP multi-source 路径实际可用
+
+**REST request 契约**：整个 HTTP body 是 ≤1 MiB 的单个 strict JSON object（unknown field/trailing value 均拒绝）；`url` 与 non-nil `sources` **严格 XOR**。multi-source 要求 1..8 个 raw URL，每个 ≤16 KiB、合计 ≤128 KiB，先按 raw UTF-8 bytes 计费，再 canonicalize 为 public HTTP(S)、去重并排序。只支持默认 content profile，拒绝 request `proxy_url`；timeout 默认 30 秒，显式值必须在 1..120 秒。服务强制 `evidence=true`，并用 process-owned literal-loopback SOCKS5 relay 覆盖内部 scrape proxy，caller 无法指定出网边界。
+
+```json
+{
+  "sources": [
+    "https://one.example/product",
+    "https://two.example/product"
+  ],
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": { "type": "string" }
+    },
+    "required": ["name"],
+    "additionalProperties": false
+  },
+  "engine": "auto",
+  "timeout": 30
+}
+```
+
+**并发与 admission**：每个请求 `errgroup.SetLimit(4)`，同时还有 `Service` 级全局 4-slot semaphore；source fetch/extraction、consensus CPU 与最终 JSON encoding 共用该全局上限。每源必须是 fresh 2xx artifact，具 snapshot ID/fetched_at/raw HTML，且 cleaned content/raw HTML 各自 ≤4 MiB；单源提取必须 full schema-valid，且每个 scalar leaf 都有非空 receipt 与 exact/normalized/fuzzy/compiled located anchor，anchor snapshot/time 必须匹配 artifact、quote byte range 必须真实落在 cleaned content，`unlocated_rate` 必须为 0。任何缺口只淘汰该源，不把不可定位事实送入 consensus。
+
+**响应状态**：
+
+| 层级 | 状态/错误 | wire 语义 |
+|---|---|---|
+| aggregate success | `complete` | 有 `consensus` 与 schema-valid `data`（合法 JSON `null` 也算 data） |
+| aggregate success | `ambiguous` | 有 `consensus`、无 `data`；可能是 field tie，也可能只有 structural tie |
+| aggregate success | `schema_invalid` | materialization 唯一但 caller schema 不通过；无 `data`，有非空 `violations` |
+| per source | `valid` | 进入 consensus，带 canonical `final_url`、snapshot/tokens/timing/可选 LLM usage |
+| per source | `duplicate` | 不进入 consensus；`duplicate_of` 精确指向 valid winner 的 request URL，final URL 相同 |
+| per source failure | `timeout`, `fetch_failed`, `extraction_failed`, `partial`, `schema_invalid`, `evidence_unavailable` | 不含 provider 原始错误/credential，只返回 stable code/message |
+| aggregate failure | `NO_VALID_SOURCE`, `MULTI_SOURCE_UNAVAILABLE`, `SCRAPE_TIMEOUT`, `LLM_AUTH_FAILURE`, `LLM_RATE_LIMITED`, `EXTRACTOR_UNAVAILABLE`, `INTERNAL_ERROR` | `success:false`，保留已完成的 per-source summaries；HTTP 分别按 502/503/504/401/429/409/500 映射 |
+
+完整 `MultiExtractResponse` 编码上限 32 MiB；deadline 可取消 source work，并在 merge/final encode 前后重复检查，deadline 后产生的 bytes 不会返回（同步 merge/`json.Marshal` 本身不宣称可中途抢占）。aggregate tokens/timing 做 checked-add，`usage_complete` 明示失败/取消后 provider usage 是否可能不完整。
+
+**MCP `extract_data`（✅ `43a1574`）**：tool schema 继续要求 `schema`，`url` 与 `sources` 均为可选属性，runtime 再执行严格 XOR，因此旧 `url+schema` client 不破坏。`sources` 的 1..8、单 URL 16 KiB、raw 合计 128 KiB 均在 HTTP 前按 bytes 复核；single payload 物理省略 `sources`，multi payload 物理省略 `url`，`engine=compiled` 物理省略全部 LLM fields。`PURIFY_API_KEY` 只进 `X-API-Key`，request BYOK 只在允许的 JSON body 路径出现。
+
+2xx decoder 由 caller 选择的 target 决定单源还是 multi contract；multi 路径 strict 检查 UTF-8/EOF/unknown fields、三种 aggregate shape、mixed valid/duplicate/failure source、canonical URL/final URL/duplicate winner、authoritative eTLD+1/IP root、support↔valid snapshot evidence admission、agreement/N_eff 上界、winner/conflict score 顺序、每字段跨 value-group support URL 互斥，以及 consensus value 只能是 JSON scalar（`null|bool|number|string`）。它明确接受 `data:null` 和“无 field ambiguous 的 structural ambiguous”，同时拒绝 server 不可能生成的混合状态。
+
+非 2xx 在 target decoder **之前**转成 MCP tool error，保留 stable code；Purify key 与 BYOK 都做 redaction。共用 response reader 接受恰好 32 MiB、拒绝 N+1 并丢弃 oversized body；production extract HTTP client 禁止所有 redirect，避免跨 origin 转发 `X-API-Key` 或 request body credential。成功返回 typed structured content + pretty JSON fallback。
+
+**唯一待授权的 production diff 边界**：只在 `cmd/purify/main.go` 组合已存在的 helper——snapshot enabled 时创建一个 shared safe relay，交给 revisit 与 `extract.Config.SafeProxyURL`；创建独立于 managed compiler 开关的 `managedHealRuntime`；用 `api.NewRouterWithOptions(..., api.WithExtractorHealService(runtime))` 注入手动 route；按 compiler→heal→outbox→relay→HTTP-idles 的依赖顺序关闭。当前代码仍在 verify block 内单独 `StartDirectRelay`、仍以空 `SafeProxyURL` 构造 extract service、仍调用无 option 的 `api.NewRouter`，所以这不是文档推测，而是可 grep 的 fail-closed 实况。
 
 **提交序列**：
 
 ```text
-feat(compiler): verified self-healing loop
-feat(consensus): multi-source merge with independence accounting
-feat(extract): multi-source consensus extraction
-docs(scrape): consensus extraction
+✅ 8a30f74  feat(consensus): merge sources with independence accounting
+✅ 3590371  refactor(compiler): separate synthesis from publication
+✅ e0e918c  feat(consensus): materialize unambiguous merged data
+✅ 440bade  refactor(ledger): generalize durable outbox subjects
+✅ 2f4f715  feat(compiler): replay verified healing candidates
+✅ 135dba1  feat(compiler): schedule durable healing runs
+✅ 31d44a7  feat(extract): multi-source consensus extraction
+✅ 43a1574  feat(mcp): support multi-source consensus extraction
+🚧 —        production main self-heal + shared safe relay（待明确授权；尚无提交）
 ```
 
-> **EN —** Self-healing recompiles in shadow and promotes only after replaying ≥90% of previously confirmed facts from stored snapshots — never a silent swap. Consensus extraction merges N sources per field, collapses syndicated mirrors via simhash union-find so ten copies count as one independent root, and exposes every conflict with its evidence.
+> **EN — (Phase 3 WIP, HEAD `43a1574`)** The durable core is implemented: synthesis and publication are separated; immutable candidates replay bounded, provenance-checked confirmed history under reclaimable durable leases; ≥90% with at least one fact promotes atomically, while insufficient or failing replay degrades without a silent swap. Consensus derives eTLD+1/IP roots, collapses same-root or SimHash-distance≤3 sources into N_eff components, preserves every evidence-backed conflict, and materializes typed JSON only when topology and values are unambiguous. REST and MCP `sources[]` are committed with bounded fan-out, strict evidence/status/error contracts, credential separation, and fail-closed decoders. Phase 3 is **not complete**: production `main.go` still needs explicitly authorized wiring for the self-heal runtime and one shared safe relay, so P3-1 and P3-3 remain WIP.
 
 ---
 
