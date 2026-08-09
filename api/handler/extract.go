@@ -1,13 +1,20 @@
 package handler
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 	"github.com/use-agent/purify/models"
 )
+
+const maximumExtractRequestBytes = 1 << 20
 
 // ExtractService is the transport-neutral structured extraction boundary.
 type ExtractService interface {
@@ -22,13 +29,18 @@ func Extract(service ExtractService) gin.HandlerFunc {
 			return
 		}
 
-		var request models.ExtractRequest
-		if err := c.ShouldBindJSON(&request); err != nil {
-			respondExtractError(c, models.NewScrapeError(models.ErrCodeInvalidInput, err.Error(), err), models.ExtractTimingInfo{})
+		request, err := decodeExtractRequest(c)
+		if err != nil {
+			var maximumBytesError *http.MaxBytesError
+			if errors.As(err, &maximumBytesError) {
+				respondExtractInputError(c, http.StatusRequestEntityTooLarge, "extract request is too large")
+				return
+			}
+			respondExtractInputError(c, http.StatusBadRequest, "invalid extract request")
 			return
 		}
 
-		response, err := service.Extract(c.Request.Context(), &request)
+		response, err := service.Extract(c.Request.Context(), request)
 		if err != nil {
 			var timed interface {
 				ExtractTiming() models.ExtractTimingInfo
@@ -48,16 +60,53 @@ func Extract(service ExtractService) gin.HandlerFunc {
 	}
 }
 
+func decodeExtractRequest(c *gin.Context) (*models.ExtractRequest, error) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maximumExtractRequestBytes)
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		return nil, err
+	}
+	if !utf8.Valid(body) {
+		return nil, errors.New("extract request is not valid UTF-8")
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var request *models.ExtractRequest
+	if err := decoder.Decode(&request); err != nil {
+		return nil, err
+	}
+	if request == nil {
+		return nil, errors.New("extract request must be a JSON object")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("extract request contains multiple JSON values")
+		}
+		return nil, err
+	}
+	if err := binding.Validator.ValidateStruct(request); err != nil {
+		return nil, err
+	}
+	return request, nil
+}
+
+func respondExtractInputError(c *gin.Context, status int, message string) {
+	c.JSON(status, models.ExtractResponse{
+		Success: false,
+		Error: &models.ErrorDetail{
+			Code:    models.ErrCodeInvalidInput,
+			Message: message,
+		},
+	})
+}
+
 // respondExtractError maps a ScrapeError to the correct HTTP status and writes
 // a structured JSON error response for the extract endpoint.
 func respondExtractError(c *gin.Context, err error, timing models.ExtractTimingInfo) {
 	var scrapeErr *models.ScrapeError
 	if !errors.As(err, &scrapeErr) {
-		message := "unknown extraction failure"
-		if err != nil {
-			message = err.Error()
-		}
-		scrapeErr = models.NewScrapeError(models.ErrCodeInternal, message, err)
+		scrapeErr = models.NewScrapeError(models.ErrCodeInternal, "internal extraction failure", nil)
 	}
 
 	c.JSON(mapExtractErrorToStatus(scrapeErr), models.ExtractResponse{

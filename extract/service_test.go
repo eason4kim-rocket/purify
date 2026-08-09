@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -271,6 +272,150 @@ func TestServiceValidationAndCancellationAvoidExternalCalls(t *testing.T) {
 	}
 }
 
+func TestPrepareRequestAcceptsExactFieldLimitsAndRejectsNPlusOne(t *testing.T) {
+	tests := []struct {
+		name   string
+		atN    func(*models.ExtractRequest)
+		atNOne func(*models.ExtractRequest)
+	}{
+		{
+			name: "url",
+			atN: func(request *models.ExtractRequest) {
+				prefix := "https://example.test/"
+				request.URL = prefix + strings.Repeat("u", maximumExtractURLBytes-len(prefix))
+			},
+			atNOne: func(request *models.ExtractRequest) {
+				prefix := "https://example.test/"
+				request.URL = prefix + strings.Repeat("u", maximumExtractURLBytes+1-len(prefix))
+			},
+		},
+		{
+			name: "schema",
+			atN: func(request *models.ExtractRequest) {
+				request.Schema = exactSchemaBytes(t, maximumExtractSchemaBytes)
+			},
+			atNOne: func(request *models.ExtractRequest) {
+				request.Schema = exactSchemaBytes(t, maximumExtractSchemaBytes+1)
+			},
+		},
+		{
+			name: "llm_api_key",
+			atN: func(request *models.ExtractRequest) {
+				request.LLMAPIKey = strings.Repeat("k", maximumExtractCredentialBytes)
+			},
+			atNOne: func(request *models.ExtractRequest) {
+				request.LLMAPIKey = strings.Repeat("k", maximumExtractCredentialBytes+1)
+			},
+		},
+		{
+			name: "llm_model",
+			atN: func(request *models.ExtractRequest) {
+				request.LLMModel = strings.Repeat("m", maximumExtractModelBytes)
+			},
+			atNOne: func(request *models.ExtractRequest) {
+				request.LLMModel = strings.Repeat("m", maximumExtractModelBytes+1)
+			},
+		},
+		{
+			name: "llm_base_url",
+			atN: func(request *models.ExtractRequest) {
+				prefix := "https://provider.example/"
+				request.LLMBaseURL = prefix + strings.Repeat("b", maximumExtractBaseURLBytes-len(prefix))
+			},
+			atNOne: func(request *models.ExtractRequest) {
+				prefix := "https://provider.example/"
+				request.LLMBaseURL = prefix + strings.Repeat("b", maximumExtractBaseURLBytes+1-len(prefix))
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			atLimit := validExtractRequest()
+			test.atN(atLimit)
+			if _, err := prepareRequest(atLimit); err != nil {
+				t.Fatalf("prepareRequest(N) error = %v", err)
+			}
+
+			overLimit := validExtractRequest()
+			test.atNOne(overLimit)
+			if _, err := prepareRequest(overLimit); err == nil {
+				t.Fatal("prepareRequest(N+1) error = nil")
+			} else {
+				assertScrapeErrorCode(t, err, models.ErrCodeInvalidInput)
+			}
+		})
+	}
+}
+
+func TestServiceBoundaryValidationAvoidsRunnerAndProvider(t *testing.T) {
+	expandedSchema := oversizedNormalizedLegacySchema(t)
+	tests := []struct {
+		name   string
+		mutate func(*models.ExtractRequest)
+	}{
+		{name: "oversized URL", mutate: func(request *models.ExtractRequest) { request.URL = strings.Repeat("u", maximumExtractURLBytes+1) }},
+		{name: "oversized raw schema", mutate: func(request *models.ExtractRequest) {
+			request.Schema = exactSchemaBytes(t, maximumExtractSchemaBytes+1)
+		}},
+		{name: "oversized normalized schema", mutate: func(request *models.ExtractRequest) { request.Schema = expandedSchema }},
+		{name: "oversized API key", mutate: func(request *models.ExtractRequest) {
+			request.LLMAPIKey = strings.Repeat("k", maximumExtractCredentialBytes+1)
+		}},
+		{name: "oversized model", mutate: func(request *models.ExtractRequest) {
+			request.LLMModel = strings.Repeat("m", maximumExtractModelBytes+1)
+		}},
+		{name: "oversized base URL", mutate: func(request *models.ExtractRequest) {
+			request.LLMBaseURL = strings.Repeat("b", maximumExtractBaseURLBytes+1)
+		}},
+		{name: "invalid URL UTF-8", mutate: func(request *models.ExtractRequest) { request.URL = "https://example.test/\xff" }},
+		{name: "invalid schema UTF-8", mutate: func(request *models.ExtractRequest) {
+			request.Schema = json.RawMessage{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'}
+		}},
+		{name: "invalid API key UTF-8", mutate: func(request *models.ExtractRequest) { request.LLMAPIKey = "key-\xff" }},
+		{name: "invalid model UTF-8", mutate: func(request *models.ExtractRequest) { request.LLMModel = "model-\xff" }},
+		{name: "invalid base URL UTF-8", mutate: func(request *models.ExtractRequest) { request.LLMBaseURL = "https://provider.example/\xff" }},
+		{name: "URL control", mutate: func(request *models.ExtractRequest) { request.URL = "https://example.test/boundary-secret\n" }},
+		{name: "API key control", mutate: func(request *models.ExtractRequest) { request.LLMAPIKey = "boundary-secret\n" }},
+		{name: "model whitespace", mutate: func(request *models.ExtractRequest) { request.LLMModel = "boundary secret" }},
+		{name: "base URL control", mutate: func(request *models.ExtractRequest) { request.LLMBaseURL = "https://boundary-secret.example/\n" }},
+		{name: "base URL userinfo", mutate: func(request *models.ExtractRequest) {
+			request.LLMBaseURL = "https://boundary-secret@provider.example/v1"
+		}},
+		{name: "base URL query", mutate: func(request *models.ExtractRequest) {
+			request.LLMBaseURL = "https://provider.example/v1?secret=boundary-secret"
+		}},
+		{name: "base URL fragment", mutate: func(request *models.ExtractRequest) {
+			request.LLMBaseURL = "https://provider.example/v1#boundary-secret"
+		}},
+		{name: "base URL empty port", mutate: func(request *models.ExtractRequest) { request.LLMBaseURL = "https://provider.example:/v1" }},
+		{name: "base URL private literal", mutate: func(request *models.ExtractRequest) { request.LLMBaseURL = "http://127.0.0.1:8080/v1" }},
+		{name: "base URL localhost", mutate: func(request *models.ExtractRequest) { request.LLMBaseURL = "http://localhost:8080/v1" }},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &recordingRunner{result: successfulScrapeResult()}
+			provider := &recordingExtractor{initial: &llm.ExtractResult{Data: json.RawMessage(`{"count":3}`)}}
+			service := newTestService(t, runner, provider, nil)
+			request := validExtractRequest()
+			test.mutate(request)
+
+			_, err := service.Extract(context.Background(), request)
+			if err == nil {
+				t.Fatal("Extract() error = nil")
+			}
+			assertScrapeErrorCode(t, err, models.ErrCodeInvalidInput)
+			if strings.Contains(err.Error(), "boundary-secret") {
+				t.Fatalf("error leaked request value: %v", err)
+			}
+			if runner.calls != 0 || provider.extractCalls != 0 || provider.repairCalls != 0 {
+				t.Fatalf("external calls = runner:%d provider:%d/%d", runner.calls, provider.extractCalls, provider.repairCalls)
+			}
+		})
+	}
+}
+
 func TestServicePreservesRunnerAndLLMErrorsWithTiming(t *testing.T) {
 	runnerErr := models.NewScrapeError(models.ErrCodeTimeout, "fetch timed out", context.DeadlineExceeded)
 	service := newTestService(t, &recordingRunner{err: runnerErr}, &recordingExtractor{}, nil)
@@ -409,6 +554,47 @@ func validExtractRequest() *models.ExtractRequest {
 		Schema:    json.RawMessage(`{"type":"object","properties":{"count":{"type":"integer"}},"required":["count"],"additionalProperties":false}`),
 		LLMAPIKey: "secret",
 	}
+}
+
+func exactSchemaBytes(t *testing.T, size int) json.RawMessage {
+	t.Helper()
+	prefix := `{"type":"object","description":"`
+	suffix := `"}`
+	if size < len(prefix)+len(suffix) {
+		t.Fatalf("schema size %d is too small", size)
+	}
+	result := json.RawMessage(prefix + strings.Repeat("s", size-len(prefix)-len(suffix)) + suffix)
+	if len(result) != size || !json.Valid(result) {
+		t.Fatalf("schema fixture is %d bytes or invalid, want %d", len(result), size)
+	}
+	return result
+}
+
+func oversizedNormalizedLegacySchema(t *testing.T) json.RawMessage {
+	t.Helper()
+	var builder strings.Builder
+	builder.WriteByte('{')
+	for index := 0; index < 20_000; index++ {
+		if index > 0 {
+			builder.WriteByte(',')
+		}
+		builder.WriteString(`"field`)
+		builder.WriteString(strconv.Itoa(index))
+		builder.WriteString(`":"string"`)
+	}
+	builder.WriteByte('}')
+	raw := json.RawMessage(builder.String())
+	if len(raw) > maximumExtractSchemaBytes {
+		t.Fatalf("legacy fixture raw size = %d, maximum = %d", len(raw), maximumExtractSchemaBytes)
+	}
+	normalized, err := llm.NormalizeSchema(raw)
+	if err != nil {
+		t.Fatalf("NormalizeSchema(legacy fixture) error = %v", err)
+	}
+	if len(normalized) <= maximumExtractSchemaBytes {
+		t.Fatalf("legacy fixture normalized size = %d, want > %d", len(normalized), maximumExtractSchemaBytes)
+	}
+	return raw
 }
 
 func cloneExtractResult(result *llm.ExtractResult) *llm.ExtractResult {

@@ -12,6 +12,7 @@ import (
 	"github.com/use-agent/purify/config"
 	"github.com/use-agent/purify/ledger"
 	"github.com/use-agent/purify/llm"
+	"github.com/use-agent/purify/publicnet"
 	"github.com/use-agent/purify/snapshot"
 )
 
@@ -168,7 +169,7 @@ func TestManagedTruthExtractorRejectsOverLimitBeforeRepair(t *testing.T) {
 }
 
 func TestManagedCompilerRuntimeConstructionAndCloseOrder(t *testing.T) {
-	if runtime, err := newManagedCompilerRuntime(config.CompilerConfig{}, nil, nil, nil); err != nil || runtime != nil {
+	if runtime, err := newManagedCompilerRuntime(config.CompilerConfig{}, nil, nil, nil, nil); err != nil || runtime != nil {
 		t.Fatalf("disabled newManagedCompilerRuntime() = %#v, %v", runtime, err)
 	}
 
@@ -181,7 +182,8 @@ func TestManagedCompilerRuntimeConstructionAndCloseOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compiler.NewStore() error = %v", err)
 	}
-	if runtime, err := newManagedCompilerRuntime(validManagedCompilerConfig(), durable, registry, nil); err == nil || runtime != nil {
+	policy := publicnet.NewPolicy(publicnet.Options{})
+	if runtime, err := newManagedCompilerRuntime(validManagedCompilerConfig(), durable, registry, nil, policy); err == nil || runtime != nil {
 		t.Fatalf("enabled runtime without snapshots = %#v, %v", runtime, err)
 	}
 
@@ -190,7 +192,10 @@ func TestManagedCompilerRuntimeConstructionAndCloseOrder(t *testing.T) {
 		t.Fatalf("snapshot.NewStore() error = %v", err)
 	}
 	t.Cleanup(snapshots.Close)
-	runtime, err := newManagedCompilerRuntime(validManagedCompilerConfig(), durable, registry, snapshots)
+	if runtime, err := newManagedCompilerRuntime(validManagedCompilerConfig(), durable, registry, snapshots, nil); !errors.Is(err, errManagedCompilerHTTPUnavailable) || runtime != nil {
+		t.Fatalf("enabled runtime without policy = %#v, %v", runtime, err)
+	}
+	runtime, err := newManagedCompilerRuntime(validManagedCompilerConfig(), durable, registry, snapshots, policy)
 	if err != nil || runtime == nil {
 		t.Fatalf("newManagedCompilerRuntime() = %#v, %v", runtime, err)
 	}

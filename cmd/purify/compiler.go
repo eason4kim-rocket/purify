@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +13,7 @@ import (
 	extractdomain "github.com/use-agent/purify/extract"
 	"github.com/use-agent/purify/ledger"
 	"github.com/use-agent/purify/llm"
+	"github.com/use-agent/purify/publicnet"
 	"github.com/use-agent/purify/snapshot"
 	verifydomain "github.com/use-agent/purify/verify"
 )
@@ -167,6 +167,7 @@ func newManagedCompilerRuntime(
 	durable *ledger.Store,
 	registry *compilerdomain.Store,
 	snapshots *snapshot.Store,
+	policy *publicnet.Policy,
 ) (*managedCompilerRuntime, error) {
 	if !cfg.Enabled {
 		return nil, nil
@@ -174,19 +175,17 @@ func newManagedCompilerRuntime(
 	if err := config.ValidateCompilerConfig(cfg, snapshots != nil); err != nil {
 		return nil, err
 	}
+	if policy == nil {
+		return nil, errManagedCompilerHTTPUnavailable
+	}
 	catalog, err := compilerdomain.NewSampleCatalog(durable)
 	if err != nil {
 		return nil, err
 	}
 
-	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
-	if !ok || defaultTransport == nil {
+	httpClient, err := llm.NewPublicHTTPClient(policy, compilerdomain.CoordinatorTaskTimeout)
+	if err != nil {
 		return nil, errManagedCompilerHTTPUnavailable
-	}
-	managedTransport := defaultTransport.Clone()
-	httpClient := &http.Client{
-		Transport: managedTransport,
-		Timeout:   compilerdomain.CoordinatorTaskTimeout,
 	}
 	truth, err := newManagedTruthExtractor(llm.NewClient(httpClient), cfg)
 	if err != nil {
@@ -200,7 +199,7 @@ func newManagedCompilerRuntime(
 	}
 	return &managedCompilerRuntime{
 		coordinator: coordinator,
-		closeHTTP:   managedTransport.CloseIdleConnections,
+		closeHTTP:   httpClient.CloseIdleConnections,
 	}, nil
 }
 

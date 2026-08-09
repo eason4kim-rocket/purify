@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -77,6 +78,96 @@ func TestExtractRejectsBindingErrorsWithoutCallingService(t *testing.T) {
 	}
 }
 
+func TestExtractStrictDecoderRejectsUntrustedJSONWithoutLeakingIt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &recordingExtractService{}
+	router := gin.New()
+	router.POST("/extract", Extract(service))
+
+	const secret = "must-not-appear-in-response"
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{name: "unknown field", body: []byte(`{"url":"https://example.test","schema":{},"unknown":"` + secret + `"}`)},
+		{name: "trailing value", body: []byte(`{"url":"https://example.test","schema":{}} {"secret":"` + secret + `"}`)},
+		{name: "null", body: []byte(`null`)},
+		{name: "array", body: []byte(`[]`)},
+		{name: "string", body: []byte(`"` + secret + `"`)},
+		{name: "number", body: []byte(`3`)},
+		{name: "malformed", body: []byte(`{"url":"` + secret)},
+		{name: "invalid UTF-8", body: append([]byte(`{"url":"https://example.test/`), []byte{0xff, '"', ',', '"', 's', 'c', 'h', 'e', 'm', 'a', '"', ':', '{', '}', '}'}...)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/extract", bytes.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			router.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body)
+			}
+			var response models.ExtractResponse
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response.Error == nil || response.Error.Code != models.ErrCodeInvalidInput ||
+				response.Error.Message != "invalid extract request" || strings.Contains(recorder.Body.String(), secret) ||
+				strings.Contains(recorder.Body.String(), "unknown") {
+				t.Fatalf("unsanitized response = %s", recorder.Body)
+			}
+		})
+	}
+	if service.calls != 0 {
+		t.Fatalf("service calls = %d, want zero", service.calls)
+	}
+}
+
+func TestExtractRequestBodyLimitExactBoundary(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &recordingExtractService{response: &models.ExtractResponse{Success: true}}
+	router := gin.New()
+	router.POST("/extract", Extract(service))
+
+	base := `{"url":"https://example.test","schema":{},"engine":"compiled"}`
+	if len(base) >= maximumExtractRequestBytes {
+		t.Fatalf("base fixture is unexpectedly large: %d", len(base))
+	}
+	atLimit := base + strings.Repeat(" ", maximumExtractRequestBytes-len(base))
+	for _, test := range []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{name: "N", body: atLimit, wantStatus: http.StatusOK},
+		{name: "N plus one", body: atLimit + " ", wantStatus: http.StatusRequestEntityTooLarge},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/extract", strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.wantStatus, recorder.Body)
+			}
+			if test.wantStatus == http.StatusRequestEntityTooLarge {
+				var response models.ExtractResponse
+				if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+					t.Fatalf("decode response: %v", err)
+				}
+				if response.Error == nil || response.Error.Code != models.ErrCodeInvalidInput || response.Error.Message != "extract request is too large" {
+					t.Fatalf("response = %#v", response)
+				}
+			}
+		})
+	}
+	if service.calls != 1 {
+		t.Fatalf("service calls = %d, want one exact-limit call", service.calls)
+	}
+}
+
 func TestExtractAllowsMissingLLMKeyForEngineDispatch(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &recordingExtractService{response: &models.ExtractResponse{Success: true}}
@@ -117,6 +208,55 @@ func TestExtractMapsWrappedDomainErrorsAndTiming(t *testing.T) {
 	}
 	if response.Success || response.Error == nil || response.Error.Code != models.ErrCodeLLMRateLimited || response.Timing != timing {
 		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestExtractSanitizesUnknownServiceErrorsAndPreservesAttachedTiming(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const privateCause = "provider secret at /private/provider/path"
+	tests := []struct {
+		name       string
+		err        error
+		wantTiming models.ExtractTimingInfo
+	}{
+		{name: "direct", err: errors.New(privateCause)},
+		{
+			name: "wrapped with timing",
+			err: &timedExtractError{
+				cause:  errors.New(privateCause),
+				timing: models.ExtractTimingInfo{TotalMs: 17, NavigationMs: 5, CleaningMs: 4, ExtractionMs: 8},
+			},
+			wantTiming: models.ExtractTimingInfo{TotalMs: 17, NavigationMs: 5, CleaningMs: 4, ExtractionMs: 8},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &recordingExtractService{err: test.err}
+			router := gin.New()
+			router.POST("/extract", Extract(service))
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/extract", bytes.NewBufferString(
+				`{"url":"https://example.test","schema":{},"engine":"compiled"}`,
+			))
+			request.Header.Set("Content-Type", "application/json")
+			router.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body)
+			}
+			var response models.ExtractResponse
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response.Error == nil || response.Error.Code != models.ErrCodeInternal ||
+				response.Error.Message != "internal extraction failure" || response.Timing != test.wantTiming {
+				t.Fatalf("response = %#v", response)
+			}
+			if strings.Contains(recorder.Body.String(), "provider secret") || strings.Contains(recorder.Body.String(), "/private/provider/path") {
+				t.Fatalf("response leaked private cause: %s", recorder.Body)
+			}
+		})
 	}
 }
 

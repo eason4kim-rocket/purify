@@ -14,14 +14,25 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/use-agent/purify/compiler"
 	"github.com/use-agent/purify/evidence"
 	"github.com/use-agent/purify/llm"
 	"github.com/use-agent/purify/models"
+	"github.com/use-agent/purify/publicnet"
 	"github.com/use-agent/purify/receipts"
 	"github.com/use-agent/purify/scrape"
 	"github.com/use-agent/purify/scraper"
+)
+
+const (
+	maximumExtractURLBytes        = 16 << 10
+	maximumExtractSchemaBytes     = 512 << 10
+	maximumExtractCredentialBytes = 16 << 10
+	maximumExtractBaseURLBytes    = 16 << 10
+	maximumExtractModelBytes      = 256
 )
 
 // Runner is the canonical scrape boundary used by extraction.
@@ -687,6 +698,9 @@ func prepareRequest(request *models.ExtractRequest) (*models.ExtractRequest, err
 	if request == nil {
 		return nil, models.NewScrapeError(models.ErrCodeInvalidInput, "extract request is required", nil)
 	}
+	if err := validateRawExtractRequest(request); err != nil {
+		return nil, err
+	}
 	prepared := *request
 	prepared.Schema = append(json.RawMessage(nil), request.Schema...)
 	if request.WaitForNetworkIdle != nil {
@@ -694,25 +708,84 @@ func prepareRequest(request *models.ExtractRequest) (*models.ExtractRequest, err
 		prepared.WaitForNetworkIdle = &value
 	}
 	prepared.URL = strings.TrimSpace(prepared.URL)
+	prepared.LLMModel = strings.TrimSpace(prepared.LLMModel)
+	prepared.LLMBaseURL = strings.TrimSpace(prepared.LLMBaseURL)
 	prepared.Defaults()
 	parsed, err := url.ParseRequestURI(prepared.URL)
 	if err != nil || parsed.Host == "" || parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return nil, models.NewScrapeError(models.ErrCodeInvalidInput, "url must be an absolute http or https URL", err)
+		return nil, invalidExtractRequest("url must be an absolute http or https URL")
 	}
 	switch prepared.Engine {
 	case "auto", "compiled", "llm":
 	default:
-		return nil, models.NewScrapeError(models.ErrCodeInvalidInput, "engine must be auto, compiled, or llm", nil)
+		return nil, invalidExtractRequest("engine must be auto, compiled, or llm")
 	}
+	baseURL, err := normalizeExtractBaseURL(prepared.LLMBaseURL)
+	if err != nil {
+		return nil, invalidExtractRequest("llm_base_url is invalid")
+	}
+	prepared.LLMBaseURL = baseURL
 	normalizedSchema, err := llm.NormalizeSchema(prepared.Schema)
 	if err != nil {
-		return nil, models.NewScrapeError(models.ErrCodeInvalidInput, "invalid JSON schema", err)
+		return nil, invalidExtractRequest("invalid JSON schema")
+	}
+	if len(normalizedSchema) > maximumExtractSchemaBytes {
+		return nil, invalidExtractRequest("normalized JSON schema exceeds maximum size")
 	}
 	if err := llm.ValidateSchema(normalizedSchema); err != nil {
-		return nil, models.NewScrapeError(models.ErrCodeInvalidInput, "invalid JSON schema", err)
+		return nil, invalidExtractRequest("invalid JSON schema")
 	}
 	prepared.Schema = normalizedSchema
 	return &prepared, nil
+}
+
+func validateRawExtractRequest(request *models.ExtractRequest) error {
+	if err := validateExtractText("url", request.URL, maximumExtractURLBytes, false); err != nil {
+		return err
+	}
+	if len(request.Schema) == 0 || len(request.Schema) > maximumExtractSchemaBytes || !utf8.Valid(request.Schema) {
+		return invalidExtractRequest("schema is invalid or exceeds maximum size")
+	}
+	if err := validateExtractText("llm_api_key", request.LLMAPIKey, maximumExtractCredentialBytes, false); err != nil {
+		return err
+	}
+	if err := validateExtractText("llm_model", request.LLMModel, maximumExtractModelBytes, true); err != nil {
+		return err
+	}
+	if err := validateExtractText("llm_base_url", request.LLMBaseURL, maximumExtractBaseURLBytes, false); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateExtractText(label, value string, maximumBytes int, rejectWhitespace bool) error {
+	if len(value) > maximumBytes || !utf8.ValidString(value) {
+		return invalidExtractRequest(label + " is invalid or exceeds maximum size")
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) || rejectWhitespace && unicode.IsSpace(character) {
+			return invalidExtractRequest(label + " contains invalid characters")
+		}
+	}
+	return nil
+}
+
+func normalizeExtractBaseURL(raw string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || !parsed.IsAbs() || parsed.Opaque != "" || parsed.Host == "" || parsed.Hostname() == "" ||
+		parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" ||
+		strings.Contains(raw, "#") || strings.HasSuffix(parsed.Host, ":") {
+		return "", errors.New("invalid provider base URL")
+	}
+	canonical, _, err := publicnet.NormalizeHTTPURL(raw, nil, false)
+	if err != nil {
+		return "", errors.New("invalid provider base URL")
+	}
+	return strings.TrimRight(canonical, "/"), nil
+}
+
+func invalidExtractRequest(message string) error {
+	return models.NewScrapeError(models.ErrCodeInvalidInput, message, nil)
 }
 
 func validateArtifact(artifact *Artifact) (models.ExtractTimingInfo, error) {

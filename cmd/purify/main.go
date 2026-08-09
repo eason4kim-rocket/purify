@@ -109,8 +109,14 @@ func run() error {
 		slog.Info("snapshot store disabled")
 	}
 
-	// ── 3b. Initialise optional process-owned compiler synthesis ─────
-	managedCompiler, err := newManagedCompilerRuntime(cfg.Compiler, ledgerStore, compiledStore, snapshotStore)
+	// ── 3b. Enforce one public-only outbound policy ─────────────────
+	outboundPolicy, err := newOutboundPolicy(cfg.Browser.DefaultProxy)
+	if err != nil {
+		return fmt.Errorf("initialise outbound network policy: %w", err)
+	}
+
+	// ── 3c. Initialise optional process-owned compiler synthesis ─────
+	managedCompiler, err := newManagedCompilerRuntime(cfg.Compiler, ledgerStore, compiledStore, snapshotStore, outboundPolicy)
 	if err != nil {
 		return fmt.Errorf("initialise managed compiler: %w", err)
 	}
@@ -123,12 +129,6 @@ func run() error {
 		slog.Info("managed compiler disabled")
 	}
 	compilerBindings := bindCompilerServices(compiledStore, managedCompiler)
-
-	// ── 3c. Enforce one public-only outbound policy ─────────────────
-	outboundPolicy, err := newOutboundPolicy(cfg.Browser.DefaultProxy)
-	if err != nil {
-		return fmt.Errorf("initialise outbound network policy: %w", err)
-	}
 
 	// ── 3d. Deliver transactionally queued verification webhooks ───
 	webhookClient, err := webhook.NewPublicHTTPClient(outboundPolicy, webhook.DefaultOutboxHTTPTimeout)
@@ -228,7 +228,12 @@ func run() error {
 	}
 
 	// ── 4e. Initialise LLM client ───────────────────────────────────
-	llmClient := llm.NewClient(nil)
+	requestLLMHTTPClient, err := llm.NewPublicHTTPClient(outboundPolicy, 0)
+	if err != nil {
+		return fmt.Errorf("initialise request LLM HTTP client: %w", err)
+	}
+	defer requestLLMHTTPClient.CloseIdleConnections()
+	llmClient := llm.NewClient(requestLLMHTTPClient)
 	extractService, err := extractdomain.NewService(scrapeService, llmClient, receiptSigner, extractdomain.Config{
 		CompiledRepository: compilerBindings.compiledRepository,
 		CompileObserver:    compilerBindings.compileObserver,
