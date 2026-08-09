@@ -34,6 +34,7 @@ var (
 	ErrInvalidConfig       = errors.New("ledger: invalid configuration")
 	ErrInvalidVerification = errors.New("ledger: invalid verification")
 	ErrUnsupportedOutcome  = errors.New("ledger: unsupported outcome")
+	ledgerOpenCoordinator  openCoordinator
 )
 
 // Outcome is the durable three-state verdict for a claim.
@@ -98,11 +99,14 @@ func Open(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("ledger: create data directory: %w", err)
 	}
+	dbPath := filepath.Join(dataDir, Filename)
+	releaseOpen := ledgerOpenCoordinator.lock(databaseIdentityPath(dbPath))
+	defer releaseOpen()
+
 	if err := os.Chmod(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("ledger: secure data directory: %w", err)
 	}
 
-	dbPath := filepath.Join(dataDir, Filename)
 	dsn := (&url.URL{
 		Scheme: "file",
 		Path:   dbPath,

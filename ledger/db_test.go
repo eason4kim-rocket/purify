@@ -57,7 +57,7 @@ func TestOpenAppliesMigrationsIdempotently(t *testing.T) {
 
 func TestConcurrentOpenAppliesMigrationOnce(t *testing.T) {
 	dir := t.TempDir()
-	const openers = 12
+	const openers = 32
 	stores := make(chan *Store, openers)
 	errorsByOpener := make(chan error, openers)
 	start := make(chan struct{})
@@ -99,6 +99,59 @@ func TestConcurrentOpenAppliesMigrationOnce(t *testing.T) {
 	if count != len(migrations) {
 		t.Fatalf("migration count = %d, want %d", count, len(migrations))
 	}
+}
+
+func TestOpenCoordinatorDoesNotSerializeDifferentPaths(t *testing.T) {
+	var coordinator openCoordinator
+	firstRelease := coordinator.lock("first")
+	defer firstRelease()
+
+	secondEntered := make(chan struct{})
+	go func() {
+		release := coordinator.lock("second")
+		close(secondEntered)
+		release()
+	}()
+
+	select {
+	case <-secondEntered:
+	case <-time.After(time.Second):
+		t.Fatal("different database paths were serialized")
+	}
+}
+
+func TestOpenReleasesCoordinatorAfterFailure(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, Filename)
+	if err := os.Mkdir(dbPath, 0o700); err != nil {
+		t.Fatalf("create invalid database directory: %v", err)
+	}
+	if store, err := Open(dir); err == nil {
+		_ = store.Close()
+		t.Fatal("Open() with directory database path succeeded")
+	}
+	if err := os.Remove(dbPath); err != nil {
+		t.Fatalf("remove invalid database directory: %v", err)
+	}
+
+	opened := make(chan struct{})
+	var (
+		store *Store
+		err   error
+	)
+	go func() {
+		store, err = Open(dir)
+		close(opened)
+	}()
+	select {
+	case <-opened:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Open() remained blocked after an earlier failure")
+	}
+	if err != nil {
+		t.Fatalf("Open() after failure error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
 }
 
 func TestOpenConfiguresEveryConnection(t *testing.T) {
