@@ -9,6 +9,10 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
+
+	"github.com/use-agent/purify/ledger"
+	"github.com/use-agent/purify/publicnet"
 )
 
 const maximumCompilerModelBytes = 256
@@ -16,6 +20,7 @@ const maximumCompilerCredentialBytes = 16 << 10
 const maximumCompilerBaseURLBytes = 16 << 10
 
 var ErrInvalidCompilerConfig = errors.New("config: invalid managed compiler configuration")
+var ErrInvalidHealConfig = errors.New("config: invalid extractor heal configuration")
 
 // Config holds all application configuration.
 type Config struct {
@@ -30,6 +35,7 @@ type Config struct {
 	AdaptivePool AdaptivePoolConfig
 	Storage      StorageConfig
 	Compiler     CompilerConfig
+	Heal         HealConfig
 }
 
 // CompilerConfig controls process-owned background extractor synthesis. The
@@ -40,6 +46,14 @@ type CompilerConfig struct {
 	APIKey  string
 	Model   string
 	BaseURL string
+}
+
+// HealConfig controls the optional process-owned lifecycle webhook emitted by
+// verified extractor healing. Healing itself is enabled by durable snapshots,
+// independently of managed compiler synthesis.
+type HealConfig struct {
+	WebhookURL    string
+	WebhookSecret string
 }
 
 // StorageConfig controls durable snapshots, the ledger, and receipt signing.
@@ -207,7 +221,39 @@ func Load() *Config {
 			Model:   envOr("PURIFY_COMPILER_MODEL", "gpt-4o-mini"),
 			BaseURL: envOr("PURIFY_COMPILER_BASE_URL", "https://api.openai.com/v1"),
 		},
+		Heal: HealConfig{
+			WebhookURL:    os.Getenv("PURIFY_HEAL_WEBHOOK_URL"),
+			WebhookSecret: os.Getenv("PURIFY_HEAL_WEBHOOK_SECRET"),
+		},
 	}
+}
+
+// ValidateHealConfig rejects configured healing delivery when durable
+// snapshots are unavailable. A completely empty configuration remains inert
+// with snapshots off; a secret without a destination is always invalid.
+func ValidateHealConfig(value HealConfig, snapshotEnabled bool) error {
+	if value.WebhookURL == "" && value.WebhookSecret != "" {
+		return fmt.Errorf("%w: webhook secret requires a destination", ErrInvalidHealConfig)
+	}
+	if !snapshotEnabled {
+		if value.WebhookURL == "" && value.WebhookSecret == "" {
+			return nil
+		}
+		return fmt.Errorf("%w: snapshots must be enabled", ErrInvalidHealConfig)
+	}
+	if value.WebhookURL == "" {
+		return nil
+	}
+	if len(value.WebhookURL) > ledger.MaxOutboxURLBytes ||
+		len(value.WebhookSecret) > ledger.MaxOutboxSecretBytes ||
+		!utf8.ValidString(value.WebhookURL) || !utf8.ValidString(value.WebhookSecret) {
+		return fmt.Errorf("%w: webhook configuration exceeds its resource limit", ErrInvalidHealConfig)
+	}
+	canonical, _, err := publicnet.NormalizeHTTPURL(value.WebhookURL, nil, false)
+	if err != nil || len(canonical) > ledger.MaxOutboxURLBytes {
+		return fmt.Errorf("%w: webhook destination is invalid", ErrInvalidHealConfig)
+	}
+	return nil
 }
 
 // ValidateCompilerConfig rejects an enabled managed compiler that cannot

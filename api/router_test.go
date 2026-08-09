@@ -10,15 +10,48 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/use-agent/purify/api/handler"
 	"github.com/use-agent/purify/cache"
+	compilerdomain "github.com/use-agent/purify/compiler"
 	"github.com/use-agent/purify/config"
 	"github.com/use-agent/purify/evidence"
 	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/receipts"
+	"github.com/use-agent/purify/scraper"
 )
+
+var _ func(
+	*scraper.Scraper,
+	handler.ExtractService,
+	*receipts.Signer,
+	*config.Config,
+	*cache.Cache,
+	time.Time,
+	handler.ScrapeRunner,
+	handler.BatchService,
+	handler.CrawlService,
+	handler.MapService,
+	handler.VerifyService,
+) *gin.Engine = NewRouter
 
 type routerVerifyService struct {
 	calls int
+}
+
+type routerExtractorHealService struct {
+	calls int
+}
+
+func (service *routerExtractorHealService) ScheduleExtractor(
+	_ context.Context,
+	extractorID string,
+) (compilerdomain.HealSchedule, error) {
+	service.calls++
+	return compilerdomain.HealSchedule{
+		ExtractorID: extractorID,
+		HealRunID:   "00000000-0000-4000-8000-000000000002",
+	}, nil
 }
 
 func (service *routerVerifyService) Verify(_ context.Context, _ models.VerifyRequest) (*models.VerifyResponse, error) {
@@ -107,5 +140,44 @@ func TestReceiptRoutesRemainPublicWhenAPIAuthIsEnabled(t *testing.T) {
 	}
 	if verifyService.calls != 1 {
 		t.Fatalf("authorized verify reached service %d times, want 1", verifyService.calls)
+	}
+}
+
+func TestExtractorHealRouteIsProtectedAndRouterOptionPreservesOldConstruction(t *testing.T) {
+	cfg := &config.Config{
+		Server:    config.ServerConfig{Mode: "test"},
+		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+		RateLimit: config.RateLimitConfig{RequestsPerSecond: 100, Burst: 100},
+	}
+	const extractorID = "00000000-0000-4000-8000-000000000001"
+	path := "/api/v1/extractors/" + extractorID + "/heal"
+
+	// The old fixed call surface still builds the route, but without its option
+	// the capability fails closed after authentication.
+	withoutOption := NewRouter(nil, nil, nil, cfg, cache.New(1), time.Now(), nil, nil, nil, nil, nil)
+	unavailable := httptest.NewRequest(http.MethodPost, path, nil)
+	unavailable.Header.Set("X-API-Key", "required-secret")
+	unavailableResponse := httptest.NewRecorder()
+	withoutOption.ServeHTTP(unavailableResponse, unavailable)
+	if unavailableResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unconfigured heal status = %d, body = %s", unavailableResponse.Code, unavailableResponse.Body)
+	}
+
+	service := &routerExtractorHealService{}
+	withOption := NewRouterWithOptions(nil, nil, nil, cfg, cache.New(1), time.Now(), nil, nil, nil, nil, nil,
+		WithExtractorHealService(service))
+	unauthorized := httptest.NewRequest(http.MethodPost, path, nil)
+	unauthorizedResponse := httptest.NewRecorder()
+	withOption.ServeHTTP(unauthorizedResponse, unauthorized)
+	if unauthorizedResponse.Code != http.StatusUnauthorized || service.calls != 0 {
+		t.Fatalf("unauthorized heal = %d calls=%d body=%s", unauthorizedResponse.Code, service.calls, unauthorizedResponse.Body)
+	}
+
+	authorized := httptest.NewRequest(http.MethodPost, path, nil)
+	authorized.Header.Set("X-API-Key", "required-secret")
+	authorizedResponse := httptest.NewRecorder()
+	withOption.ServeHTTP(authorizedResponse, authorized)
+	if authorizedResponse.Code != http.StatusAccepted || service.calls != 1 {
+		t.Fatalf("authorized heal = %d calls=%d body=%s", authorizedResponse.Code, service.calls, authorizedResponse.Body)
 	}
 }

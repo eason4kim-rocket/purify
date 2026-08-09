@@ -32,6 +32,7 @@ func TestExtractorHealMigrationIsStrictBoundedAuditState(t *testing.T) {
 	for _, object := range []string{
 		"idx_extractor_heal_runs_pending_target", "idx_extractor_heal_runs_source",
 		"idx_extractor_heal_runs_lease", "idx_extractor_heal_runs_terminal",
+		"idx_extractor_heal_runs_actionable",
 		"idx_verifications_exact_heal_replay",
 		"trg_extractor_heal_runs_identity_immutable", "trg_extractor_heal_runs_source_exact",
 		"trg_extractor_heal_runs_samples_insert", "trg_extractor_heal_runs_state_transition",
@@ -42,6 +43,71 @@ func TestExtractorHealMigrationIsStrictBoundedAuditState(t *testing.T) {
 		if err := store.db.QueryRow("SELECT name FROM sqlite_master WHERE name = ?", object).Scan(&name); err != nil {
 			t.Fatalf("schema object %q: %v", object, err)
 		}
+	}
+}
+
+func TestExtractorHealActionablePollUsesPartialCoveringIndexAndSkipsTerminalHistory(t *testing.T) {
+	store := openTestStore(t)
+	source := validExtractorMigrationRow(400)
+	source.state, source.reason = "stale", "template_drift"
+	const terminalCount = 2048
+	pending := validExtractorHealMigrationRow(terminalCount+1, source)
+	if err := store.Update(context.Background(), func(tx WriteTx) error {
+		if err := insertExtractorMigrationRow(context.Background(), tx, source); err != nil {
+			return err
+		}
+		for index := 1; index <= terminalCount; index++ {
+			row := validExtractorHealMigrationRow(index, source)
+			row.state = "degraded"
+			row.terminalReason = "insufficient_history"
+			row.completedAt = extractorMigrationTime
+			if err := insertExtractorHealMigrationRow(context.Background(), tx, row); err != nil {
+				return err
+			}
+		}
+		return insertExtractorHealMigrationRow(context.Background(), tx, pending)
+	}); err != nil {
+		t.Fatalf("seed terminal heal history: %v", err)
+	}
+
+	const pollQuery = `SELECT id FROM extractor_heal_runs
+		WHERE state IN ('pending', 'replaying') AND
+			(state = 'pending' OR lease_until <= ?)
+		ORDER BY created_at, id LIMIT 1`
+	rows, err := store.db.Query("EXPLAIN QUERY PLAN "+pollQuery, extractorHealLeaseTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := ""
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		plan += detail + "\n"
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan, "USING COVERING INDEX idx_extractor_heal_runs_actionable") {
+		t.Fatalf("actionable poll does not use covering index:\n%s", plan)
+	}
+	if strings.Contains(strings.ToUpper(plan), "TEMP B-TREE") {
+		t.Fatalf("actionable poll sorts through a temporary b-tree:\n%s", plan)
+	}
+
+	var runID string
+	if err := store.db.QueryRow(pollQuery, extractorHealLeaseTime).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	if runID != pending.id {
+		t.Fatalf("actionable run = %q, want %q", runID, pending.id)
 	}
 }
 
@@ -271,7 +337,7 @@ func TestExtractorDeleteAuditGuardProtectsVerificationProvenance(t *testing.T) {
 	}
 }
 
-func TestMigration006UpgradesVersionFiveDatabaseAndReopens(t *testing.T) {
+func TestExtractorHealMigrationsUpgradeVersionFiveDatabaseAndReopen(t *testing.T) {
 	dir := t.TempDir()
 	db, err := sql.Open("sqlite", filepath.Join(dir, Filename))
 	if err != nil {
@@ -306,7 +372,7 @@ func TestMigration006UpgradesVersionFiveDatabaseAndReopens(t *testing.T) {
 		t.Fatalf("Open(repeat) error = %v", err)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
-	var versions, tables int
+	var versions, tables, actionableIndexes int
 	if err := reopened.db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
@@ -314,8 +380,13 @@ func TestMigration006UpgradesVersionFiveDatabaseAndReopens(t *testing.T) {
 		WHERE type = 'table' AND name = 'extractor_heal_runs'`).Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if versions != len(migrations) || tables != 1 {
-		t.Fatalf("upgrade state migrations=%d/%d tables=%d", versions, len(migrations), tables)
+	if err := reopened.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master
+		WHERE type = 'index' AND name = 'idx_extractor_heal_runs_actionable'`).Scan(&actionableIndexes); err != nil {
+		t.Fatal(err)
+	}
+	if versions != len(migrations) || tables != 1 || actionableIndexes != 1 {
+		t.Fatalf("upgrade state migrations=%d/%d tables=%d actionable_indexes=%d",
+			versions, len(migrations), tables, actionableIndexes)
 	}
 }
 

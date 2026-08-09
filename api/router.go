@@ -12,6 +12,24 @@ import (
 	"github.com/use-agent/purify/scraper"
 )
 
+type routerOptions struct {
+	extractorHealService handler.ExtractorHealService
+}
+
+// RouterOption adds an optional API capability without changing the fixed
+// positional router construction surface used by embedders.
+type RouterOption func(*routerOptions)
+
+// WithExtractorHealService enables durable manual extractor-heal scheduling.
+// A nil service keeps the protected route present but unavailable.
+func WithExtractorHealService(service handler.ExtractorHealService) RouterOption {
+	return func(options *routerOptions) {
+		if options != nil {
+			options.extractorHealService = service
+		}
+	}
+}
+
 // NewRouter creates a configured Gin engine with all routes and middleware.
 //
 // Middleware chain:
@@ -21,7 +39,20 @@ import (
 //
 // Health and receipt verification endpoints are intentionally outside auth.
 func NewRouter(sc *scraper.Scraper, extractService handler.ExtractService, receiptSigner *receipts.Signer, cfg *config.Config, cc *cache.Cache, startTime time.Time, scrapeRunner handler.ScrapeRunner, batchService handler.BatchService, crawlService handler.CrawlService, mapService handler.MapService, verifyService handler.VerifyService) *gin.Engine {
+	return NewRouterWithOptions(sc, extractService, receiptSigner, cfg, cc, startTime,
+		scrapeRunner, batchService, crawlService, mapService, verifyService)
+}
+
+// NewRouterWithOptions creates a configured Gin engine with optional
+// capabilities while preserving NewRouter's exact historical function type.
+func NewRouterWithOptions(sc *scraper.Scraper, extractService handler.ExtractService, receiptSigner *receipts.Signer, cfg *config.Config, cc *cache.Cache, startTime time.Time, scrapeRunner handler.ScrapeRunner, batchService handler.BatchService, crawlService handler.CrawlService, mapService handler.MapService, verifyService handler.VerifyService, configured ...RouterOption) *gin.Engine {
 	gin.SetMode(cfg.Server.Mode)
+	options := routerOptions{}
+	for _, option := range configured {
+		if option != nil {
+			option(&options)
+		}
+	}
 
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -62,6 +93,9 @@ func NewRouter(sc *scraper.Scraper, extractService handler.ExtractService, recei
 
 	// Re-verify evidence-backed facts against a durable current observation.
 	protected.POST("/verify", handler.Verify(verifyService))
+
+	// Manually wake one exact durable extractor-heal run.
+	protected.POST("/extractors/:id/heal", handler.PostExtractorHeal(options.extractorHealService))
 
 	return r
 }

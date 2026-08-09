@@ -974,4 +974,7 @@ var migrations = []string{
 	BEGIN
 		SELECT RAISE(ABORT, 'outbox event identity is immutable');
 	END;`,
+	`CREATE INDEX idx_extractor_heal_runs_actionable
+		ON extractor_heal_runs(created_at, id, state, lease_until)
+		WHERE state IN ('pending', 'replaying');`,
 }

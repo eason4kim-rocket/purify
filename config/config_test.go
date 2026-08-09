@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/use-agent/purify/ledger"
 )
 
 func TestStorageConfigDefaults(t *testing.T) {
@@ -58,6 +60,84 @@ func TestCompilerConfigEnvironment(t *testing.T) {
 	}
 	if err := ValidateCompilerConfig(cfg.Compiler, true); err != nil {
 		t.Fatalf("ValidateCompilerConfig() error = %v", err)
+	}
+}
+
+func TestHealConfigDefaultsAndEnvironment(t *testing.T) {
+	t.Setenv("PURIFY_HEAL_WEBHOOK_URL", "")
+	t.Setenv("PURIFY_HEAL_WEBHOOK_SECRET", "")
+	cfg := Load()
+	if cfg.Heal != (HealConfig{}) {
+		t.Fatalf("Heal defaults = %#v", cfg.Heal)
+	}
+
+	t.Setenv("PURIFY_HEAL_WEBHOOK_URL", "HTTPS://Hooks.Example.COM:443/heal")
+	t.Setenv("PURIFY_HEAL_WEBHOOK_SECRET", "process-secret")
+	cfg = Load()
+	if cfg.Heal.WebhookURL != "HTTPS://Hooks.Example.COM:443/heal" ||
+		cfg.Heal.WebhookSecret != "process-secret" {
+		t.Fatalf("Heal environment = %#v", cfg.Heal)
+	}
+	if err := ValidateHealConfig(cfg.Heal, true); err != nil {
+		t.Fatalf("ValidateHealConfig(environment) = %v", err)
+	}
+}
+
+func TestValidateHealConfigMatrixAndRedaction(t *testing.T) {
+	valid := HealConfig{WebhookURL: "https://hooks.example.com/heal", WebhookSecret: "process-secret"}
+	tests := []struct {
+		name            string
+		config          HealConfig
+		snapshots       bool
+		wantInvalid     bool
+		forbiddenDetail string
+	}{
+		{name: "snapshots on empty", snapshots: true},
+		{name: "snapshots off empty inert"},
+		{name: "valid", config: valid, snapshots: true},
+		{name: "URL without secret", config: HealConfig{WebhookURL: valid.WebhookURL}, snapshots: true},
+		{name: "canonicalizable URL", config: HealConfig{WebhookURL: " HTTPS://Hooks.Example.COM:443/heal "}, snapshots: true},
+		{name: "configured URL snapshots off", config: HealConfig{WebhookURL: valid.WebhookURL}, wantInvalid: true},
+		{name: "secret without URL snapshots on", config: HealConfig{WebhookSecret: valid.WebhookSecret}, snapshots: true, wantInvalid: true, forbiddenDetail: valid.WebhookSecret},
+		{name: "secret without URL snapshots off", config: HealConfig{WebhookSecret: valid.WebhookSecret}, wantInvalid: true, forbiddenDetail: valid.WebhookSecret},
+		{name: "private literal", config: HealConfig{WebhookURL: "http://127.0.0.1/heal"}, snapshots: true, wantInvalid: true, forbiddenDetail: "127.0.0.1"},
+		{name: "localhost", config: HealConfig{WebhookURL: "http://localhost/heal"}, snapshots: true, wantInvalid: true, forbiddenDetail: "localhost"},
+		{name: "userinfo", config: HealConfig{WebhookURL: "https://user:secret@hooks.example.com/heal"}, snapshots: true, wantInvalid: true, forbiddenDetail: "user:secret"},
+		{name: "unsupported scheme", config: HealConfig{WebhookURL: "ftp://hooks.example.com/heal"}, snapshots: true, wantInvalid: true},
+		{name: "empty port", config: HealConfig{WebhookURL: "https://hooks.example.com:/heal"}, snapshots: true, wantInvalid: true},
+		{name: "zero port", config: HealConfig{WebhookURL: "https://hooks.example.com:0/heal"}, snapshots: true, wantInvalid: true},
+		{name: "invalid URL UTF-8", config: HealConfig{WebhookURL: "https://hooks.example.com/\xff"}, snapshots: true, wantInvalid: true},
+		{name: "invalid secret UTF-8", config: HealConfig{WebhookURL: valid.WebhookURL, WebhookSecret: "\xff"}, snapshots: true, wantInvalid: true},
+		{name: "URL N plus 1", config: HealConfig{WebhookURL: "https://hooks.example.com/" + strings.Repeat("p", ledger.MaxOutboxURLBytes)}, snapshots: true, wantInvalid: true},
+		{name: "secret N plus 1", config: HealConfig{WebhookURL: valid.WebhookURL, WebhookSecret: strings.Repeat("s", ledger.MaxOutboxSecretBytes+1)}, snapshots: true, wantInvalid: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateHealConfig(test.config, test.snapshots)
+			if got := errors.Is(err, ErrInvalidHealConfig); got != test.wantInvalid {
+				t.Fatalf("ValidateHealConfig() = %v, invalid=%v want=%v", err, got, test.wantInvalid)
+			}
+			for _, forbidden := range []string{test.forbiddenDetail, test.config.WebhookSecret} {
+				if err != nil && forbidden != "" && strings.Contains(err.Error(), forbidden) {
+					t.Fatalf("ValidateHealConfig leaked configuration: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestHealWebhookResourceLimitsAreInclusive(t *testing.T) {
+	prefix := "https://hooks.example.com/"
+	value := HealConfig{
+		WebhookURL:    prefix + strings.Repeat("p", ledger.MaxOutboxURLBytes-len(prefix)),
+		WebhookSecret: strings.Repeat("s", ledger.MaxOutboxSecretBytes),
+	}
+	if err := ValidateHealConfig(value, true); err != nil {
+		t.Fatalf("ValidateHealConfig(at limits) = %v", err)
+	}
+	value.WebhookSecret += "s"
+	if err := ValidateHealConfig(value, true); !errors.Is(err, ErrInvalidHealConfig) {
+		t.Fatalf("ValidateHealConfig(secret N+1) = %v", err)
 	}
 }
 
