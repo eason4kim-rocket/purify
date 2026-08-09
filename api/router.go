@@ -1,6 +1,7 @@
 package api
 
 import (
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -14,6 +15,7 @@ import (
 
 type routerOptions struct {
 	extractorHealService handler.ExtractorHealService
+	searchService        handler.SearchService
 }
 
 // RouterOption adds an optional API capability without changing the fixed
@@ -26,6 +28,17 @@ func WithExtractorHealService(service handler.ExtractorHealService) RouterOption
 	return func(options *routerOptions) {
 		if options != nil {
 			options.extractorHealService = service
+		}
+	}
+}
+
+// WithSearchService enables provider-neutral Search. The protected route is
+// registered even when the service is nil so unavailable deployments fail
+// closed with a stable authenticated 503 instead of changing route shape.
+func WithSearchService(service handler.SearchService) RouterOption {
+	return func(options *routerOptions) {
+		if options != nil {
+			options.searchService = service
 		}
 	}
 }
@@ -67,35 +80,59 @@ func NewRouterWithOptions(sc *scraper.Scraper, extractService handler.ExtractSer
 	v1.POST("/receipts/verify", handler.VerifyReceipt(receiptSigner))
 	v1.GET("/receipts/pubkey", handler.ReceiptPublicKey(receiptSigner))
 
-	// Protected group — auth + rate limit.
-	protected := v1.Group("")
+	// Protected routes use two groups so Search can retain its own stable
+	// response envelope. Both groups consume from the same identity limiter.
+	limiter := middleware.NewLimiter(cfg.RateLimit)
+	searchProtected := v1.Group("")
 	if cfg.Auth.Enabled {
-		protected.Use(middleware.Auth(cfg.Auth.APIKeys))
+		searchProtected.Use(middleware.SearchAuth(cfg.Auth.APIKeys))
 	}
-	protected.Use(middleware.RateLimit(cfg.RateLimit))
+	searchService := options.searchService
+	if !searchCapabilityEnabled(cfg) {
+		searchService = nil
+	}
+	searchProtected.POST("/search", handler.SearchWithRateLimiter(searchService, limiter))
+
+	standardProtected := v1.Group("")
+	if cfg.Auth.Enabled {
+		standardProtected.Use(middleware.Auth(cfg.Auth.APIKeys))
+	}
+	standardProtected.Use(limiter.MiddlewareFixed(1))
 
 	// Scrape
-	protected.POST("/scrape", handler.Scrape(scrapeRunner))
+	standardProtected.POST("/scrape", handler.Scrape(scrapeRunner))
 
 	// Extract (structured extraction via LLM)
-	protected.POST("/extract", handler.Extract(extractService))
+	standardProtected.POST("/extract", handler.Extract(extractService))
 
 	// Batch
-	protected.POST("/batch/scrape", handler.PostBatch(batchService))
-	protected.GET("/batch/:id", handler.GetBatch(batchService))
+	standardProtected.POST("/batch/scrape", handler.PostBatch(batchService))
+	standardProtected.GET("/batch/:id", handler.GetBatch(batchService))
 
 	// Crawl
-	protected.POST("/crawl", handler.PostCrawl(crawlService))
-	protected.GET("/crawl/:id", handler.GetCrawl(crawlService))
+	standardProtected.POST("/crawl", handler.PostCrawl(crawlService))
+	standardProtected.GET("/crawl/:id", handler.GetCrawl(crawlService))
 
 	// Map
-	protected.POST("/map", handler.PostMap(mapService))
+	standardProtected.POST("/map", handler.PostMap(mapService))
 
 	// Re-verify evidence-backed facts against a durable current observation.
-	protected.POST("/verify", handler.Verify(verifyService))
+	standardProtected.POST("/verify", handler.Verify(verifyService))
 
 	// Manually wake one exact durable extractor-heal run.
-	protected.POST("/extractors/:id/heal", handler.PostExtractorHeal(options.extractorHealService))
+	standardProtected.POST("/extractors/:id/heal", handler.PostExtractorHeal(options.extractorHealService))
 
 	return r
+}
+
+func searchCapabilityEnabled(cfg *config.Config) bool {
+	if cfg == nil || !cfg.Auth.Enabled || cfg.RateLimit.Burst < handler.MaxSearchRequestCost {
+		return false
+	}
+	for _, key := range cfg.Auth.APIKeys {
+		if strings.TrimSpace(key) != "" {
+			return true
+		}
+	}
+	return false
 }

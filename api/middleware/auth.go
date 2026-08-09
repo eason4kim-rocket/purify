@@ -57,6 +57,47 @@ func Auth(apiKeys []string) gin.HandlerFunc {
 	}
 }
 
+// SearchAuth authenticates the Search route while preserving its
+// provider-neutral response envelope. An empty effective key set is a no-op;
+// the router independently disables the Search capability in that state so
+// the permanently registered route returns a stable 503.
+func SearchAuth(apiKeys []string) gin.HandlerFunc {
+	keySet := make(map[string]struct{}, len(apiKeys))
+	for _, key := range apiKeys {
+		if strings.TrimSpace(key) != "" {
+			keySet[key] = struct{}{}
+		}
+	}
+	if len(keySet) == 0 {
+		return func(c *gin.Context) { c.Next() }
+	}
+
+	return func(c *gin.Context) {
+		key := extractAPIKey(c)
+		if key == "" {
+			abortSearchUnauthorized(c, "missing API key: provide X-API-Key header or Authorization: Bearer <key>")
+			return
+		}
+		if _, valid := keySet[key]; !valid {
+			abortSearchUnauthorized(c, "invalid API key")
+			return
+		}
+		c.Set("api_key", key)
+		c.Next()
+	}
+}
+
+func abortSearchUnauthorized(c *gin.Context, message string) {
+	c.AbortWithStatusJSON(http.StatusUnauthorized, models.SearchResponse{
+		Success: false,
+		Results: []models.SearchResult{},
+		Error: &models.ErrorDetail{
+			Code:    models.ErrCodeUnauthorized,
+			Message: message,
+		},
+	})
+}
+
 // extractAPIKey tries X-API-Key first, then Authorization: Bearer.
 func extractAPIKey(c *gin.Context) string {
 	if key := c.GetHeader("X-API-Key"); key != "" {

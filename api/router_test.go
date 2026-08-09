@@ -43,6 +43,19 @@ type routerExtractorHealService struct {
 	calls int
 }
 
+type routerSearchService struct {
+	calls int
+}
+
+func (service *routerSearchService) Search(_ context.Context, request *models.SearchRequest) (*models.SearchResponse, error) {
+	service.calls++
+	return &models.SearchResponse{
+		Success: true,
+		Query:   request.Query,
+		Results: []models.SearchResult{},
+	}, nil
+}
+
 func (service *routerExtractorHealService) ScheduleExtractor(
 	_ context.Context,
 	extractorID string,
@@ -179,5 +192,167 @@ func TestExtractorHealRouteIsProtectedAndRouterOptionPreservesOldConstruction(t 
 	withOption.ServeHTTP(authorizedResponse, authorized)
 	if authorizedResponse.Code != http.StatusAccepted || service.calls != 1 {
 		t.Fatalf("authorized heal = %d calls=%d body=%s", authorizedResponse.Code, service.calls, authorizedResponse.Body)
+	}
+}
+
+func TestSearchRouteIsAlwaysProtectedAndFailsClosedWithoutOption(t *testing.T) {
+	cfg := &config.Config{
+		Server:    config.ServerConfig{Mode: "test"},
+		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+		RateLimit: config.RateLimitConfig{RequestsPerSecond: 100, Burst: 100},
+	}
+	router := NewRouter(nil, nil, nil, cfg, cache.New(1), time.Now(), nil, nil, nil, nil, nil)
+
+	unauthorized := httptest.NewRequest(http.MethodPost, "/api/v1/search", bytes.NewBufferString(`{"query":"purify"}`))
+	unauthorized.Header.Set("Content-Type", "application/json")
+	unauthorizedResponse := httptest.NewRecorder()
+	router.ServeHTTP(unauthorizedResponse, unauthorized)
+	if unauthorizedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized search = %d, body=%s", unauthorizedResponse.Code, unauthorizedResponse.Body)
+	}
+	var unauthorizedEnvelope models.SearchResponse
+	if err := json.Unmarshal(unauthorizedResponse.Body.Bytes(), &unauthorizedEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if unauthorizedEnvelope.Results == nil || unauthorizedEnvelope.Error == nil || unauthorizedEnvelope.Error.Code != models.ErrCodeUnauthorized {
+		t.Fatalf("unauthorized Search envelope = %#v", unauthorizedEnvelope)
+	}
+
+	authorized := httptest.NewRequest(http.MethodPost, "/api/v1/search", bytes.NewBufferString(`{"query":"purify"}`))
+	authorized.Header.Set("Content-Type", "application/json")
+	authorized.Header.Set("X-API-Key", "required-secret")
+	authorizedResponse := httptest.NewRecorder()
+	router.ServeHTTP(authorizedResponse, authorized)
+	if authorizedResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unconfigured search = %d, body=%s", authorizedResponse.Code, authorizedResponse.Body)
+	}
+	var response models.SearchResponse
+	if err := json.Unmarshal(authorizedResponse.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Results == nil || response.Error == nil || response.Error.Code != models.ErrCodeSearchUnavailable {
+		t.Fatalf("unconfigured response = %#v", response)
+	}
+}
+
+func TestSearchCapabilityRequiresAuthUsableKeyAndMaximumCostBurst(t *testing.T) {
+	tests := []struct {
+		name       string
+		auth       config.AuthConfig
+		burst      int
+		header     string
+		wantStatus int
+		wantCalls  int
+	}{
+		{
+			name:       "auth disabled",
+			auth:       config.AuthConfig{Enabled: false, APIKeys: []string{"required-secret"}},
+			burst:      handler.MaxSearchRequestCost,
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name:       "no keys",
+			auth:       config.AuthConfig{Enabled: true},
+			burst:      handler.MaxSearchRequestCost,
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name:       "blank keys",
+			auth:       config.AuthConfig{Enabled: true, APIKeys: []string{"", " \t"}},
+			burst:      handler.MaxSearchRequestCost,
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name:       "burst N minus one",
+			auth:       config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+			burst:      handler.MaxSearchRequestCost - 1,
+			header:     "required-secret",
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name:       "safe exact boundary",
+			auth:       config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+			burst:      handler.MaxSearchRequestCost,
+			header:     "required-secret",
+			wantStatus: http.StatusOK,
+			wantCalls:  1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Server:    config.ServerConfig{Mode: "test"},
+				Auth:      test.auth,
+				RateLimit: config.RateLimitConfig{RequestsPerSecond: 0, Burst: test.burst},
+			}
+			service := &routerSearchService{}
+			router := NewRouterWithOptions(nil, nil, nil, cfg, cache.New(1), time.Now(), nil, nil, nil, nil, nil,
+				WithSearchService(service))
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/search", bytes.NewBufferString(
+				`{"query":"purify","limit":20,"include_content":true,"verify":true,"schema":{"type":"object"}}`,
+			))
+			request.Header.Set("Content-Type", "application/json")
+			if test.header != "" {
+				request.Header.Set("X-API-Key", test.header)
+			}
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != test.wantStatus || service.calls != test.wantCalls {
+				t.Fatalf("status/calls = %d/%d, want %d/%d; body=%s", recorder.Code, service.calls, test.wantStatus, test.wantCalls, recorder.Body)
+			}
+			var response models.SearchResponse
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Results == nil {
+				t.Fatalf("nullable results: %#v", response)
+			}
+			if test.wantStatus == http.StatusServiceUnavailable &&
+				(response.Error == nil || response.Error.Code != models.ErrCodeSearchUnavailable) {
+				t.Fatalf("fail-closed response = %#v", response)
+			}
+		})
+	}
+}
+
+func TestSearchRouterOptionUsesSharedBucketWithoutDoubleCharge(t *testing.T) {
+	cfg := &config.Config{
+		Server:    config.ServerConfig{Mode: "test"},
+		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+		RateLimit: config.RateLimitConfig{RequestsPerSecond: 0, Burst: handler.MaxSearchRequestCost},
+	}
+	service := &routerSearchService{}
+	router := NewRouterWithOptions(nil, nil, nil, cfg, cache.New(1), time.Now(), nil, nil, nil, nil, nil,
+		WithSearchService(service))
+
+	// The maximum Search request costs exactly 22. It succeeds with a burst of
+	// 22; any preceding fixed Search charge would make this request fail.
+	searchRequest := httptest.NewRequest(http.MethodPost, "/api/v1/search", bytes.NewBufferString(
+		`{"query":"purify","limit":20,"include_content":true,"verify":true,"schema":{"type":"object"}}`,
+	))
+	searchRequest.Header.Set("Content-Type", "application/json")
+	searchRequest.Header.Set("X-API-Key", "required-secret")
+	searchResponse := httptest.NewRecorder()
+	router.ServeHTTP(searchResponse, searchRequest)
+	if searchResponse.Code != http.StatusOK || service.calls != 1 {
+		t.Fatalf("search status/calls = %d/%d, body=%s", searchResponse.Code, service.calls, searchResponse.Body)
+	}
+
+	// A legacy protected route shares the same identity bucket and is denied
+	// after Search consumes the burst, proving the two groups do not fork state.
+	exhausted := httptest.NewRequest(http.MethodPost, "/api/v1/extract", bytes.NewBufferString(`{}`))
+	exhausted.Header.Set("Content-Type", "application/json")
+	exhausted.Header.Set("X-API-Key", "required-secret")
+	exhaustedResponse := httptest.NewRecorder()
+	router.ServeHTTP(exhaustedResponse, exhausted)
+	if exhaustedResponse.Code != http.StatusTooManyRequests || service.calls != 1 {
+		t.Fatalf("exhausted status/calls = %d/%d, body=%s", exhaustedResponse.Code, service.calls, exhaustedResponse.Body)
+	}
+	var response models.ScrapeResponse
+	if err := json.Unmarshal(exhaustedResponse.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error == nil || response.Error.Code != models.ErrCodeRateLimited {
+		t.Fatalf("exhausted response = %#v", response)
 	}
 }
