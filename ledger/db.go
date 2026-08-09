@@ -165,17 +165,32 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// RecordVerifications atomically appends all claim verdicts. A successful call
-// means every row is durable; validation or insertion failure leaves no rows.
+// RecordVerifications atomically appends all claim verdicts without an outbox
+// event. It retains the original API and delegates to RecordVerificationBatch.
 func (s *Store) RecordVerifications(ctx context.Context, rows []Verification) error {
+	return s.RecordVerificationBatch(ctx, rows, nil)
+}
+
+// RecordVerificationBatch atomically appends all claim verdicts and, when
+// supplied, one durable outbox event in the same SQLite transaction. An exact
+// retry of an already-durable batch is idempotent; conflicting content fails
+// closed and never appends a partial batch or orphaned event.
+func (s *Store) RecordVerificationBatch(
+	ctx context.Context,
+	rows []Verification,
+	event *OutboxEvent,
+) error {
 	if s == nil {
 		return ErrClosed
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if len(rows) == 0 {
+	if len(rows) == 0 && event == nil {
 		return nil
+	}
+	if len(rows) == 0 {
+		return outboxEventError("an outbox event requires a non-empty verification batch")
 	}
 
 	validated := make([]validatedVerification, len(rows))
@@ -195,6 +210,14 @@ func (s *Store) RecordVerifications(ctx context.Context, rows []Verification) er
 		}
 		validated[i] = v
 	}
+	var validatedEvent *validatedOutboxEvent
+	if event != nil {
+		value, err := validateNewOutboxEvent(*event, verificationID)
+		if err != nil {
+			return err
+		}
+		validatedEvent = &value
+	}
 
 	s.gate.RLock()
 	defer s.gate.RUnlock()
@@ -212,6 +235,46 @@ func (s *Store) RecordVerifications(ctx context.Context, rows []Verification) er
 		return fmt.Errorf("ledger: begin verification transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	var existingCount int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM verifications WHERE verification_id = ?",
+		verificationID,
+	).Scan(&existingCount); err != nil {
+		return fmt.Errorf("ledger: inspect existing verification batch: %w", err)
+	}
+	if existingCount > 0 {
+		if existingCount != len(validated) {
+			return fmt.Errorf("%w: retry row count differs for verification_id %q", ErrInvalidVerification, verificationID)
+		}
+		for _, row := range validated {
+			matches, err := existingVerificationMatches(ctx, tx, row)
+			if err != nil {
+				return err
+			}
+			if !matches {
+				return fmt.Errorf(
+					"%w: retry differs at claim_index %d for verification_id %q",
+					ErrInvalidVerification,
+					row.ClaimIndex,
+					verificationID,
+				)
+			}
+		}
+		if validatedEvent != nil {
+			matches, err := existingOutboxMatches(ctx, tx, *validatedEvent)
+			if err != nil {
+				return err
+			}
+			if !matches {
+				return fmt.Errorf("%w: type %q verification_id %q", ErrOutboxConflict, validatedEvent.Type, verificationID)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("ledger: commit idempotent verification transaction: %w", err)
+		}
+		return nil
+	}
 
 	const insert = `INSERT INTO verifications (
 		id, verification_id, claim_index, url, host, final_url, path,
@@ -236,10 +299,102 @@ func (s *Store) RecordVerifications(ctx context.Context, rows []Verification) er
 			return fmt.Errorf("ledger: insert verification claim %d: %w", row.ClaimIndex, err)
 		}
 	}
+	if validatedEvent != nil {
+		if err := insertOutboxEvent(ctx, tx, *validatedEvent); err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("ledger: commit verification transaction: %w", err)
 	}
 	return nil
+}
+
+func existingVerificationMatches(
+	ctx context.Context,
+	tx *sql.Tx,
+	row validatedVerification,
+) (bool, error) {
+	var (
+		url, host, path, oldValue, outcome, oldSnapshotID, verifiedAt string
+		finalURL, newValue, goneScope, newSnapshotID                  sql.NullString
+		oldReceipt, receipt, schemaHash, templateClusterID            sql.NullString
+		extractorID                                                   sql.NullString
+		pageSimilarity                                                sql.NullFloat64
+	)
+	err := tx.QueryRowContext(ctx, `SELECT
+		url, host, final_url, path, old_value, new_value, outcome,
+		gone_scope, page_similarity, old_snapshot_id, new_snapshot_id,
+		old_receipt, receipt, schema_hash, template_cluster_id,
+		extractor_id, verified_at
+		FROM verifications WHERE verification_id = ? AND claim_index = ?`,
+		row.VerificationID,
+		row.ClaimIndex,
+	).Scan(
+		&url,
+		&host,
+		&finalURL,
+		&path,
+		&oldValue,
+		&newValue,
+		&outcome,
+		&goneScope,
+		&pageSimilarity,
+		&oldSnapshotID,
+		&newSnapshotID,
+		&oldReceipt,
+		&receipt,
+		&schemaHash,
+		&templateClusterID,
+		&extractorID,
+		&verifiedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("ledger: read existing verification claim %d: %w", row.ClaimIndex, err)
+	}
+	return url == row.URL &&
+		host == row.Host &&
+		nullIfEmptyMatches(finalURL, row.FinalURL) &&
+		path == row.Path &&
+		oldValue == row.OldValue &&
+		nullableValueMatches(newValue, row.NewValue) &&
+		outcome == row.Outcome &&
+		nullableValueMatches(goneScope, row.GoneScope) &&
+		nullableFloatMatches(pageSimilarity, row.PageSimilarity) &&
+		oldSnapshotID == row.OldSnapshotID &&
+		nullIfEmptyMatches(newSnapshotID, row.NewSnapshotID) &&
+		nullIfEmptyMatches(oldReceipt, row.OldReceipt) &&
+		nullIfEmptyMatches(receipt, row.Receipt) &&
+		nullIfEmptyMatches(schemaHash, row.SchemaHash) &&
+		nullIfEmptyMatches(templateClusterID, row.TemplateClusterID) &&
+		nullIfEmptyMatches(extractorID, row.ExtractorID) &&
+		verifiedAt == row.VerifiedAt, nil
+}
+
+func nullIfEmptyMatches(actual sql.NullString, expected string) bool {
+	if expected == "" {
+		return !actual.Valid
+	}
+	return actual.Valid && actual.String == expected
+}
+
+func nullableValueMatches(actual sql.NullString, expected any) bool {
+	if expected == nil {
+		return !actual.Valid
+	}
+	value, ok := expected.(string)
+	return ok && actual.Valid && actual.String == value
+}
+
+func nullableFloatMatches(actual sql.NullFloat64, expected any) bool {
+	if expected == nil {
+		return !actual.Valid
+	}
+	value, ok := expected.(float64)
+	return ok && actual.Valid && actual.Float64 == value
 }
 
 type validatedVerification struct {

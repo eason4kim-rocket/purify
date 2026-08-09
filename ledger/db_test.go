@@ -398,6 +398,17 @@ func assertMigrationState(t *testing.T, db *sql.DB) {
 			t.Fatalf("index %q: %v", name, err)
 		}
 	}
+	if err := db.QueryRow(`SELECT name FROM sqlite_master
+		WHERE type = 'table' AND name = 'outbox_events'`).Scan(&table); err != nil {
+		t.Fatalf("outbox_events table: %v", err)
+	}
+	for _, name := range []string{"idx_outbox_events_pending", "idx_outbox_events_verification"} {
+		var got string
+		if err := db.QueryRow(`SELECT name FROM sqlite_master
+			WHERE type = 'index' AND name = ?`, name).Scan(&got); err != nil {
+			t.Fatalf("index %q: %v", name, err)
+		}
+	}
 }
 
 type pragmaQuerier interface {

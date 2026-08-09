@@ -50,4 +50,32 @@ var migrations = []string{
 			outcome,
 			verified_at DESC
 		);`,
+	`CREATE TABLE outbox_events (
+		id TEXT PRIMARY KEY,
+		verification_id TEXT NOT NULL,
+		event_type TEXT NOT NULL,
+		destination_url TEXT NOT NULL,
+		secret TEXT NOT NULL DEFAULT '',
+		payload TEXT NOT NULL CHECK (json_valid(payload)),
+		created_at TEXT NOT NULL,
+		attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+		last_attempt_at TEXT,
+		last_error TEXT NOT NULL DEFAULT '',
+		next_attempt_at TEXT NOT NULL,
+		delivered_at TEXT,
+		failed_at TEXT,
+		UNIQUE (event_type, verification_id),
+		CHECK (delivered_at IS NULL OR failed_at IS NULL),
+		CHECK (failed_at IS NULL OR last_error <> ''),
+		CHECK (
+			(attempt_count = 0 AND last_attempt_at IS NULL AND last_error = '') OR
+			(attempt_count > 0 AND last_attempt_at IS NOT NULL AND last_error <> '')
+		)
+	);
+
+	CREATE INDEX idx_outbox_events_pending
+		ON outbox_events(next_attempt_at, created_at, id)
+		WHERE delivered_at IS NULL AND failed_at IS NULL;
+	CREATE INDEX idx_outbox_events_verification
+		ON outbox_events(verification_id);`,
 }
