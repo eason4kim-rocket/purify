@@ -977,4 +977,644 @@ var migrations = []string{
 	`CREATE INDEX idx_extractor_heal_runs_actionable
 		ON extractor_heal_runs(created_at, id, state, lease_until)
 		WHERE state IN ('pending', 'replaying');`,
+	`CREATE TABLE watches (
+		id TEXT NOT NULL PRIMARY KEY CHECK (
+			typeof(id) = 'text' AND length(id) = 36 AND
+			substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND
+			substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND
+			length(replace(id, '-', '')) = 32 AND
+			id NOT GLOB '*[^0-9a-f-]*'
+		),
+		spec_hash TEXT NOT NULL CHECK (
+			typeof(spec_hash) = 'text' AND length(spec_hash) = 64 AND
+			spec_hash NOT GLOB '*[^0-9a-f]*'
+		),
+		subject TEXT NOT NULL CHECK (
+			typeof(subject) = 'text' AND
+			length(CAST(subject AS BLOB)) BETWEEN 1 AND 1200 AND
+			subject = trim(subject) AND instr(subject, char(0)) = 0 AND
+			instr(subject, char(9)) = 0 AND instr(subject, char(10)) = 0 AND
+			instr(subject, char(11)) = 0 AND instr(subject, char(12)) = 0 AND
+			instr(subject, char(13)) = 0 AND instr(subject, '  ') = 0
+		),
+		predicate TEXT NOT NULL CHECK (
+			typeof(predicate) = 'text' AND
+			length(CAST(predicate AS BLOB)) BETWEEN 1 AND 512 AND
+			predicate = trim(predicate) AND instr(predicate, char(0)) = 0 AND
+			instr(predicate, ' ') = 0 AND instr(predicate, char(9)) = 0 AND
+			instr(predicate, char(10)) = 0 AND instr(predicate, char(11)) = 0 AND
+			instr(predicate, char(12)) = 0 AND instr(predicate, char(13)) = 0
+		),
+		freshness TEXT NOT NULL CHECK (
+			typeof(freshness) = 'text' AND
+			freshness IN ('day', 'week', 'month', 'year')
+		),
+		min_independent_sources INTEGER NOT NULL CHECK (
+			typeof(min_independent_sources) = 'integer' AND
+			min_independent_sources BETWEEN 1 AND 8
+		),
+		on_conflict TEXT NOT NULL CHECK (
+			typeof(on_conflict) = 'text' AND on_conflict = 'expose'
+		),
+		state TEXT NOT NULL DEFAULT 'pending' CHECK (
+			typeof(state) = 'text' AND
+			state IN ('pending', 'active', 'paused', 'deleted')
+		),
+		next_check_at TEXT CHECK (
+			next_check_at IS NULL OR (
+				typeof(next_check_at) = 'text' AND length(next_check_at) = 30 AND
+				substr(next_check_at, 5, 1) = '-' AND
+				substr(next_check_at, 8, 1) = '-' AND
+				substr(next_check_at, 11, 1) = 'T' AND
+				substr(next_check_at, 14, 1) = ':' AND
+				substr(next_check_at, 17, 1) = ':' AND
+				substr(next_check_at, 20, 1) = '.' AND
+				substr(next_check_at, 30, 1) = 'Z' AND
+				julianday(next_check_at) IS NOT NULL
+			)
+		),
+		ewma_interval_s REAL NOT NULL CHECK (
+			typeof(ewma_interval_s) = 'real' AND
+			ewma_interval_s BETWEEN 600.0 AND 604800.0
+		),
+		last_change_at TEXT CHECK (
+			last_change_at IS NULL OR (
+				typeof(last_change_at) = 'text' AND length(last_change_at) = 30 AND
+				substr(last_change_at, 5, 1) = '-' AND
+				substr(last_change_at, 8, 1) = '-' AND
+				substr(last_change_at, 11, 1) = 'T' AND
+				substr(last_change_at, 14, 1) = ':' AND
+				substr(last_change_at, 17, 1) = ':' AND
+				substr(last_change_at, 20, 1) = '.' AND
+				substr(last_change_at, 30, 1) = 'Z' AND
+				julianday(last_change_at) IS NOT NULL
+			)
+		),
+		last_checked_at TEXT CHECK (
+			last_checked_at IS NULL OR (
+				typeof(last_checked_at) = 'text' AND length(last_checked_at) = 30 AND
+				substr(last_checked_at, 5, 1) = '-' AND
+				substr(last_checked_at, 8, 1) = '-' AND
+				substr(last_checked_at, 11, 1) = 'T' AND
+				substr(last_checked_at, 14, 1) = ':' AND
+				substr(last_checked_at, 17, 1) = ':' AND
+				substr(last_checked_at, 20, 1) = '.' AND
+				substr(last_checked_at, 30, 1) = 'Z' AND
+				julianday(last_checked_at) IS NOT NULL
+			)
+		),
+		consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (
+			typeof(consecutive_failures) = 'integer' AND
+			consecutive_failures BETWEEN 0 AND 2147483647
+		),
+		last_error_code TEXT NOT NULL DEFAULT '' CHECK (
+			typeof(last_error_code) = 'text' AND
+			length(last_error_code) <= 64 AND
+			(last_error_code = '' OR (
+				last_error_code = trim(last_error_code) AND
+				last_error_code = upper(last_error_code) AND
+				last_error_code NOT GLOB '*[^A-Z0-9_]*' AND
+				substr(last_error_code, 1, 1) GLOB '[A-Z]'
+			))
+		),
+		last_verification_id TEXT CHECK (
+			last_verification_id IS NULL OR (
+				typeof(last_verification_id) = 'text' AND
+				length(CAST(last_verification_id AS BLOB)) BETWEEN 1 AND 512 AND
+				last_verification_id = trim(last_verification_id)
+			)
+		),
+		last_verification_claim_index INTEGER CHECK (
+			last_verification_claim_index IS NULL OR (
+				typeof(last_verification_claim_index) = 'integer' AND
+				last_verification_claim_index >= 0
+			)
+		),
+		lease_id TEXT CHECK (
+			lease_id IS NULL OR (
+				typeof(lease_id) = 'text' AND length(lease_id) = 36 AND
+				substr(lease_id, 9, 1) = '-' AND substr(lease_id, 14, 1) = '-' AND
+				substr(lease_id, 19, 1) = '-' AND substr(lease_id, 24, 1) = '-' AND
+				length(replace(lease_id, '-', '')) = 32 AND
+				lease_id NOT GLOB '*[^0-9a-f-]*'
+			)
+		),
+		lease_until TEXT CHECK (
+			lease_until IS NULL OR (
+				typeof(lease_until) = 'text' AND length(lease_until) = 30 AND
+				substr(lease_until, 5, 1) = '-' AND
+				substr(lease_until, 8, 1) = '-' AND
+				substr(lease_until, 11, 1) = 'T' AND
+				substr(lease_until, 14, 1) = ':' AND
+				substr(lease_until, 17, 1) = ':' AND
+				substr(lease_until, 20, 1) = '.' AND
+				substr(lease_until, 30, 1) = 'Z' AND
+				julianday(lease_until) IS NOT NULL
+			)
+		),
+		created_at TEXT NOT NULL CHECK (
+			typeof(created_at) = 'text' AND length(created_at) = 30 AND
+			substr(created_at, 5, 1) = '-' AND substr(created_at, 8, 1) = '-' AND
+			substr(created_at, 11, 1) = 'T' AND substr(created_at, 14, 1) = ':' AND
+			substr(created_at, 17, 1) = ':' AND substr(created_at, 20, 1) = '.' AND
+			substr(created_at, 30, 1) = 'Z' AND julianday(created_at) IS NOT NULL
+		),
+		updated_at TEXT NOT NULL CHECK (
+			typeof(updated_at) = 'text' AND length(updated_at) = 30 AND
+			substr(updated_at, 5, 1) = '-' AND substr(updated_at, 8, 1) = '-' AND
+			substr(updated_at, 11, 1) = 'T' AND substr(updated_at, 14, 1) = ':' AND
+			substr(updated_at, 17, 1) = ':' AND substr(updated_at, 20, 1) = '.' AND
+			substr(updated_at, 30, 1) = 'Z' AND julianday(updated_at) IS NOT NULL
+		),
+		paused_at TEXT CHECK (
+			paused_at IS NULL OR (
+				typeof(paused_at) = 'text' AND length(paused_at) = 30 AND
+				substr(paused_at, 5, 1) = '-' AND substr(paused_at, 8, 1) = '-' AND
+				substr(paused_at, 11, 1) = 'T' AND substr(paused_at, 14, 1) = ':' AND
+				substr(paused_at, 17, 1) = ':' AND substr(paused_at, 20, 1) = '.' AND
+				substr(paused_at, 30, 1) = 'Z' AND julianday(paused_at) IS NOT NULL
+			)
+		),
+		deleted_at TEXT CHECK (
+			deleted_at IS NULL OR (
+				typeof(deleted_at) = 'text' AND length(deleted_at) = 30 AND
+				substr(deleted_at, 5, 1) = '-' AND substr(deleted_at, 8, 1) = '-' AND
+				substr(deleted_at, 11, 1) = 'T' AND substr(deleted_at, 14, 1) = ':' AND
+				substr(deleted_at, 17, 1) = ':' AND substr(deleted_at, 20, 1) = '.' AND
+				substr(deleted_at, 30, 1) = 'Z' AND julianday(deleted_at) IS NOT NULL
+			)
+		),
+		CHECK (updated_at >= created_at),
+		CHECK (next_check_at IS NULL OR next_check_at >= created_at),
+		CHECK (last_checked_at IS NULL OR (
+			last_checked_at >= created_at AND last_checked_at <= updated_at
+		)),
+		CHECK (last_change_at IS NULL OR (
+			last_change_at >= created_at AND last_change_at <= updated_at AND
+			last_checked_at IS NOT NULL AND last_change_at <= last_checked_at
+		)),
+		CHECK (paused_at IS NULL OR (paused_at >= created_at AND paused_at <= updated_at)),
+		CHECK (deleted_at IS NULL OR (deleted_at >= created_at AND deleted_at <= updated_at)),
+		CHECK (
+			(consecutive_failures = 0 AND last_error_code = '') OR
+			(consecutive_failures > 0 AND last_error_code <> '')
+		),
+		CHECK (
+			(last_verification_id IS NULL AND last_verification_claim_index IS NULL) OR
+			(last_verification_id IS NOT NULL AND
+				last_verification_claim_index IS NOT NULL AND last_checked_at IS NOT NULL)
+		),
+		CHECK (
+			(lease_id IS NULL AND lease_until IS NULL) OR
+			(lease_id IS NOT NULL AND lease_until IS NOT NULL AND
+				lease_until > updated_at)
+		),
+		CHECK (
+			(state IN ('pending', 'active') AND next_check_at IS NOT NULL AND
+				paused_at IS NULL AND deleted_at IS NULL) OR
+			(state = 'paused' AND next_check_at IS NULL AND paused_at IS NOT NULL AND
+				deleted_at IS NULL AND lease_id IS NULL AND lease_until IS NULL) OR
+			(state = 'deleted' AND next_check_at IS NULL AND paused_at IS NULL AND
+				deleted_at IS NOT NULL AND lease_id IS NULL AND lease_until IS NULL)
+		),
+		FOREIGN KEY (last_verification_id, last_verification_claim_index)
+			REFERENCES verifications(verification_id, claim_index) ON DELETE RESTRICT
+	) STRICT;
+
+	CREATE UNIQUE INDEX idx_watches_live_spec
+		ON watches(spec_hash) WHERE state <> 'deleted';
+	CREATE INDEX idx_watches_live_created
+		ON watches(created_at, id) WHERE state <> 'deleted';
+	CREATE INDEX idx_watches_due
+		ON watches(next_check_at, lease_until, id, state)
+		WHERE state IN ('pending', 'active');
+
+	CREATE TRIGGER trg_watches_spec_immutable
+	BEFORE UPDATE ON watches
+	WHEN
+		OLD.id IS NOT NEW.id OR OLD.spec_hash IS NOT NEW.spec_hash OR
+		OLD.subject IS NOT NEW.subject OR OLD.predicate IS NOT NEW.predicate OR
+		OLD.freshness IS NOT NEW.freshness OR
+		OLD.min_independent_sources IS NOT NEW.min_independent_sources OR
+		OLD.on_conflict IS NOT NEW.on_conflict OR OLD.created_at IS NOT NEW.created_at
+	BEGIN
+		SELECT RAISE(ABORT, 'watch specification is immutable');
+	END;
+
+	CREATE TRIGGER trg_watches_state_transition
+	BEFORE UPDATE OF state ON watches
+	WHEN NOT (
+		OLD.state = NEW.state OR
+		(OLD.state = 'pending' AND NEW.state IN ('active', 'paused', 'deleted')) OR
+		(OLD.state = 'active' AND NEW.state IN ('paused', 'deleted')) OR
+		(OLD.state = 'paused' AND NEW.state IN ('active', 'deleted'))
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'invalid watch state transition');
+	END;
+
+	CREATE TRIGGER trg_watches_deleted_immutable
+	BEFORE UPDATE ON watches
+	WHEN OLD.state = 'deleted'
+	BEGIN
+		SELECT RAISE(ABORT, 'deleted watch is immutable');
+	END;
+
+	CREATE TRIGGER trg_watches_updated_monotonic
+	BEFORE UPDATE ON watches
+	WHEN NEW.updated_at <= OLD.updated_at
+	BEGIN
+		SELECT RAISE(ABORT, 'watch updated_at must advance');
+	END;
+
+	CREATE TRIGGER trg_watches_delete_guard
+	BEFORE DELETE ON watches
+	BEGIN
+		SELECT RAISE(ABORT, 'watch history cannot be deleted');
+	END;
+
+	CREATE TABLE facts (
+		id TEXT NOT NULL PRIMARY KEY CHECK (
+			typeof(id) = 'text' AND length(id) = 64 AND
+			id NOT GLOB '*[^0-9a-f]*'
+		),
+		watch_id TEXT NOT NULL CHECK (
+			typeof(watch_id) = 'text' AND length(watch_id) = 36 AND
+			substr(watch_id, 9, 1) = '-' AND substr(watch_id, 14, 1) = '-' AND
+			substr(watch_id, 19, 1) = '-' AND substr(watch_id, 24, 1) = '-' AND
+			length(replace(watch_id, '-', '')) = 32 AND
+			watch_id NOT GLOB '*[^0-9a-f-]*'
+		),
+		subject TEXT NOT NULL CHECK (
+			typeof(subject) = 'text' AND
+			length(CAST(subject AS BLOB)) BETWEEN 1 AND 1200 AND
+			subject = trim(subject) AND instr(subject, char(0)) = 0 AND
+			instr(subject, char(9)) = 0 AND instr(subject, char(10)) = 0 AND
+			instr(subject, char(11)) = 0 AND instr(subject, char(12)) = 0 AND
+			instr(subject, char(13)) = 0 AND instr(subject, '  ') = 0
+		),
+		predicate TEXT NOT NULL CHECK (
+			typeof(predicate) = 'text' AND
+			length(CAST(predicate AS BLOB)) BETWEEN 1 AND 512 AND
+			predicate = trim(predicate) AND instr(predicate, char(0)) = 0 AND
+			instr(predicate, ' ') = 0 AND instr(predicate, char(9)) = 0 AND
+			instr(predicate, char(10)) = 0 AND instr(predicate, char(11)) = 0 AND
+			instr(predicate, char(12)) = 0 AND instr(predicate, char(13)) = 0
+		),
+		path TEXT NOT NULL CHECK (
+			typeof(path) = 'text' AND
+			length(CAST(path AS BLOB)) BETWEEN 1 AND 4096 AND
+			path = trim(path) AND instr(path, char(0)) = 0 AND
+			instr(path, char(9)) = 0 AND instr(path, char(10)) = 0 AND
+			instr(path, char(11)) = 0 AND instr(path, char(12)) = 0 AND
+			instr(path, char(13)) = 0
+		),
+		value TEXT NOT NULL CHECK (
+			typeof(value) = 'text' AND
+			length(CAST(value AS BLOB)) BETWEEN 1 AND 65536 AND
+			json_valid(value) AND
+			json_type(value) IN ('text', 'integer', 'real', 'true', 'false')
+		),
+		root TEXT NOT NULL CHECK (
+			typeof(root) = 'text' AND
+			length(CAST(root AS BLOB)) BETWEEN 1 AND 253 AND
+			root = trim(root) AND root = lower(root) AND
+			instr(root, char(0)) = 0 AND instr(root, ' ') = 0 AND
+			instr(root, char(9)) = 0 AND instr(root, char(10)) = 0 AND
+			instr(root, char(11)) = 0 AND instr(root, char(12)) = 0 AND
+			instr(root, char(13)) = 0 AND
+			instr(root, '/') = 0 AND instr(root, '@') = 0 AND
+			instr(root, '?') = 0 AND instr(root, '#') = 0 AND
+			substr(root, 1, 1) <> '.' AND substr(root, -1, 1) <> '.' AND
+			instr(root, '..') = 0
+		),
+		source_url TEXT NOT NULL CHECK (
+			typeof(source_url) = 'text' AND
+			length(CAST(source_url AS BLOB)) BETWEEN 1 AND 16384 AND
+			source_url = trim(source_url) AND instr(source_url, char(0)) = 0 AND
+			instr(source_url, char(9)) = 0 AND instr(source_url, char(10)) = 0 AND
+			instr(source_url, char(11)) = 0 AND instr(source_url, char(12)) = 0 AND
+			instr(source_url, char(13)) = 0 AND instr(source_url, '#') = 0 AND
+			(substr(source_url, 1, 7) = 'http://' OR
+				substr(source_url, 1, 8) = 'https://')
+		),
+		receipt TEXT NOT NULL CHECK (
+			typeof(receipt) = 'text' AND
+			length(CAST(receipt AS BLOB)) BETWEEN 1 AND 2097152 AND
+			receipt = trim(receipt) AND instr(receipt, char(0)) = 0 AND
+			instr(receipt, char(9)) = 0 AND instr(receipt, char(10)) = 0 AND
+			instr(receipt, char(11)) = 0 AND instr(receipt, char(12)) = 0 AND
+			instr(receipt, char(13)) = 0
+		),
+		snapshot_id TEXT NOT NULL CHECK (
+			typeof(snapshot_id) = 'text' AND length(snapshot_id) = 71 AND
+			substr(snapshot_id, 1, 7) = 'sha256:' AND
+			substr(snapshot_id, 8) NOT GLOB '*[^0-9a-f]*'
+		),
+		created_verification_id TEXT NOT NULL CHECK (
+			typeof(created_verification_id) = 'text' AND
+			length(CAST(created_verification_id AS BLOB)) BETWEEN 1 AND 512 AND
+			created_verification_id = trim(created_verification_id)
+		),
+		created_claim_index INTEGER NOT NULL CHECK (
+			typeof(created_claim_index) = 'integer' AND created_claim_index >= 0
+		),
+		latest_verification_id TEXT NOT NULL CHECK (
+			typeof(latest_verification_id) = 'text' AND
+			length(CAST(latest_verification_id AS BLOB)) BETWEEN 1 AND 512 AND
+			latest_verification_id = trim(latest_verification_id)
+		),
+		latest_claim_index INTEGER NOT NULL CHECK (
+			typeof(latest_claim_index) = 'integer' AND latest_claim_index >= 0
+		),
+		closed_verification_id TEXT CHECK (
+			closed_verification_id IS NULL OR (
+				typeof(closed_verification_id) = 'text' AND
+				length(CAST(closed_verification_id AS BLOB)) BETWEEN 1 AND 512 AND
+				closed_verification_id = trim(closed_verification_id)
+			)
+		),
+		closed_claim_index INTEGER CHECK (
+			closed_claim_index IS NULL OR (
+				typeof(closed_claim_index) = 'integer' AND closed_claim_index >= 0
+			)
+		),
+		observed_at TEXT NOT NULL CHECK (
+			typeof(observed_at) = 'text' AND length(observed_at) = 30 AND
+			substr(observed_at, 5, 1) = '-' AND substr(observed_at, 8, 1) = '-' AND
+			substr(observed_at, 11, 1) = 'T' AND substr(observed_at, 14, 1) = ':' AND
+			substr(observed_at, 17, 1) = ':' AND substr(observed_at, 20, 1) = '.' AND
+			substr(observed_at, 30, 1) = 'Z' AND julianday(observed_at) IS NOT NULL
+		),
+		valid_from TEXT NOT NULL CHECK (
+			typeof(valid_from) = 'text' AND length(valid_from) = 30 AND
+			substr(valid_from, 5, 1) = '-' AND substr(valid_from, 8, 1) = '-' AND
+			substr(valid_from, 11, 1) = 'T' AND substr(valid_from, 14, 1) = ':' AND
+			substr(valid_from, 17, 1) = ':' AND substr(valid_from, 20, 1) = '.' AND
+			substr(valid_from, 30, 1) = 'Z' AND julianday(valid_from) IS NOT NULL
+		),
+		valid_to TEXT CHECK (
+			valid_to IS NULL OR (
+				typeof(valid_to) = 'text' AND length(valid_to) = 30 AND
+				substr(valid_to, 5, 1) = '-' AND substr(valid_to, 8, 1) = '-' AND
+				substr(valid_to, 11, 1) = 'T' AND substr(valid_to, 14, 1) = ':' AND
+				substr(valid_to, 17, 1) = ':' AND substr(valid_to, 20, 1) = '.' AND
+				substr(valid_to, 30, 1) = 'Z' AND julianday(valid_to) IS NOT NULL
+			)
+		),
+		last_verified_at TEXT NOT NULL CHECK (
+			typeof(last_verified_at) = 'text' AND length(last_verified_at) = 30 AND
+			substr(last_verified_at, 5, 1) = '-' AND
+			substr(last_verified_at, 8, 1) = '-' AND
+			substr(last_verified_at, 11, 1) = 'T' AND
+			substr(last_verified_at, 14, 1) = ':' AND
+			substr(last_verified_at, 17, 1) = ':' AND
+			substr(last_verified_at, 20, 1) = '.' AND
+			substr(last_verified_at, 30, 1) = 'Z' AND
+			julianday(last_verified_at) IS NOT NULL
+		),
+		superseded_by TEXT CHECK (
+			superseded_by IS NULL OR (
+				typeof(superseded_by) = 'text' AND length(superseded_by) = 64 AND
+				superseded_by NOT GLOB '*[^0-9a-f]*'
+			)
+		),
+		closed_outcome TEXT NOT NULL DEFAULT '' CHECK (
+			typeof(closed_outcome) = 'text' AND
+			closed_outcome IN ('', 'changed', 'gone')
+		),
+		gone_scope TEXT NOT NULL DEFAULT '' CHECK (
+			typeof(gone_scope) = 'text' AND gone_scope IN ('', 'field', 'page')
+		),
+		CHECK (observed_at = valid_from),
+		CHECK (last_verified_at >= observed_at),
+		CHECK (valid_to IS NULL OR (
+			valid_to > valid_from AND valid_to >= last_verified_at
+		)),
+		CHECK (
+			(valid_to IS NULL AND closed_verification_id IS NULL AND
+				closed_claim_index IS NULL AND superseded_by IS NULL AND
+				closed_outcome = '' AND gone_scope = '') OR
+			(valid_to IS NOT NULL AND closed_verification_id IS NOT NULL AND
+				closed_claim_index IS NOT NULL AND closed_outcome = 'changed' AND
+				gone_scope = '' AND superseded_by IS NOT NULL AND superseded_by <> id) OR
+			(valid_to IS NOT NULL AND closed_verification_id IS NOT NULL AND
+				closed_claim_index IS NOT NULL AND closed_outcome = 'gone' AND
+				gone_scope IN ('field', 'page') AND superseded_by IS NULL)
+		),
+		FOREIGN KEY (watch_id) REFERENCES watches(id) ON DELETE RESTRICT,
+		FOREIGN KEY (created_verification_id, created_claim_index)
+			REFERENCES verifications(verification_id, claim_index) ON DELETE RESTRICT,
+		FOREIGN KEY (latest_verification_id, latest_claim_index)
+			REFERENCES verifications(verification_id, claim_index) ON DELETE RESTRICT,
+		FOREIGN KEY (closed_verification_id, closed_claim_index)
+			REFERENCES verifications(verification_id, claim_index) ON DELETE RESTRICT,
+		FOREIGN KEY (superseded_by) REFERENCES facts(id) ON DELETE RESTRICT
+			DEFERRABLE INITIALLY DEFERRED
+	) STRICT;
+
+	CREATE UNIQUE INDEX idx_facts_open_watch
+		ON facts(watch_id) WHERE valid_to IS NULL;
+	CREATE INDEX idx_facts_watch_history
+		ON facts(watch_id, valid_from DESC, id);
+	CREATE INDEX idx_facts_subject_predicate_valid
+		ON facts(subject, predicate, valid_from DESC, id);
+
+	CREATE TRIGGER trg_facts_watch_spec_insert
+	BEFORE INSERT ON facts
+	WHEN NOT EXISTS (
+		SELECT 1 FROM watches watch
+		WHERE watch.id = NEW.watch_id AND watch.subject = NEW.subject AND
+			watch.predicate = NEW.predicate AND watch.state IN ('pending', 'active')
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'fact does not match an actionable watch');
+	END;
+
+	CREATE TRIGGER trg_facts_insert_open
+	BEFORE INSERT ON facts
+	WHEN
+		NEW.valid_to IS NOT NULL OR NEW.closed_verification_id IS NOT NULL OR
+		NEW.closed_claim_index IS NOT NULL OR NEW.superseded_by IS NOT NULL OR
+		NEW.closed_outcome <> '' OR NEW.gone_scope <> ''
+	BEGIN
+		SELECT RAISE(ABORT, 'new fact must be open');
+	END;
+
+	CREATE TRIGGER trg_facts_created_provenance
+	BEFORE INSERT ON facts
+	WHEN NOT EXISTS (
+		SELECT 1 FROM verifications verification
+		WHERE verification.verification_id = NEW.created_verification_id AND
+			verification.claim_index = NEW.created_claim_index AND
+			verification.path = NEW.path AND
+			verification.outcome IN ('confirmed', 'changed') AND
+			((verification.outcome = 'confirmed' AND
+				verification.old_value = NEW.value) OR
+			 (verification.outcome = 'changed' AND
+				verification.new_value = NEW.value)) AND
+			verification.new_snapshot_id = NEW.snapshot_id AND
+			verification.receipt = NEW.receipt AND
+			COALESCE(verification.final_url, verification.url) = NEW.source_url AND
+			verification.verified_at IN (
+				NEW.observed_at,
+				substr(NEW.observed_at, 1, 19) ||
+					CASE
+						WHEN substr(NEW.observed_at, 21, 9) = '000000000' THEN ''
+						ELSE '.' || rtrim(substr(NEW.observed_at, 21, 9), '0')
+					END || 'Z'
+			)
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'fact creation provenance does not match');
+	END;
+
+	CREATE TRIGGER trg_facts_latest_provenance_insert
+	BEFORE INSERT ON facts
+	WHEN
+		NEW.latest_verification_id <> NEW.created_verification_id OR
+		NEW.latest_claim_index <> NEW.created_claim_index OR
+		NEW.last_verified_at IS NOT NEW.observed_at
+	BEGIN
+		SELECT RAISE(ABORT, 'new fact latest provenance must equal creation provenance');
+	END;
+
+	CREATE TRIGGER trg_facts_changed_successor_insert
+	BEFORE INSERT ON facts
+	WHEN (
+		EXISTS (
+			SELECT 1 FROM verifications verification
+			WHERE verification.verification_id = NEW.created_verification_id AND
+				verification.claim_index = NEW.created_claim_index AND
+				verification.outcome = 'changed'
+		) OR EXISTS (
+			SELECT 1 FROM facts predecessor WHERE predecessor.superseded_by = NEW.id
+		)
+	) AND NOT EXISTS (
+		SELECT 1 FROM facts predecessor
+		JOIN verifications verification ON
+			verification.verification_id = NEW.created_verification_id AND
+			verification.claim_index = NEW.created_claim_index
+		WHERE predecessor.superseded_by = NEW.id AND
+			predecessor.watch_id = NEW.watch_id AND
+			predecessor.subject = NEW.subject AND predecessor.predicate = NEW.predicate AND
+			predecessor.path = NEW.path AND predecessor.valid_to = NEW.valid_from AND
+			predecessor.closed_verification_id = NEW.created_verification_id AND
+			predecessor.closed_claim_index = NEW.created_claim_index AND
+			predecessor.closed_outcome = 'changed' AND predecessor.gone_scope = '' AND
+			verification.outcome = 'changed' AND verification.path = NEW.path AND
+			verification.old_value = predecessor.value AND
+			verification.old_snapshot_id = predecessor.snapshot_id AND
+			verification.old_receipt = predecessor.receipt AND
+			verification.url = predecessor.source_url AND
+			verification.new_value = NEW.value AND
+			verification.new_snapshot_id = NEW.snapshot_id AND
+			verification.receipt = NEW.receipt AND
+			COALESCE(verification.final_url, verification.url) = NEW.source_url AND
+			verification.verified_at IN (
+				NEW.valid_from,
+				substr(NEW.valid_from, 1, 19) ||
+					CASE
+						WHEN substr(NEW.valid_from, 21, 9) = '000000000' THEN ''
+						ELSE '.' || rtrim(substr(NEW.valid_from, 21, 9), '0')
+					END || 'Z'
+			)
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'changed fact successor has no matching predecessor');
+	END;
+
+	CREATE TRIGGER trg_facts_identity_immutable
+	BEFORE UPDATE ON facts
+	WHEN
+		OLD.id IS NOT NEW.id OR OLD.watch_id IS NOT NEW.watch_id OR
+		OLD.subject IS NOT NEW.subject OR OLD.predicate IS NOT NEW.predicate OR
+		OLD.path IS NOT NEW.path OR OLD.value IS NOT NEW.value OR
+		OLD.created_verification_id IS NOT NEW.created_verification_id OR
+		OLD.created_claim_index IS NOT NEW.created_claim_index OR
+		OLD.observed_at IS NOT NEW.observed_at OR OLD.valid_from IS NOT NEW.valid_from
+	BEGIN
+		SELECT RAISE(ABORT, 'fact identity is immutable');
+	END;
+
+	CREATE TRIGGER trg_facts_closed_immutable
+	BEFORE UPDATE ON facts
+	WHEN OLD.valid_to IS NOT NULL
+	BEGIN
+		SELECT RAISE(ABORT, 'closed fact is immutable');
+	END;
+
+	CREATE TRIGGER trg_facts_open_transition
+	BEFORE UPDATE ON facts
+	WHEN NOT (
+		(
+			NEW.valid_to IS NULL AND NEW.closed_verification_id IS NULL AND
+			NEW.closed_claim_index IS NULL AND NEW.closed_outcome = '' AND
+			NEW.gone_scope = '' AND NEW.superseded_by IS NULL AND
+			EXISTS (
+				SELECT 1 FROM verifications verification
+				WHERE verification.verification_id = NEW.latest_verification_id AND
+					verification.claim_index = NEW.latest_claim_index AND
+					verification.outcome = 'confirmed' AND
+					verification.path = NEW.path AND
+					verification.old_value = NEW.value AND
+					verification.old_snapshot_id = OLD.snapshot_id AND
+					verification.old_receipt = OLD.receipt AND
+					verification.url = OLD.source_url AND
+					verification.new_snapshot_id = NEW.snapshot_id AND
+					verification.receipt = NEW.receipt AND
+					COALESCE(verification.final_url, verification.url) = NEW.source_url AND
+					verification.verified_at IN (
+						NEW.last_verified_at,
+						substr(NEW.last_verified_at, 1, 19) ||
+							CASE
+								WHEN substr(NEW.last_verified_at, 21, 9) = '000000000' THEN ''
+								ELSE '.' || rtrim(substr(NEW.last_verified_at, 21, 9), '0')
+							END || 'Z'
+					) AND
+					NEW.last_verified_at >= OLD.last_verified_at
+			)
+		) OR (
+			NEW.valid_to IS NOT NULL AND
+			NEW.latest_verification_id IS OLD.latest_verification_id AND
+			NEW.latest_claim_index IS OLD.latest_claim_index AND
+			NEW.last_verified_at IS OLD.last_verified_at AND
+			NEW.root IS OLD.root AND NEW.source_url IS OLD.source_url AND
+			NEW.receipt IS OLD.receipt AND NEW.snapshot_id IS OLD.snapshot_id AND
+			NOT EXISTS (
+				SELECT 1 FROM facts lineage
+				WHERE lineage.id = NEW.superseded_by OR
+					lineage.superseded_by = NEW.superseded_by
+			) AND
+			EXISTS (
+				SELECT 1 FROM verifications verification
+				WHERE verification.verification_id = NEW.closed_verification_id AND
+					verification.claim_index = NEW.closed_claim_index AND
+					verification.path = NEW.path AND
+					verification.old_value = NEW.value AND
+					verification.old_snapshot_id = OLD.snapshot_id AND
+					verification.old_receipt = OLD.receipt AND
+					verification.url = OLD.source_url AND
+					verification.outcome = NEW.closed_outcome AND
+					COALESCE(verification.gone_scope, '') = NEW.gone_scope AND
+					verification.verified_at IN (
+						NEW.valid_to,
+						substr(NEW.valid_to, 1, 19) ||
+							CASE
+								WHEN substr(NEW.valid_to, 21, 9) = '000000000' THEN ''
+								ELSE '.' || rtrim(substr(NEW.valid_to, 21, 9), '0')
+							END || 'Z'
+					)
+			)
+		)
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'invalid open fact transition');
+	END;
+
+	CREATE TRIGGER trg_facts_delete_guard
+	BEFORE DELETE ON facts
+	BEGIN
+		SELECT RAISE(ABORT, 'fact history cannot be deleted');
+	END;`,
 }
