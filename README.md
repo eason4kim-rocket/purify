@@ -125,7 +125,7 @@ Purify includes a built-in MCP server with **6 tools**:
 | `batch_scrape` | Scrape multiple URLs in parallel |
 | `crawl_site` | Recursively crawl a website (BFS) |
 | `map_site` | Discover all URLs on a site |
-| `extract_data` | Extract structured data with LLM (BYOK) |
+| `extract_data` | Extract structured data with compiled, auto-fallback, or BYOK LLM execution |
 
 ### Setup
 
@@ -283,10 +283,18 @@ Discover all URLs on a site without scraping content.
 
 ### POST /api/v1/extract
 
-Structured data extraction using your own LLM key (BYOK). Purify validates the
-result against JSON Schema and makes at most one repair attempt. Set
-`evidence` to attach the immutable page snapshot and a source anchor for every
-JSON leaf value.
+Scrape once, then extract structured data with a deterministic compiled
+extractor, a caller-funded LLM, or the default compiled-first `auto` chain.
+Purify validates every result against JSON Schema; the LLM path makes at most
+one repair attempt. Set `evidence` to attach the immutable page snapshot and a
+source anchor for every JSON leaf value.
+
+| `engine` | `llm_api_key` | Behavior |
+|---|---|---|
+| `auto` (default) | omitted | Compiled-only. A miss or incompatible request returns HTTP 409; Purify never borrows the managed compiler credential. |
+| `auto` | supplied | Try compiled first, then reuse the same fresh fetch for BYOK LLM fallback on an unavailable or failed compiled attempt. Cancellation and timeout do not fall back. |
+| `compiled` | not needed (unused) | Deterministic-only, with zero LLM calls. A miss or incompatibility returns HTTP 409. |
+| `llm` | required | Direct BYOK LLM extraction, strict validation, and at most one repair. |
 
 ```bash
 curl -X POST https://purify.verifly.pro/api/v1/extract \
@@ -294,14 +302,15 @@ curl -X POST https://purify.verifly.pro/api/v1/extract \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://example.com/product",
+    "engine": "llm",
     "schema": {
       "type": "object",
       "properties": {
         "name": {"type": "string"},
         "price": {"type": "number"},
-        "features": {"type": "array", "items": {"type": "string"}}
+        "available": {"type": "boolean"}
       },
-      "required": ["name", "price"],
+      "required": ["name", "price", "available"],
       "additionalProperties": false
     },
     "llm_api_key": "your-openai-key",
@@ -311,6 +320,49 @@ curl -X POST https://purify.verifly.pro/api/v1/extract \
 
 Legacy shorthand schemas such as `{"name":"string","price":"number"}`
 remain accepted and are normalized to JSON Schema server-side.
+
+Compiled execution is deliberately narrower than LLM extraction. It accepts
+the default extraction profile only: no `css_selector`, `output_format` is
+`markdown`, and `extract_mode` is `readability`. After normalization, the
+schema must be a non-empty top-level object of flat scalar fields (`string`,
+`number`/`integer`, `boolean`, or `string` with `date-time` format; one nullable
+scalar is allowed). Nested objects, arrays, composition, and references can
+still use `engine: "llm"` or `auto` with a key.
+
+A compiled success includes public revision metadata and omits `llm_usage`:
+
+```json
+{
+  "success": true,
+  "data": {
+    "name": "Pro Plan",
+    "price": 29.99,
+    "available": true
+  },
+  "extractor": {
+    "id": "123e4567-e89b-12d3-a456-426614174000",
+    "version": 2,
+    "compiled_at": "2026-08-09T08:00:00Z",
+    "validation": 1,
+    "mode": "compiled"
+  },
+  "metadata": {
+    "title": "Plans",
+    "source_url": "https://example.com/product"
+  },
+  "tokens": {
+    "original_estimate": 1000,
+    "cleaned_estimate": 250,
+    "savings_percent": 75
+  },
+  "timing": {
+    "total_ms": 620,
+    "navigation_ms": 600,
+    "cleaning_ms": 19,
+    "extraction_ms": 1
+  }
+}
+```
 
 An evidence response adds fields without changing the existing response:
 
@@ -364,6 +416,106 @@ schema, the endpoint returns the best data with `partial: true` and a
 requires `PURIFY_SNAPSHOT_ENABLED=true`; otherwise the endpoint returns
 `EVIDENCE_UNAVAILABLE`.
 
+Compiled evidence receipts authenticate the immutable extractor revision as
+`<lowercase UUID>@<positive version>`. `/verify` replays that exact revision;
+an unsigned explicit claim whose anchor method is `compiled` is rejected.
+Only attempts that actually execute affect page bindings or `last_used_at`:
+success calls `Touch`, while a missing required field calls `RecordEmpty`; both
+write the binding and usage time. `not_executed`, optional-empty, and
+schema-incompatible attempts are zero-write and do not count as drift.
+
+#### Extract request and provider boundaries
+
+The HTTP handler accepts exactly one JSON object, rejects unknown fields and
+trailing JSON, and caps the body at 1 MiB. The raw and normalized schema are
+each capped at 512 KiB; URL, LLM credential, and LLM base URL are capped at
+16 KiB, and the model name at 256 bytes. These checks run before a page fetch
+or provider request. A compiled miss or incompatible profile/schema returns
+`EXTRACTOR_UNAVAILABLE` (HTTP 409); corrupt registry or IR state fails closed
+as `INTERNAL_ERROR` rather than silently returning unvalidated data.
+
+Both request-scoped and managed LLM transports use the same public-only
+network policy: every DNS answer is checked and pinned at dial time, mixed or
+private/reserved answers are rejected, environment proxies are ignored,
+redirects are not followed with credentials or prompt bodies, and TLS uses a
+minimum of 1.2. The complete provider response envelope is capped at 32 MiB.
+Managed truth values and deterministic IR output are each capped at 4 MiB.
+Compiled schema validation uses a success-only LRU bounded to 128 entries and
+8 MiB (512 KiB per schema). Its in-flight coordination map is capped at 128;
+overflow compiles bypass the cache, while failed schemas and caller-owned
+buffers are not retained.
+
+#### Managed compiler
+
+The compiled registry is opened and wired into extraction whenever the service
+starts, and into `/verify` whenever snapshot-backed verification is available,
+independent of background synthesis. Automatic synthesis is an explicit,
+default-off data-egress feature:
+
+```bash
+PURIFY_COMPILER_ENABLED=true
+PURIFY_COMPILER_API_KEY=your-process-owned-provider-key
+PURIFY_COMPILER_MODEL=gpt-4o-mini
+PURIFY_COMPILER_BASE_URL=https://api.openai.com/v1
+```
+
+Enabling it also requires snapshot storage. The process credential is used
+only to synthesize truth for the background compiler; it never fills in a
+missing request `llm_api_key`, and caller BYOK credentials never enter the
+catalog or coordinator.
+
+Migration 003 stores immutable extractor revisions and page bindings.
+Migration 004 stores only bounded snapshot references (page/snapshot hashes,
+template fingerprints, and timestamps), not page bytes, credentials, or
+provider output. A fixed template cluster becomes ready only after at least
+three distinct page hashes and three distinct snapshot IDs. References expire
+after 30 days and are bounded to 20 per cluster, 256 clusters per host/schema,
+and 10,000 rows globally. Migration 005 stores bounded attempt/lease state.
+The coordinator has one worker and a 32-item public queue, a 2-minute task
+deadline, a 3-minute lease, 15-minute transient cooldown, 24-hour weak or
+no-candidate cooldown, and 30-day/10,000-row attempt retention. Persistent
+leases and revision watermarks provide bounded at-least-once retry behavior
+across crashes; they do not claim exactly-once compilation.
+
+The compiled hot-path benchmark runs the full `ExtractArtifact` dispatch over
+a real temporary SQLite registry (including lookup, execution, schema
+validation, and health touch, but excluding page fetch):
+
+```bash
+go run ./scripts/benchmark/main.go compiled -runs 1000 -warmup 100
+```
+
+One local run on 2026-08-09 measured P95 `0.755709 ms` with zero LLM calls and
+passed the command's strict `<50 ms` gate. This is a reproducible development
+observation, not a production SLA or a cross-machine latency guarantee.
+
+#### MCP `extract_data`
+
+The MCP tool exposes the same `auto`, `compiled`, and `llm` matrix. `url` and
+`schema` are required strings; `schema` contains exactly one JSON value.
+`engine` defaults to `auto`, while `llm_api_key`, `llm_model`, and
+`llm_base_url` are optional. Unknown arguments, malformed/trailing schema JSON,
+and over-limit values are rejected before HTTP. When `engine` is `compiled`,
+the MCP adapter physically omits all provider fields from the request body.
+
+```json
+{
+  "name": "extract_data",
+  "arguments": {
+    "url": "https://example.com/product",
+    "schema": "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"price\":{\"type\":\"number\"}},\"required\":[\"name\",\"price\"],\"additionalProperties\":false}",
+    "engine": "auto"
+  }
+}
+```
+
+`PURIFY_API_KEY` authenticates the MCP-to-Purify request through `X-API-Key`;
+it is unrelated to the optional provider `llm_api_key` inside the extract
+payload. Successful API responses are decoded against the strict
+`ExtractResponse` contract and returned as MCP structured content with pretty
+JSON text fallback. Non-2xx structured API errors retain their stable code,
+and the adapter redacts either credential from errors.
+
 ### POST /api/v1/verify
 
 Revisit a source page and re-verify facts against their original, immutable
@@ -382,9 +534,14 @@ or boolean, with an evidence anchor copied from an earlier evidence-enabled
 extraction.
 All claims in one request must reference the same old snapshot. Explicit mode
 accepts at most 100 unique claim paths and 512 KiB of aggregate path, value,
-quote, and selector data. Anchors must use `exact`, `normalized`, `fuzzy`, or
-`compiled`; `unlocated` evidence cannot be re-verified. Receipt tokens are
-limited to 2 MiB.
+quote, and selector data. Explicit anchors must use `exact`, `normalized`, or
+`fuzzy`; `compiled` and `unlocated` evidence cannot be submitted directly.
+Receipt tokens are limited to 2 MiB.
+
+Direct claims may use `exact`, `normalized`, or `fuzzy` anchors. They cannot
+assert `compiled` provenance because no signed extractor revision accompanies
+that form; compiled replay is available only through a signed receipt carrying
+the immutable `<UUID>@<version>` identity.
 
 Claims mode:
 
@@ -670,12 +827,17 @@ All configuration via environment variables:
 | `PURIFY_DATA_DIR` | `./data` | Durable snapshots, signing key, SQLite verification ledger, and webhook outbox |
 | `PURIFY_SNAPSHOT_ENABLED` | `true` | Persist content-addressed HTML snapshots |
 | `PURIFY_SIGNING_KEY` | generated | Optional 32-byte Ed25519 seed encoded as hex |
+| `PURIFY_COMPILER_ENABLED` | `false` | Enable process-owned background synthesis; compiled execution remains available when false |
+| `PURIFY_COMPILER_API_KEY` | — | Process-owned provider key used only by the managed compiler |
+| `PURIFY_COMPILER_MODEL` | `gpt-4o-mini` | Managed compiler truth-extraction model |
+| `PURIFY_COMPILER_BASE_URL` | `https://api.openai.com/v1` | Managed compiler OpenAI-compatible base URL |
 
 ## Self-hosting
 
 Purify is a single Go binary. No Docker, Redis, or external database is
 required. The data directory stores compressed snapshots, the stable
-receipt-signing identity, the verification ledger, and pending webhook outbox
+receipt-signing identity, the verification ledger, compiled extractor
+revisions, bounded compiler sample/attempt state, and pending webhook outbox
 events; persist it across restarts.
 
 ```bash

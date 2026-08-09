@@ -82,7 +82,7 @@ POST /api/v1/map
 | araddon/dateparse（间接依赖） | go.mod | 日期 transform |
 | mcp-go v0.44 HTTP 代理型 MCP（`mcp.NewTool` 注册模式） | `cmd/purify-mcp/` | verify_fact / search_web 新工具 |
 | webhook 投递 | `webhook/` | fact.changed / extractor.promoted 事件 |
-| BYOK LLM 客户端（OpenAI 兼容） | `llm/openai.go` | 编译期真值提取 |
+| OpenAI 兼容 LLM 客户端 + 公网限定 transport | `llm/` | 请求级 BYOK 提取；由独立 process credential adapter 供编译期真值提取 |
 
 ### 1.3 短板（Phase 0 逐一补掉）
 
@@ -147,7 +147,10 @@ scrape ─▶ snapshot.Put(raw HTML) ─▶ clean ─▶ extract ──compiled�
 | `PURIFY_DATA_DIR` | `./data` | CAS + SQLite 根目录 | P0 |
 | `PURIFY_SNAPSHOT_ENABLED` | `true` | 快照开关 | P0 |
 | `PURIFY_SIGNING_KEY` | 空（自动生成） | Ed25519 seed hex | P0 |
-| `PURIFY_COMPILER_ENABLED` | `true` | 编译引擎开关 | P2 |
+| `PURIFY_COMPILER_ENABLED` | `false` | 仅开启 process-owned 后台合成；不关闭 compiled 执行/verify revision resolver | P2 |
+| `PURIFY_COMPILER_API_KEY` | 空 | 后台合成专用 provider credential，不作为请求 BYOK fallback | P2 |
+| `PURIFY_COMPILER_MODEL` | `gpt-4o-mini` | 后台真值提取模型 | P2 |
+| `PURIFY_COMPILER_BASE_URL` | `https://api.openai.com/v1` | 后台真值提取 OpenAI-compatible base URL | P2 |
 | `PURIFY_SEARCH_BRAVE_KEY` | 空 | 首个 search provider | P4 |
 | `PURIFY_WATCH_ENABLED` | `false` | watch 调度器 | P6 |
 
@@ -464,8 +467,8 @@ docs(scrape): verify endpoint guide
 
 **目标一句话**：LLM 合成一次、确定性执行 N 次；与 Firecrawl deterministicJson 同路，但**透明**——版本、验证分、漂移全部亮牌。热路径纯 Go，毫秒级，边际成本≈0。
 
-> **实况对齐 · 2026-08-09（HEAD `f5a32ba`）** —— 本节已按磁盘实况回写。图例：✅ 已提交 · 🚧 进行中（未提交 WIP）· ⬜ 未开始 · ⟳ 与早期规划不同（以实际接口/DDL 为准）。
-> 进度：P2-1 ✅　P2-2 ✅　P2-3 ✅　P2-4 ⬜；auto/compiled 接线与 compiled extraction 文档待补。
+> **实况对齐 · 2026-08-09（Phase 2 收口 HEAD `81ce10c`）** —— 本节已按提交与磁盘实况回写。图例：✅ 已提交 · 🚧 进行中（未提交 WIP）· ⬜ 未开始 · ⟳ 与早期规划不同（以实际接口/DDL 为准）。
+> 进度：P2-1 ✅　P2-2 ✅　P2-3 ✅　P2-4 ✅；REST、managed synthesis、benchmark、安全边界与 MCP 文档均已对齐。
 
 ### 任务卡 P2-1 · IR 定义与确定性执行
 
@@ -537,7 +540,7 @@ type ValidationReport struct { // 可随提取器一同公示
 
 ### 任务卡 P2-3 · 提取器仓库：缓存键、模板簇、漂移信号
 
-**交付什么** ⟳：实况拆两层——(a) **持久层**落在 `ledger/`：`migrations.go` 的 **migration 003**（建 `extractors` + `extractor_page_bindings`）与 `transactions.go` 的窄事务原语 `View`/`Update`；(b) 提取器 **repository**（`BuildPageKey / TemplateMedoid / Lookup / Save / Get / Touch / RecordEmpty / Retire`），建在 `ledger.Store` 之上。样本目录与 `MaybeCompile` coordinator 依赖 managed compiler credential，归 P2-4。
+**交付什么** ⟳：实况拆两层——(a) **持久层**落在 `ledger/`：`migrations.go` 的 **migration 003**（建 `extractors` + `extractor_page_bindings`）与 `transactions.go` 的窄事务原语 `View`/`Update`；(b) 提取器 **repository**（`BuildPageKey / TemplateMedoid / Lookup / Save / Get / Touch / RecordEmpty / Retire`），建在 `ledger.Store` 之上。credential-free 的样本目录与 `Coordinator.Observe`/后台 synthesis 归 P2-4；生产环境仅在显式启用 managed compiler 后实例化这条合成链。
 
 **状态**：✅ 持久层已提交 `fd1de32 feat(ledger): add extractor registry foundation`；repository 已提交 `f5a32ba feat(compiler): persist template-clustered extractors`。全仓测试、ledger/compiler race、vet 与两路独立 P0/P1 审查均通过。
 
@@ -547,7 +550,7 @@ type ValidationReport struct { // 可随提取器一同公示
 - [x] state 仅允许 `active→stale/retired`、`stale→retired`；版本化字段不可原地覆写，且只有 retired 行可物理删除
 - [x] 漂移双信号触发 state=stale：已绑定页模板距离 > 6；required 近 20 次空值率 > 30%（6/20 保持 active，7/20 stale）
 
-**migration 003 结构摘要**（完整实况与全部约束/触发器以 `ledger/migrations.go` 为准）：
+**migration 003 简化结构示意（非逐字 DDL）**：为便于阅读省略了部分类型/长度/时间格式检查与 trigger body；完整实况和全部约束只以 `ledger/migrations.go` 为准。
 
 ```sql
 CREATE TABLE extractors (
@@ -605,31 +608,75 @@ func (s *Store) View(ctx context.Context, view func(ReadTx) error) error     // 
 func (s *Store) Update(ctx context.Context, update func(WriteTx) error) error // 序列化单写 + 原子提交
 ```
 
-模板匹配：当前页 `FingerprintDOM` 与库内固定 canonical representative 取最近且距离 ≤ 6；generic miss 不降级任何簇，只有已有页绑定且事务内重查仍无其他 active 命中时才标记 `template_drift`。`Lookup` 只读选器，实际执行后由 `Touch/RecordEmpty` 原子绑定并更新健康窗口；`not_executed` 严格零写。新版本晋级在同一 `Update` 内先 demote 旧 active、再插新 active 并重绑同簇页面；清理 retired 行前必须先解绑。
+模板匹配：当前页 `FingerprintDOM` 与库内固定 canonical representative 取最近且距离 ≤ 6；generic miss 不降级任何簇，只有已有页绑定且事务内重查仍无其他 active 命中时才标记 `template_drift`。`Lookup` 的常规命中/未绑定 miss 是只读，但 **bound-drift** 分支会升级到 `Update`，事务内重读 binding 与全部 active 后才 CAS 标 stale。实际执行后由 `Touch/RecordEmpty` 原子绑定并更新健康窗口；`not_executed` 严格零写。**硬不变量 1**：部分唯一索引要求新版本晋级必须在同一 `ledger.Update` 内先 demote 旧 active、再 insert 新 active 并重绑同簇页面。**硬不变量 2**：`extractor_page_bindings.extractor_id ... ON DELETE RESTRICT`，所以 retired extractor 的 GC/物理删除必须先解绑。
 
 ### 任务卡 P2-4 · extract 接线：auto 引擎与降级链
 
 **完成什么**：`engine: "auto"|"compiled"|"llm"`（默认 auto）；compiled 优先、llm 兜底、编译异步进行；响应亮牌 extractor 元数据。
 
-**状态**：⬜ 未开始——`api/handler/extract.go` 现无任何 `engine` / compiled 接线（grep 零命中）；`engine:"llm"` 即当前唯一路径。
+**状态**：✅ 已收口。核心 dispatch `8ebad26`、样本目录 `a11080a`、schema cache `71772f7`、provider 响应边界 `2df46a7`、真实热路径 benchmark `9462c19`、生产接线 `88c3471`、managed coordinator `eb742b2`、MCP `b0497a4` 与 REST/provider 安全边界 `81ce10c` 均已提交。
 
 **验收标准**：
-- [ ] compiled 命中路径 P95 < 50ms、**零 LLM 调用**（日志佐证）
-- [ ] 响应含 `"extractor":{"id","version","compiled_at","validation","mode"}`
-- [ ] 现有 extract 全部测试不回归；`engine:"llm"` 行为与今天完全一致
+- [x] compiled 命中 benchmark P95 < 50ms、**零 LLM 调用**；口径与本机观测见下
+- [x] compiled 响应含 `"extractor":{"id","version","compiled_at","validation","mode"}` 且不含 `llm_usage`
+- [x] 所有合法的既有 `engine:"llm"` 请求保留 BYOK + strict schema + 单次 repair 语义；全仓/race/vet/build gates 通过
 
-**实现参考**（接线伪码）：
+**真实 dispatch 契约**：
+
+| engine | request `llm_api_key` | 行为 |
+|---|---|---|
+| `auto`（默认） | 无 | compiled-only；miss/不兼容返回 409 `EXTRACTOR_UNAVAILABLE`，绝不借 managed process key |
+| `auto` | 有 | compiled-first；只有 unavailable 或非 context 的 compiled subsystem failure 才在**同一次 fresh fetch**上回退请求 BYOK LLM；cancel/deadline 不回退 |
+| `compiled` | 不需要（即使传入也不使用） | deterministic-only、零 LLM；miss/不兼容 409，registry/IR corruption 500 fail-closed |
+| `llm` | 必须有 | 直接请求 BYOK LLM；schema 校验，至多一次 repair |
+
+compiled eligibility 固定为默认内容 profile：无 `css_selector`、`output_format=markdown`、`extract_mode=readability`；规范化 schema 必须是非空顶层 object，字段为 flat scalar（string、number/integer、boolean 或 date-time string，可带单一 nullable scalar），不接受 nested object/array、composition 或 refs。显式 `compiled` 不满足即 409；`auto+key` 可直走 LLM。只有成功执行才 `Touch`；只有 `ErrRequiredField` 才 `RecordEmpty`，optional-empty/schema-incompatible/not-executed 都不污染漂移窗口。
+
+**接线逻辑摘要**：
 
 ```text
-if engine != "llm" and 有 active extractor(键命中):
-    data, basis, err := compiler.Execute(ex.IR, rawHTML)
-    if err == nil and required 字段齐:
-        store.Touch(key, ex.ID); respond(mode="compiled", extractor 元数据); return
-    store.RecordEmpty(key, ex.ID)  // 仅 required-empty 喂漂移窗口
-# LLM 路径照旧（P0 的校验+修复+证据）
-成功后: catalog.Observe(snapshotRef)
-        coordinator.MaybeSchedule(compileKey)
-        # 门槛: ≥3 个 distinct 页/快照、managed compiler credential、singleflight
+prepareRequest(strict bounds + canonical schema)
+prepareDispatch(engine/profile/schema/key matrix)       # fetch 前 fail-fast
+fresh fetch once (MaxAge=0)
+if eligible compiled:
+    Lookup(page key)                                    # bound-drift 分支可能写 stale
+    Execute(IR) -> schema revalidate -> optional signed evidence(UUID@version)
+    Touch on success / RecordEmpty on required-empty
+    return compiled metadata, no llm_usage
+if allowed fallback/direct LLM:
+    Extract -> schema validate -> at most one repair
+    on full valid/default-profile/fresh-2xx snapshot: Observe(ref) best-effort
+```
+
+**managed compiler（默认关闭，只控制合成）**：`PURIFY_COMPILER_ENABLED=false` 时 `compiler.Store` 仍始终注入 `/extract`，并在 snapshot-backed `/verify` 可用时作为 revision resolver；因此已有 compiled revision 继续执行/重放。启用后台合成必须同时满足 snapshots enabled、非空 `PURIFY_COMPILER_API_KEY`、合法 model 与绝对 http(s) base URL。process key 只存在于 `managedTruthExtractor`，永不补 request `llm_api_key`；请求 BYOK/provider overrides 也永不进入 coordinator。开启此开关意味着允许后台把持久快照清洗内容发往所配 provider，是明确的数据外发 opt-in。`TruthExtractor` 让 `compiler` 不依赖 LLM client、transport、provider 或 key；包内仍复用 `llm` 的纯 schema normalize/validate 工具。
+
+只有 full schema-valid LLM 成功、默认 profile、fresh 2xx 且有 snapshot 的结果才允许观察；observer error/panic 不反转客户成功。migration 004 `compiler_samples` **只存引用**（page/snapshot hash、sample/cluster simhash、fetched/seen time），页面仍在 snapshot CAS，credential/cleaned content/truth output 均不落 catalog。ready 必须同时满足同一固定 cluster 中 `>=3 distinct page_hash` **且** `>=3 distinct snapshot_id`。边界：样本 3..20、TTL 30d、每 cluster 20、每 host/schema 最多 256 clusters、全局 10,000 refs。
+
+migration 005 `compiler_attempts` 持久化 revision watermark、cooldown 与 lease。coordinator 是单 worker、public queue 32（另留一个已接收 dirty revision 的物理槽）、task timeout 2m、lease 3m、transient cooldown 15m、weak/no-candidate cooldown 24h、attempt TTL 30d/全局 10,000 rows；同 key/revision 以 durable lease + in-process singleflight 合并。进程 crash 后由后续观察重新调度，语义是**有界 at-least-once**，不宣称 exactly-once。shutdown 顺序为 coordinator → managed HTTP idles → snapshot → ledger。
+
+**资源与出网边界**：REST `/extract` 只收一个 JSON object，unknown fields/trailing value 拒绝，body 1 MiB；raw/normalized schema 各 512 KiB，URL/key/base URL 各 16 KiB，model 256 bytes，均在 fetch/provider 前 N/N+1 拒绝。request 与 managed provider 共用 public-only HTTP client：完整 DNS answer 校验、dial-time literal-IP pin、禁 private/reserved/mixed answers、忽略环境 proxy、禁止携 credential/body redirect、TLS ≥1.2、timeout 120s（coordinator 另受 2m task bound）。完整 provider envelope 上限 32 MiB；managed truth 与 deterministic output 各 4 MiB。schema compiler 是 success-only LRU：128 entries / 8 MiB / 单 schema 512 KiB；inflight coordination map 上限 128，溢出请求绕过 cache 独立 compile；失败不缓存、不保留 caller buffer 引用。
+
+**MCP `extract_data`**：tool schema 的 `engine` enum 默认 auto，key/model/base URL 可选且各自有同 REST 等级上限，`schema` 是恰好一个 JSON value 的字符串；unknown argument、trailing JSON 与非法 schema 在 HTTP 前拒绝。`engine=compiled` 时 adapter **物理剥离** provider fields。`PURIFY_API_KEY` 仅通过 `X-API-Key` 鉴权 Purify API，与 payload 内 `llm_api_key` 分离。API success 以 strict `models.ExtractResponse` 解码并返回 structured content + pretty JSON fallback；非 2xx 保留结构化错误 code，异常文本会 redaction 两类 key，API response 读取上限 32 MiB。
+
+**benchmark 口径**：
+
+```bash
+go run ./scripts/benchmark/main.go compiled -runs 1000 -warmup 100
+```
+
+它在临时真实 SQLite + `compiler.Store` 上执行完整 `ExtractArtifact(auto)`（Lookup → Execute → schema validation → Touch），明确排除 page fetch，并用 guard 强制 LLM calls=0；门槛是严格 `p95 < 50ms`。2026-08-09 本机一次观测如下，**仅是可复现开发样本，不是 SLA/跨机器保证**：
+
+```json
+{
+  "runs": 1000,
+  "warmup_runs": 100,
+  "p50_ms": 0.435875,
+  "p95_ms": 0.755709,
+  "p99_ms": 1.016917,
+  "llm_calls": 0,
+  "threshold_ms": 50,
+  "threshold_passed": true
+}
 ```
 
 **提交序列**：
@@ -639,11 +686,19 @@ if engine != "llm" and 有 active extractor(键命中):
 ✅ 60ce9f3  feat(compiler): synthesize validated extraction rules      # 规划名: llm-guided compilation with validation report
 ✅ fd1de32  feat(ledger): add extractor registry foundation             # migration 003 + View/Update
 ✅ f5a32ba  feat(compiler): persist template-clustered extractors        # repository + clustering + drift
-⬜ (P2-4)   feat(extract): compiled engine with auto fallback
-⬜ (docs)    docs(scrape): compiled extraction guide
+✅ b22e32d  docs(plan): align phase 2 implementation status             # P2-1..P2-3 中途实况回写
+✅ a11080a  feat(compiler): catalog bounded compile samples              # migration 004 refs-only catalog
+✅ 71772f7  perf(llm): cache compiled schemas within bounds              # success-only bounded LRU/singleflight
+✅ 8ebad26  feat(extract): dispatch compiled extraction safely           # engine matrix + same-fetch fallback
+✅ 2df46a7  fix(llm): bound provider responses                            # 32 MiB complete envelope
+✅ 9462c19  perf(extract): benchmark compiled hot path                    # real SQLite/full ExtractArtifact benchmark
+✅ 88c3471  feat(extract): wire managed compiler                          # default-off config + production bindings
+✅ eb742b2  feat(compiler): coordinate managed synthesis                  # migration 005 + durable lease/cooldowns
+✅ b0497a4  feat(mcp): support compiled extraction                        # strict extract_data structured tool
+✅ 81ce10c  fix(extract): harden request and provider boundaries          # strict body/limits/public-only HTTP
 ```
 
-> **EN — (status 2026-08-09, HEAD `f5a32ba`)** P2-1 deterministic execution (`5ce96a4`), P2-2 validated synthesis (`60ce9f3`), and P2-3's strict SQLite registry plus template-clustered repository (`fd1de32`, `f5a32ba`) are committed. `TruthExtractor` isolates compiler synthesis from LLM clients, transport, providers, and credentials while reusing pure schema utilities. The registry makes revision identity immutable, enforces one active revision per fixed template cluster, and records attributable template/required-field drift without degrading healthy clusters on generic misses. P2-4 auto→compiled→llm dispatch, its bounded sample catalog/coordinator, MCP wiring, and documentation remain open.
+> **EN — (Phase 2 closed 2026-08-09, HEAD `81ce10c`)** P2 now ships deterministic IR execution, validated managed synthesis, an immutable template-clustered SQLite registry, compiled-first REST dispatch, bounded refs-only sampling and durable attempt coordination, a real zero-LLM hot-path benchmark, strict MCP structured output, and fail-closed request/provider boundaries. Managed synthesis is default-off and uses only its process credential; compiled execution and verification resolution remain active independently. Auto without BYOK is compiled-only, while auto with BYOK may reuse the same fetch for bounded fallback. Registry promotion preserves the partial unique index by demoting then inserting in one `ledger.Update`, and retired GC must unbind before delete because the binding FK is `ON DELETE RESTRICT`.
 
 ---
 
