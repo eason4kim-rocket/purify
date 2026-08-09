@@ -112,17 +112,50 @@ type ExtractorRevisionResolver interface {
 	Get(context.Context, string) (compiler.Extractor, error)
 }
 
-// FactChange is one changed scalar delivered only after its ledger transaction
-// commits successfully.
+// FactChange is one changed or gone scalar delivered only after its ledger
+// transaction commits successfully. Gone changes deliberately omit a new
+// value, evidence, and receipt rather than fabricating replacement evidence.
 type FactChange struct {
-	Path     string          `json:"path"`
-	OldValue json.RawMessage `json:"old_value"`
-	NewValue json.RawMessage `json:"new_value"`
-	Evidence evidence.Anchor `json:"evidence"`
-	Receipt  string          `json:"receipt"`
+	Path      string                 `json:"path"`
+	Status    models.VerifyStatus    `json:"status"`
+	GoneScope models.VerifyGoneScope `json:"gone_scope,omitempty"`
+	OldValue  json.RawMessage        `json:"old_value"`
+	NewValue  json.RawMessage        `json:"new_value,omitempty"`
+	Evidence  evidence.Anchor        `json:"evidence,omitempty"`
+	Receipt   string                 `json:"receipt,omitempty"`
 }
 
-// ChangedEvent groups every changed claim from one atomic verification.
+// MarshalJSON preserves the historical value-typed Evidence field for Go API
+// compatibility while omitting replacement evidence from gone wire events.
+func (change FactChange) MarshalJSON() ([]byte, error) {
+	type wireFactChange struct {
+		Path      string                 `json:"path"`
+		Status    models.VerifyStatus    `json:"status"`
+		GoneScope models.VerifyGoneScope `json:"gone_scope,omitempty"`
+		OldValue  json.RawMessage        `json:"old_value"`
+		NewValue  json.RawMessage        `json:"new_value,omitempty"`
+		Evidence  *evidence.Anchor       `json:"evidence,omitempty"`
+		Receipt   string                 `json:"receipt,omitempty"`
+	}
+	var replacement *evidence.Anchor
+	if change.Status != models.VerifyStatusGone {
+		anchor := change.Evidence
+		replacement = &anchor
+	}
+	return json.Marshal(wireFactChange{
+		Path:      change.Path,
+		Status:    change.Status,
+		GoneScope: change.GoneScope,
+		OldValue:  change.OldValue,
+		NewValue:  change.NewValue,
+		Evidence:  replacement,
+		Receipt:   change.Receipt,
+	})
+}
+
+// ChangedEvent groups every changed or gone claim from one atomic
+// verification. The historical event name remains fact.changed for wire
+// compatibility.
 type ChangedEvent struct {
 	VerificationID string       `json:"verification_id"`
 	URL            string       `json:"url"`
@@ -971,7 +1004,7 @@ func (s *Service) verifyOne(
 		result.GoneScope = models.VerifyGoneScopePage
 		row.Outcome = ledger.OutcomeGone
 		row.GoneScope = ledger.GoneScopePage
-		return result, row, nil, nil
+		return result, row, goneFactChange(claim, models.VerifyGoneScopePage), nil
 	}
 
 	if claim.compiled != nil {
@@ -989,7 +1022,7 @@ func (s *Service) verifyOne(
 			result.GoneScope = models.VerifyGoneScopeField
 			row.Outcome = ledger.OutcomeGone
 			row.GoneScope = ledger.GoneScopeField
-			return result, row, nil, nil
+			return result, row, goneFactChange(claim, models.VerifyGoneScopeField), nil
 		}
 
 		anchor := hydrateCompiledAnchor(replayed.Anchor, page.text, observation, verifiedAt)
@@ -1019,6 +1052,7 @@ func (s *Service) verifyOne(
 		row.Receipt = receipt
 		change := &FactChange{
 			Path:     claim.claim.Path,
+			Status:   models.VerifyStatusChanged,
 			OldValue: cloneRaw(claim.claim.Value),
 			NewValue: cloneRaw(replayed.Value),
 			Evidence: anchor,
@@ -1057,6 +1091,7 @@ func (s *Service) verifyOne(
 			row.Receipt = receipt
 			change := &FactChange{
 				Path:     claim.claim.Path,
+				Status:   models.VerifyStatusChanged,
 				OldValue: cloneRaw(claim.claim.Value),
 				NewValue: cloneRaw(candidate.raw),
 				Evidence: anchor,
@@ -1069,7 +1104,7 @@ func (s *Service) verifyOne(
 			result.GoneScope = models.VerifyGoneScopeField
 			row.Outcome = ledger.OutcomeGone
 			row.GoneScope = ledger.GoneScopeField
-			return result, row, nil, nil
+			return result, row, goneFactChange(claim, models.VerifyGoneScopeField), nil
 		}
 	}
 
@@ -1097,7 +1132,16 @@ func (s *Service) verifyOne(
 	result.GoneScope = models.VerifyGoneScopeField
 	row.Outcome = ledger.OutcomeGone
 	row.GoneScope = ledger.GoneScopeField
-	return result, row, nil, nil
+	return result, row, goneFactChange(claim, models.VerifyGoneScopeField), nil
+}
+
+func goneFactChange(claim resolvedClaim, scope models.VerifyGoneScope) *FactChange {
+	return &FactChange{
+		Path:      strings.Clone(claim.claim.Path),
+		Status:    models.VerifyStatusGone,
+		GoneScope: scope,
+		OldValue:  cloneRaw(claim.claim.Value),
+	}
 }
 
 func hydrateCompiledAnchor(
@@ -1202,8 +1246,14 @@ func anchorPointer(value evidence.Anchor) *evidence.Anchor {
 }
 
 func cloneFactChange(change FactChange) FactChange {
+	change.Path = strings.Clone(change.Path)
 	change.OldValue = cloneRaw(change.OldValue)
 	change.NewValue = cloneRaw(change.NewValue)
+	change.Evidence.Quote = strings.Clone(change.Evidence.Quote)
+	change.Evidence.Selector = strings.Clone(change.Evidence.Selector)
+	change.Evidence.Method = evidence.Method(strings.Clone(string(change.Evidence.Method)))
+	change.Evidence.SnapshotID = strings.Clone(change.Evidence.SnapshotID)
+	change.Receipt = strings.Clone(change.Receipt)
 	return change
 }
 

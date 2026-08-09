@@ -50,7 +50,6 @@ func TestVerifyDecisionTable(t *testing.T) {
 		wantGoneScope models.VerifyGoneScope
 		wantNewValue  json.RawMessage
 		wantMethod    evidence.Method
-		wantChange    bool
 	}{
 		{
 			name:       "selector value unchanged",
@@ -68,7 +67,6 @@ func TestVerifyDecisionTable(t *testing.T) {
 			wantStatus:   models.VerifyStatusChanged,
 			wantNewValue: json.RawMessage(`"Enterprise Plan"`),
 			wantMethod:   evidence.MethodExact,
-			wantChange:   true,
 		},
 		{
 			name:          "field disappeared",
@@ -222,10 +220,20 @@ func TestVerifyDecisionTable(t *testing.T) {
 			if len(events) != 1 {
 				t.Fatalf("outbox batches = %#v, want one transaction outcome", events)
 			}
-			if test.wantChange {
+			if test.wantStatus == models.VerifyStatusChanged || test.wantStatus == models.VerifyStatusGone {
 				changed := decodeChangedOutbox(t, events[0])
-				if len(changed.Changes) != 1 || changed.Changes[0].Path != test.claim.Path {
+				if len(changed.Changes) != 1 || changed.Changes[0].Path != test.claim.Path ||
+					changed.Changes[0].Status != test.wantStatus || changed.Changes[0].GoneScope != test.wantGoneScope {
 					t.Fatalf("changed event = %#v, want one change for %q", changed, test.claim.Path)
+				}
+				change := changed.Changes[0]
+				assertJSONEqual(t, change.OldValue, test.claim.Value, "event old value")
+				if test.wantStatus == models.VerifyStatusGone {
+					if len(change.NewValue) != 0 || change.Evidence != (evidence.Anchor{}) || change.Receipt != "" {
+						t.Fatalf("gone change fabricated replacement evidence: %#v", change)
+					}
+				} else if change.Evidence == (evidence.Anchor{}) || change.Receipt == "" {
+					t.Fatalf("changed event omitted replacement evidence: %#v", change)
 				}
 			} else if events[0] != nil {
 				t.Fatalf("outbox event = %#v, want nil", events[0])
@@ -421,7 +429,11 @@ func TestVerifyCompiledReceiptReplaysImmutableRuleOnOldAndCurrentSnapshots(t *te
 			}
 			recorder := &fakeRecorder{}
 			service := testService(t, test.oldHTML, observation(test.currentHTML, statusCode), signer, recorder, revisions)
-			response, err := service.Verify(context.Background(), models.VerifyRequest{Receipt: token})
+			response, err := service.Verify(context.Background(), models.VerifyRequest{
+				Receipt:       token,
+				WebhookURL:    "https://hooks.example.test/facts",
+				WebhookSecret: "compiled-secret",
+			})
 			if err != nil {
 				t.Fatalf("Verify(): %v", err)
 			}
@@ -436,6 +448,23 @@ func TestVerifyCompiledReceiptReplaysImmutableRuleOnOldAndCurrentSnapshots(t *te
 			row := batches[0][0]
 			if row.SchemaHash != testSchemaHash || row.TemplateClusterID != testTemplateCluster || row.ExtractorID != extractorID {
 				t.Fatalf("compiled row provenance = (%q, %q, %q)", row.SchemaHash, row.TemplateClusterID, row.ExtractorID)
+			}
+			events := recorder.committedOutboxEvents()
+			if len(events) != 1 {
+				t.Fatalf("compiled outbox events = %#v", events)
+			}
+			if test.wantStatus == models.VerifyStatusChanged || test.wantStatus == models.VerifyStatusGone {
+				changed := decodeChangedOutbox(t, events[0])
+				if len(changed.Changes) != 1 || changed.Changes[0].Status != test.wantStatus ||
+					changed.Changes[0].GoneScope != test.wantGoneScope || changed.Changes[0].Path != receiptPath {
+					t.Fatalf("compiled fact change = %#v", changed)
+				}
+				if test.wantStatus == models.VerifyStatusGone &&
+					(len(changed.Changes[0].NewValue) != 0 || changed.Changes[0].Evidence != (evidence.Anchor{}) || changed.Changes[0].Receipt != "") {
+					t.Fatalf("compiled gone fabricated replacement evidence: %#v", changed.Changes[0])
+				}
+			} else if events[0] != nil {
+				t.Fatalf("compiled confirmed event = %#v, want nil", events[0])
 			}
 			if test.wantStatus == models.VerifyStatusGone {
 				if result.Evidence != nil || result.Receipt != "" {
@@ -1956,6 +1985,65 @@ func TestVerifyRecordsAllClaimsAndChangedEventAtomically(t *testing.T) {
 	}
 }
 
+func TestVerifyMixedConfirmedChangedAndGoneUsesOneAtomicEvent(t *testing.T) {
+	recorder := &fakeRecorder{}
+	service := testService(
+		t,
+		`<span id="changed">Old</span><span id="same">Same</span><span id="gone">Gone</span>`,
+		observation(`<span id="changed">New</span><span id="same">Same</span>`, 200),
+		testSigner(t),
+		recorder,
+		nil,
+	)
+	response, err := service.Verify(context.Background(), models.VerifyRequest{
+		URL:           testURL,
+		WebhookURL:    "https://hooks.example.test/facts",
+		WebhookSecret: "mixed-secret",
+		Claims: []models.Claim{
+			testClaim("changed", `"Old"`, "Old", "#changed"),
+			testClaim("same", `"Same"`, "Same", "#same"),
+			testClaim("gone", `"Gone"`, "Gone", "#gone"),
+		},
+	})
+	if err != nil || response == nil || len(response.Results) != 3 {
+		t.Fatalf("Verify(mixed) = (%#v, %v)", response, err)
+	}
+	wantResults := []struct {
+		status models.VerifyStatus
+		scope  models.VerifyGoneScope
+	}{
+		{status: models.VerifyStatusChanged},
+		{status: models.VerifyStatusConfirmed},
+		{status: models.VerifyStatusGone, scope: models.VerifyGoneScopeField},
+	}
+	for index, want := range wantResults {
+		if response.Results[index].Status != want.status || response.Results[index].GoneScope != want.scope {
+			t.Fatalf("result[%d] = %#v, want status=%q scope=%q", index, response.Results[index], want.status, want.scope)
+		}
+	}
+	batches := recorder.committedBatches()
+	if len(batches) != 1 || len(batches[0]) != 3 {
+		t.Fatalf("mixed ledger batches = %#v", batches)
+	}
+	events := recorder.committedOutboxEvents()
+	if len(events) != 1 || events[0] == nil {
+		t.Fatalf("mixed outbox events = %#v", events)
+	}
+	changed := decodeChangedOutbox(t, events[0])
+	if len(changed.Changes) != 2 {
+		t.Fatalf("mixed fact changes = %#v", changed.Changes)
+	}
+	if changed.Changes[0].Path != "changed" || changed.Changes[0].Status != models.VerifyStatusChanged ||
+		changed.Changes[0].Evidence == (evidence.Anchor{}) || changed.Changes[0].Receipt == "" {
+		t.Fatalf("changed projection = %#v", changed.Changes[0])
+	}
+	if changed.Changes[1].Path != "gone" || changed.Changes[1].Status != models.VerifyStatusGone ||
+		changed.Changes[1].GoneScope != models.VerifyGoneScopeField || len(changed.Changes[1].NewValue) != 0 ||
+		changed.Changes[1].Evidence != (evidence.Anchor{}) || changed.Changes[1].Receipt != "" {
+		t.Fatalf("gone projection = %#v", changed.Changes[1])
+	}
+}
+
 func TestVerifyLedgerFailureRollsBackVerdictsAndOutbox(t *testing.T) {
 	ledgerErr := errors.New("transaction rolled back")
 	var orderMu sync.Mutex
@@ -2027,6 +2115,7 @@ func TestChangedEventJSONUsesStableSnakeCaseFields(t *testing.T) {
 		VerifiedAt:     newFetchedAt.UTC(),
 		Changes: []FactChange{{
 			Path:     "plan",
+			Status:   models.VerifyStatusChanged,
 			OldValue: json.RawMessage(`"Pro Plan"`),
 			NewValue: json.RawMessage(`"Enterprise Plan"`),
 			Evidence: testAnchor("Enterprise Plan", "#plan .title"),
@@ -2054,13 +2143,45 @@ func TestChangedEventJSONUsesStableSnakeCaseFields(t *testing.T) {
 	if err := json.Unmarshal(outer["changes"], &changes); err != nil || len(changes) != 1 {
 		t.Fatalf("decode changes = (%#v, %v)", changes, err)
 	}
-	wantChange := []string{"path", "old_value", "new_value", "evidence", "receipt"}
+	wantChange := []string{"path", "status", "old_value", "new_value", "evidence", "receipt"}
 	if len(changes[0]) != len(wantChange) {
 		t.Fatalf("change JSON = %s", outer["changes"])
 	}
 	for _, key := range wantChange {
 		if _, ok := changes[0][key]; !ok {
 			t.Fatalf("change JSON missing %q: %s", key, outer["changes"])
+		}
+	}
+
+	gone := ChangedEvent{
+		VerificationID: "verification-gone-json",
+		URL:            testURL,
+		FinalURL:       testFinalURL,
+		VerifiedAt:     newFetchedAt.UTC(),
+		Changes: []FactChange{{
+			Path:      "plan",
+			Status:    models.VerifyStatusGone,
+			GoneScope: models.VerifyGoneScopePage,
+			OldValue:  json.RawMessage(`"Pro Plan"`),
+		}},
+	}
+	encodedGone, err := json.Marshal(gone)
+	if err != nil {
+		t.Fatalf("Marshal(gone) error = %v", err)
+	}
+	var goneEnvelope struct {
+		Changes []map[string]json.RawMessage `json:"changes"`
+	}
+	if err := json.Unmarshal(encodedGone, &goneEnvelope); err != nil || len(goneEnvelope.Changes) != 1 {
+		t.Fatalf("decode gone event = (%#v, %v)", goneEnvelope, err)
+	}
+	wantGone := []string{"path", "status", "gone_scope", "old_value"}
+	if len(goneEnvelope.Changes[0]) != len(wantGone) {
+		t.Fatalf("gone change JSON = %s", encodedGone)
+	}
+	for _, key := range wantGone {
+		if _, ok := goneEnvelope.Changes[0][key]; !ok {
+			t.Fatalf("gone change JSON missing %q: %s", key, encodedGone)
 		}
 	}
 }
