@@ -22,6 +22,8 @@ import (
 type Scraper struct {
 	browser      *rod.Browser
 	pagePool     rod.Pool[rod.Page]
+	browserSlots *browserSlotGate
+	controlURL   string
 	browserCfg   config.BrowserConfig
 	scraperCfg   config.ScraperConfig
 	httpFetcher  *httpFetcher
@@ -33,10 +35,18 @@ type Scraper struct {
 	dispatcher   *engine.Dispatcher
 	relay        *proxy.Relay
 	snapshots    *snapshot.Store
+	closeOnce    sync.Once
 }
 
 // NewScraper launches a headless browser and initialises the reusable page pool.
 func NewScraper(browserCfg config.BrowserConfig, scraperCfg config.ScraperConfig) (*Scraper, error) {
+	if browserCfg.MaxPages <= 0 {
+		return nil, models.NewScrapeError(
+			models.ErrCodeInternal,
+			"browser max pages must be positive",
+			nil,
+		)
+	}
 	// ── Proxy strategy ──────────────────────────────────────────────
 	// When the proxy requires auth (user:pass in URL), Chrome cannot handle
 	// it directly (HandleAuth conflicts with HijackRequests, SOCKS5 auth
@@ -115,14 +125,16 @@ func NewScraper(browserCfg config.BrowserConfig, scraperCfg config.ScraperConfig
 	slog.Info("page pool created", "maxPages", browserCfg.MaxPages)
 
 	return &Scraper{
-		browser:     browser,
-		pagePool:    pool,
-		browserCfg:  browserCfg,
-		scraperCfg:  scraperCfg,
-		httpFetcher: newHTTPFetcher(browserCfg.DefaultProxy),
-		pagePolicy:  defaultPageRetirementPolicy(),
-		startTime:   time.Now(),
-		relay:       relay,
+		browser:      browser,
+		pagePool:     pool,
+		browserSlots: newBrowserSlotGate(browserCfg.MaxPages),
+		controlURL:   controlURL,
+		browserCfg:   browserCfg,
+		scraperCfg:   scraperCfg,
+		httpFetcher:  newHTTPFetcher(browserCfg.DefaultProxy),
+		pagePolicy:   defaultPageRetirementPolicy(),
+		startTime:    time.Now(),
+		relay:        relay,
 	}, nil
 }
 
@@ -159,15 +171,26 @@ func (s *Scraper) Stats() models.PoolStats {
 // Close drains the page pool and kills the browser process.
 // Call this on graceful shutdown to prevent zombie Chrome processes.
 func (s *Scraper) Close() {
-	slog.Info("scraper shutting down: draining page pool")
-	s.pagePool.Cleanup(func(p *rod.Page) {
-		s.pageHealth.Delete(p)
-		_ = p.Close()
-	})
-	slog.Info("scraper shutting down: closing browser")
-	s.browser.MustClose()
-	if s.relay != nil {
-		s.relay.Close()
+	if s == nil {
+		return
 	}
-	slog.Info("scraper shutdown complete")
+	s.closeOnce.Do(func() {
+		// Refuse new browser work, unblock queued callers, and wait until every
+		// active pooled/isolated/CDP page has completed its deferred cleanup.
+		s.browserSlots.closeAndWait()
+
+		slog.Info("scraper shutting down: draining page pool")
+		s.pagePool.Cleanup(func(p *rod.Page) {
+			s.pageHealth.Delete(p)
+			_ = p.Close()
+		})
+		slog.Info("scraper shutting down: closing browser")
+		if s.browser != nil {
+			_ = s.browser.Close()
+		}
+		if s.relay != nil {
+			s.relay.Close()
+		}
+		slog.Info("scraper shutdown complete")
+	})
 }

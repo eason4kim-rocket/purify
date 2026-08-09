@@ -3,6 +3,7 @@ package scraper
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/go-rod/stealth"
+	"github.com/use-agent/purify/engine"
 	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/snapshot"
 )
@@ -102,7 +104,19 @@ func (s *Scraper) finalizeScrape(req *models.ScrapeRequest, result *ScrapeResult
 // that the engine.RodEngine callback in main.go can call it without
 // triggering the dispatcher (avoiding infinite recursion).
 func (s *Scraper) DoScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*ScrapeResult, error) {
-	return s.doScrapeRod(ctx, req)
+	return s.doScrapeRodBounded(ctx, req, 0)
+}
+
+// DoScrapeRodBounded runs the direct browser path while bounding the main
+// document, all decoded HTTP(S) response bodies in the page session, and the
+// rendered HTML returned over CDP. A zero limit preserves the legacy browser
+// behavior used by the public scrape API; verification callers pass their
+// explicit observation bound.
+func (s *Scraper) DoScrapeRodBounded(ctx context.Context, req *models.ScrapeRequest, maximumBodyBytes int64) (*ScrapeResult, error) {
+	if maximumBodyBytes < 0 {
+		return nil, fmt.Errorf("%w: maximum must not be negative", engine.ErrResponseBodyTooLarge)
+	}
+	return s.doScrapeRodBounded(ctx, req, maximumBodyBytes)
 }
 
 // doScrapeRod contains the full rod-based scraping logic (timeout, pool,
@@ -130,26 +144,57 @@ func (s *Scraper) DoScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 //   - Step 3's about:blank uses the ORIGINAL page reference (without request
 //     context), so cleanup succeeds even if the request context has expired.
 func (s *Scraper) doScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*ScrapeResult, error) {
+	return s.doScrapeRodBounded(ctx, req, 0)
+}
+
+func (s *Scraper) doScrapeRodBounded(ctx context.Context, req *models.ScrapeRequest, maximumBodyBytes int64) (*ScrapeResult, error) {
 	// ── 1. Timeout guard ──────────────────────────────────────────────
 	timeout := s.scrapeTimeout(req)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// One context-aware gate covers every Chromium route. The Rod page pool
+	// alone cannot bound request-isolated BrowserContexts or external CDP pages.
+	releaseSlot, slotErr := s.browserSlots.acquire(ctx)
+	if slotErr != nil {
+		if errors.Is(slotErr, context.Canceled) || errors.Is(slotErr, context.DeadlineExceeded) {
+			return nil, categorizeError(slotErr, "waiting for browser capacity")
+		}
+		return nil, models.NewScrapeError(models.ErrCodeBrowserCrash, "browser is unavailable", slotErr)
+	}
+	s.activePages.Add(1)
+	releaseSlotHere := true
+	releaseBrowserSlot := func() {
+		s.activePages.Add(-1)
+		releaseSlot()
+	}
+	defer func() {
+		if releaseSlotHere {
+			releaseBrowserSlot()
+		}
+	}()
+	transferCleanup := func(cleanupDone <-chan struct{}) {
+		if releaseBrowserSlotAfter(cleanupDone, releaseBrowserSlot) {
+			releaseSlotHere = false
+		}
+	}
+
 	// ── 1b. Per-request CDP URL: connect to user's own Chrome ────────
 	if req.CDPURL != "" {
-		return s.doScrapeWithCDP(ctx, req)
+		result, scrapeErr, cleanupDone := s.doScrapeWithCDP(ctx, req, maximumBodyBytes)
+		transferCleanup(cleanupDone)
+		return result, scrapeErr
 	}
 	// A request proxy must never mutate the shared Chrome process. Cookies are
 	// isolated for the same reason: Chromium stores them at browser-context
 	// scope, not page scope.
 	if req.ProxyURL != "" || len(req.Cookies) > 0 {
-		return s.doScrapeInRequestContext(ctx, req)
+		result, scrapeErr, cleanupDone := s.doScrapeInRequestContext(ctx, req, maximumBodyBytes)
+		transferCleanup(cleanupDone)
+		return result, scrapeErr
 	}
 
 	// ── 2. Acquire page from pool ─────────────────────────────────────
-	s.activePages.Add(1)
-	defer s.activePages.Add(-1)
-
 	page, acquireErr := s.pagePool.Get(func() (*rod.Page, error) {
 		return s.browser.Page(proto.TargetCreateTarget{})
 	})
@@ -222,10 +267,11 @@ func (s *Scraper) doScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 	}
 
 	// ── 5. Mount hijack router (blocks Image/Stylesheet/Font/Media + ads) ──
-	router := setupHijack(p, s.scraperCfg.BlockedResourceTypes, req.BlockAds)
-	if router != nil {
-		defer func() { _ = router.Stop() }()
+	interception, interceptErr := setupPageInterception(p, s.scraperCfg.BlockedResourceTypes, req.BlockAds, maximumBodyBytes)
+	if interceptErr != nil {
+		return nil, categorizeError(interceptErr, "failed to install browser response bounds")
 	}
+	defer interception.stop()
 
 	// ── 7. Install network activity tracking BEFORE navigation ────────
 	// CDP WaitRequestIdle conflicts with Fetch-domain request hijacking on
@@ -250,12 +296,24 @@ func (s *Scraper) doScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 	// ── 8. Navigate ───────────────────────────────────────────────────
 	var navErr error
 	if navErr = p.Navigate(req.URL); navErr != nil {
+		if terminalErr := interception.err(); terminalErr != nil {
+			return nil, terminalErr
+		}
 		return nil, categorizeError(navErr, "navigation to target URL failed")
+	}
+	if terminalErr := interception.err(); terminalErr != nil {
+		return nil, terminalErr
 	}
 
 	// ── 9. Wait for a complete, usable document ──────────────────────
 	if waitErr := waitForDocument(p, networkIdleRequested(req)); waitErr != nil {
+		if terminalErr := interception.err(); terminalErr != nil {
+			return nil, terminalErr
+		}
 		return nil, categorizeError(waitErr, "document did not become ready")
+	}
+	if terminalErr := interception.err(); terminalErr != nil {
+		return nil, terminalErr
 	}
 
 	// ── 9b. Collect status code via JS (best-effort) ────────────────
@@ -282,13 +340,22 @@ func (s *Scraper) doScrapeRod(ctx context.Context, req *models.ScrapeRequest) (*
 			return nil, err
 		}
 		if waitErr := waitForPostActionStability(p, networkIdleRequested(req)); waitErr != nil {
+			if terminalErr := interception.err(); terminalErr != nil {
+				return nil, terminalErr
+			}
 			return nil, categorizeError(waitErr, "document did not stabilize after actions")
+		}
+		if terminalErr := interception.err(); terminalErr != nil {
+			return nil, terminalErr
 		}
 	}
 
 	// ── 10. Extract rendered HTML ─────────────────────────────────────
-	rawHTML, htmlErr := p.HTML()
+	rawHTML, htmlErr := extractBoundedHTML(p, maximumBodyBytes)
 	if htmlErr != nil {
+		if errors.Is(htmlErr, engine.ErrResponseBodyTooLarge) {
+			return nil, htmlErr
+		}
 		return nil, categorizeError(htmlErr, "failed to extract page HTML")
 	}
 
@@ -416,27 +483,40 @@ func evalIntOrZero(page *rod.Page, js string) int {
 
 // doScrapeWithCDP connects to a user-provided CDP endpoint, creates a
 // temporary page, scrapes it, and disconnects (without killing the browser).
-func (s *Scraper) doScrapeWithCDP(ctx context.Context, req *models.ScrapeRequest) (*ScrapeResult, error) {
+func (s *Scraper) doScrapeWithCDP(ctx context.Context, req *models.ScrapeRequest, maximumBodyBytes int64) (*ScrapeResult, error, <-chan struct{}) {
 	browser, disconnect, err := connectCDP(ctx, req.CDPURL)
 	if err != nil {
 		return nil, models.NewScrapeError(
 			models.ErrCodeBrowserCrash,
 			"failed to connect to CDP URL",
 			err,
-		)
+		), nil
 	}
-	defer disconnect()
 
 	isolated, cleanup, err := newIsolatedBrowserContext(ctx, browser, req.ProxyURL)
 	if err != nil {
+		disconnect()
 		return nil, models.NewScrapeError(
 			models.ErrCodeBrowserCrash,
 			"failed to create isolated CDP browser context",
 			err,
-		)
+		), nil
 	}
-	defer cleanup()
-	return s.scrapeStandalonePage(ctx, isolated, req, "cdp")
+	result, scrapeErr := s.scrapeStandalonePage(ctx, isolated, req, "cdp", maximumBodyBytes)
+	cleanupDone := cleanup()
+	select {
+	case <-cleanupDone:
+		disconnect()
+		return result, scrapeErr, cleanupDone
+	default:
+	}
+	disconnected := make(chan struct{})
+	go func() {
+		<-cleanupDone
+		disconnect()
+		close(disconnected)
+	}()
+	return result, scrapeErr, disconnected
 }
 
 // removeOverlays injects JS to remove fixed/sticky positioned elements with

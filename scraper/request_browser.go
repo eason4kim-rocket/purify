@@ -3,6 +3,7 @@ package scraper
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -15,29 +16,38 @@ import (
 	"github.com/go-rod/rod/lib/cdp"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/go-rod/stealth"
+	"github.com/use-agent/purify/engine"
 	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/proxy"
 )
 
-const browserContextCleanupTimeout = 250 * time.Millisecond
+const (
+	browserContextCleanupTimeout      = 250 * time.Millisecond
+	browserContextAsyncCleanupTimeout = 5 * time.Second
+)
 
 // doScrapeInRequestContext uses an isolated Chromium BrowserContext whenever a
 // request needs its own proxy or cookie jar. The shared Chrome process remains
 // pooled, while context disposal guarantees request state cannot leak into a
 // later page.
-func (s *Scraper) doScrapeInRequestContext(ctx context.Context, req *models.ScrapeRequest) (*ScrapeResult, error) {
+func (s *Scraper) doScrapeInRequestContext(ctx context.Context, req *models.ScrapeRequest, maximumBodyBytes int64) (*ScrapeResult, error, <-chan struct{}) {
 	browser, cleanup, err := newIsolatedBrowserContext(ctx, s.browser, req.ProxyURL)
 	if err != nil {
-		return nil, models.NewScrapeError(models.ErrCodeNavigation, "failed to create isolated browser context", err)
+		return nil, models.NewScrapeError(models.ErrCodeNavigation, "failed to create isolated browser context", err), nil
 	}
-	defer cleanup()
-	return s.scrapeStandalonePage(ctx, browser, req, rodEngineName(req.Stealth))
+	result, scrapeErr := s.scrapeStandalonePage(ctx, browser, req, rodEngineName(req.Stealth), maximumBodyBytes)
+	return result, scrapeErr, cleanup()
 }
 
-func newIsolatedBrowserContext(ctx context.Context, base *rod.Browser, rawProxyURL string) (*rod.Browser, func(), error) {
+func newIsolatedBrowserContext(ctx context.Context, base *rod.Browser, rawProxyURL string) (*rod.Browser, func() <-chan struct{}, error) {
+	completed := func() <-chan struct{} {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
 	proxyServer, relay, err := browserProxy(rawProxyURL)
 	if err != nil {
-		return nil, func() {}, err
+		return nil, completed, err
 	}
 
 	created, err := (proto.TargetCreateBrowserContext{
@@ -51,36 +61,65 @@ func newIsolatedBrowserContext(ctx context.Context, base *rod.Browser, rawProxyU
 		if relay != nil {
 			_ = relay.Close()
 		}
-		return nil, func() {}, err
+		return nil, completed, err
 	}
 
 	isolated := *base.Context(ctx)
 	isolated.BrowserContextID = created.BrowserContextID
 	var cleanupOnce sync.Once
-	cleanup := func() {
+	cleanupDone := make(chan struct{})
+	cleanup := func() <-chan struct{} {
 		cleanupOnce.Do(func() {
 			dispose := func(cleanupCtx context.Context) {
-				_ = (proto.TargetDisposeBrowserContext{BrowserContextID: created.BrowserContextID}).Call(base.Context(cleanupCtx))
+				defer close(cleanupDone)
+				disposeBrowserContext(cleanupCtx, base, created.BrowserContextID)
 				if relay != nil {
 					_ = relay.Close()
 				}
 			}
 			if ctx.Err() != nil {
 				// The request budget is already exhausted. Do not extend response
-				// latency; dispose on the still-live shared CDP connection instead.
+				// latency. The caller transfers its global browser slot to this
+				// tracked cleanup until the BrowserContext is disposed.
 				go func() {
-					cleanupCtx, cancel := context.WithTimeout(context.Background(), browserContextCleanupTimeout)
+					cleanupCtx, cancel := context.WithTimeout(context.Background(), browserContextAsyncCleanupTimeout)
 					defer cancel()
 					dispose(cleanupCtx)
 				}()
 				return
 			}
-			cleanupCtx, cancel := context.WithTimeout(ctx, browserContextCleanupTimeout)
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), browserContextCleanupTimeout)
 			defer cancel()
 			dispose(cleanupCtx)
 		})
+		return cleanupDone
 	}
 	return &isolated, cleanup, nil
+}
+
+func disposeBrowserContext(ctx context.Context, base *rod.Browser, browserContextID proto.BrowserBrowserContextID) {
+	for {
+		cleanupBrowser := base.Context(ctx)
+		_ = (proto.TargetDisposeBrowserContext{BrowserContextID: browserContextID}).Call(cleanupBrowser)
+		contexts, err := (proto.TargetGetBrowserContexts{}).Call(cleanupBrowser)
+		if err == nil {
+			found := false
+			for _, activeID := range contexts.BrowserContextIDs {
+				if activeID == browserContextID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 // browserProxy converts authenticated proxies to the local unauthenticated
@@ -114,10 +153,7 @@ func browserProxy(rawProxyURL string) (string, *proxy.Relay, error) {
 
 // scrapeStandalonePage applies the same browser fetch options as the pooled
 // Rod path to a page owned by an isolated or external browser context.
-func (s *Scraper) scrapeStandalonePage(ctx context.Context, browser *rod.Browser, req *models.ScrapeRequest, engineName string) (*ScrapeResult, error) {
-	s.activePages.Add(1)
-	defer s.activePages.Add(-1)
-
+func (s *Scraper) scrapeStandalonePage(ctx context.Context, browser *rod.Browser, req *models.ScrapeRequest, engineName string, maximumBodyBytes int64) (*ScrapeResult, error) {
 	page, err := browser.Context(ctx).Page(proto.TargetCreateTarget{})
 	if err != nil {
 		return nil, models.NewScrapeError(models.ErrCodeBrowserCrash, "failed to create request page", err)
@@ -157,10 +193,11 @@ func (s *Scraper) scrapeStandalonePage(ctx context.Context, browser *rod.Browser
 		}
 	}
 
-	router := setupHijack(p, s.scraperCfg.BlockedResourceTypes, req.BlockAds)
-	if router != nil {
-		defer func() { _ = router.Stop() }()
+	interception, err := setupPageInterception(p, s.scraperCfg.BlockedResourceTypes, req.BlockAds, maximumBodyBytes)
+	if err != nil {
+		return nil, categorizeError(err, "failed to install browser response bounds")
 	}
+	defer interception.stop()
 	if networkIdleRequested(req) {
 		removeTracker, err := installNetworkTracker(p)
 		if err != nil {
@@ -170,10 +207,22 @@ func (s *Scraper) scrapeStandalonePage(ctx context.Context, browser *rod.Browser
 	}
 
 	if err := p.Navigate(req.URL); err != nil {
+		if terminalErr := interception.err(); terminalErr != nil {
+			return nil, terminalErr
+		}
 		return nil, categorizeError(err, "navigation to target URL failed")
 	}
+	if terminalErr := interception.err(); terminalErr != nil {
+		return nil, terminalErr
+	}
 	if err := waitForDocument(p, networkIdleRequested(req)); err != nil {
+		if terminalErr := interception.err(); terminalErr != nil {
+			return nil, terminalErr
+		}
 		return nil, categorizeError(err, "document did not become ready")
+	}
+	if terminalErr := interception.err(); terminalErr != nil {
+		return nil, terminalErr
 	}
 
 	statusCode := evalIntOrZero(p, `() => {
@@ -190,12 +239,21 @@ func (s *Scraper) scrapeStandalonePage(ctx context.Context, browser *rod.Browser
 			return nil, err
 		}
 		if err := waitForPostActionStability(p, networkIdleRequested(req)); err != nil {
+			if terminalErr := interception.err(); terminalErr != nil {
+				return nil, terminalErr
+			}
 			return nil, categorizeError(err, "document did not stabilize after actions")
+		}
+		if terminalErr := interception.err(); terminalErr != nil {
+			return nil, terminalErr
 		}
 	}
 
-	rawHTML, err := p.HTML()
+	rawHTML, err := extractBoundedHTML(p, maximumBodyBytes)
 	if err != nil {
+		if errors.Is(err, engine.ErrResponseBodyTooLarge) {
+			return nil, err
+		}
 		return nil, categorizeError(err, "failed to extract page HTML")
 	}
 	finalURL := evalStringOrEmpty(p, `() => window.location.href`)
