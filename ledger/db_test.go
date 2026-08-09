@@ -551,11 +551,26 @@ func assertMigrationState(t *testing.T, db *sql.DB) {
 		WHERE type = 'table' AND name = 'outbox_events'`).Scan(&table); err != nil {
 		t.Fatalf("outbox_events table: %v", err)
 	}
-	for _, name := range []string{"idx_outbox_events_pending", "idx_outbox_events_verification"} {
+	for _, name := range []string{
+		"idx_outbox_events_pending",
+		"idx_outbox_events_verification",
+		"idx_outbox_events_subject",
+	} {
 		var got string
 		if err := db.QueryRow(`SELECT name FROM sqlite_master
 			WHERE type = 'index' AND name = ?`, name).Scan(&got); err != nil {
 			t.Fatalf("index %q: %v", name, err)
+		}
+	}
+	for _, name := range []string{
+		"trg_outbox_events_verification_subject",
+		"trg_outbox_events_heal_terminal_subject",
+		"trg_outbox_events_immutable_identity",
+	} {
+		var outboxTrigger string
+		if err := db.QueryRow(`SELECT name FROM sqlite_master
+			WHERE type = 'trigger' AND name = ?`, name).Scan(&outboxTrigger); err != nil {
+			t.Fatalf("outbox trigger %q: %v", name, err)
 		}
 	}
 	for _, name := range []string{"extractors", "extractor_page_bindings"} {

@@ -42,6 +42,7 @@ func TestRecordVerificationBatchRoundTripAndLegacyCompatibility(t *testing.T) {
 	}
 	got := pending[0]
 	if got.ID != event.ID || got.VerificationID != event.VerificationID || got.Type != event.Type ||
+		got.SubjectType != SubjectVerification || got.SubjectID != event.VerificationID ||
 		got.URL != event.URL || got.Secret != event.Secret || !got.CreatedAt.Equal(createdAt) ||
 		!got.NextAttemptAt.Equal(createdAt) || got.Attempts != 0 || got.LastAttemptAt != nil ||
 		got.DeliveredAt != nil || got.FailedAt != nil {
@@ -598,7 +599,8 @@ func assertPendingCount(t *testing.T, store *Store, dueAt time.Time, want int) {
 func loadOutboxEventForTest(t *testing.T, store *Store, id string) OutboxEvent {
 	t.Helper()
 	event, err := scanOutboxEvent(store.db.QueryRow(`SELECT
-		id, verification_id, event_type, destination_url, secret, payload,
+		id, verification_id, subject_type, subject_id, event_type,
+		destination_url, secret, payload,
 		created_at, attempt_count, last_attempt_at, last_error,
 		next_attempt_at, delivered_at, failed_at
 		FROM outbox_events WHERE id = ?`, id))

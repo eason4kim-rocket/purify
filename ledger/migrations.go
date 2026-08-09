@@ -781,4 +781,197 @@ var migrations = []string{
 	BEGIN
 		SELECT RAISE(ABORT, 'extractor is referenced by durable audit history');
 	END;`,
+	`ALTER TABLE outbox_events RENAME TO outbox_events_verification_v2;
+
+	CREATE TABLE outbox_events (
+		id TEXT NOT NULL PRIMARY KEY CHECK (
+			typeof(id) = 'text' AND
+			length(CAST(id AS BLOB)) BETWEEN 1 AND 512 AND
+			id = trim(id)
+		),
+		verification_id TEXT CHECK (
+			verification_id IS NULL OR (
+				typeof(verification_id) = 'text' AND
+				length(CAST(verification_id AS BLOB)) BETWEEN 1 AND 512 AND
+				verification_id = trim(verification_id)
+			)
+		),
+		subject_type TEXT NOT NULL CHECK (
+			typeof(subject_type) = 'text' AND
+			subject_type IN ('verification', 'extractor_heal')
+		),
+		subject_id TEXT NOT NULL CHECK (
+			typeof(subject_id) = 'text' AND
+			length(CAST(subject_id AS BLOB)) BETWEEN 1 AND 512 AND
+			subject_id = trim(subject_id)
+		),
+		event_type TEXT NOT NULL CHECK (
+			typeof(event_type) = 'text' AND
+			length(CAST(event_type AS BLOB)) BETWEEN 1 AND 128 AND
+			event_type = trim(event_type)
+		),
+		destination_url TEXT NOT NULL CHECK (
+			typeof(destination_url) = 'text' AND
+			length(CAST(destination_url AS BLOB)) BETWEEN 1 AND 16384 AND
+			destination_url = trim(destination_url) AND
+			(substr(destination_url, 1, 7) = 'http://' OR
+				substr(destination_url, 1, 8) = 'https://')
+		),
+		secret TEXT NOT NULL DEFAULT '' CHECK (
+			typeof(secret) = 'text' AND
+			length(CAST(secret AS BLOB)) <= 16384
+		),
+		payload TEXT NOT NULL CHECK (
+			typeof(payload) = 'text' AND
+			length(CAST(payload AS BLOB)) BETWEEN 1 AND 33554432 AND
+			json_valid(payload)
+		),
+		created_at TEXT NOT NULL CHECK (
+			typeof(created_at) = 'text' AND length(created_at) = 30 AND
+			substr(created_at, 5, 1) = '-' AND substr(created_at, 8, 1) = '-' AND
+			substr(created_at, 11, 1) = 'T' AND substr(created_at, 14, 1) = ':' AND
+			substr(created_at, 17, 1) = ':' AND substr(created_at, 20, 1) = '.' AND
+			substr(created_at, 30, 1) = 'Z' AND julianday(created_at) IS NOT NULL
+		),
+		attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (
+			typeof(attempt_count) = 'integer' AND attempt_count >= 0
+		),
+		last_attempt_at TEXT CHECK (
+			last_attempt_at IS NULL OR (
+				typeof(last_attempt_at) = 'text' AND length(last_attempt_at) = 30 AND
+				substr(last_attempt_at, 5, 1) = '-' AND substr(last_attempt_at, 8, 1) = '-' AND
+				substr(last_attempt_at, 11, 1) = 'T' AND substr(last_attempt_at, 14, 1) = ':' AND
+				substr(last_attempt_at, 17, 1) = ':' AND substr(last_attempt_at, 20, 1) = '.' AND
+				substr(last_attempt_at, 30, 1) = 'Z' AND julianday(last_attempt_at) IS NOT NULL
+			)
+		),
+		last_error TEXT NOT NULL DEFAULT '' CHECK (
+			typeof(last_error) = 'text' AND
+			length(CAST(last_error AS BLOB)) <= 65536
+		),
+		next_attempt_at TEXT NOT NULL CHECK (
+			typeof(next_attempt_at) = 'text' AND length(next_attempt_at) = 30 AND
+			substr(next_attempt_at, 5, 1) = '-' AND substr(next_attempt_at, 8, 1) = '-' AND
+			substr(next_attempt_at, 11, 1) = 'T' AND substr(next_attempt_at, 14, 1) = ':' AND
+			substr(next_attempt_at, 17, 1) = ':' AND substr(next_attempt_at, 20, 1) = '.' AND
+			substr(next_attempt_at, 30, 1) = 'Z' AND julianday(next_attempt_at) IS NOT NULL
+		),
+		delivered_at TEXT CHECK (
+			delivered_at IS NULL OR (
+				typeof(delivered_at) = 'text' AND length(delivered_at) = 30 AND
+				substr(delivered_at, 5, 1) = '-' AND substr(delivered_at, 8, 1) = '-' AND
+				substr(delivered_at, 11, 1) = 'T' AND substr(delivered_at, 14, 1) = ':' AND
+				substr(delivered_at, 17, 1) = ':' AND substr(delivered_at, 20, 1) = '.' AND
+				substr(delivered_at, 30, 1) = 'Z' AND julianday(delivered_at) IS NOT NULL
+			)
+		),
+		failed_at TEXT CHECK (
+			failed_at IS NULL OR (
+				typeof(failed_at) = 'text' AND length(failed_at) = 30 AND
+				substr(failed_at, 5, 1) = '-' AND substr(failed_at, 8, 1) = '-' AND
+				substr(failed_at, 11, 1) = 'T' AND substr(failed_at, 14, 1) = ':' AND
+				substr(failed_at, 17, 1) = ':' AND substr(failed_at, 20, 1) = '.' AND
+				substr(failed_at, 30, 1) = 'Z' AND julianday(failed_at) IS NOT NULL
+			)
+		),
+		UNIQUE (event_type, subject_type, subject_id),
+		CHECK (
+			(subject_type = 'verification' AND verification_id IS NOT NULL AND
+				verification_id = subject_id) OR
+			(subject_type = 'extractor_heal' AND verification_id IS NULL)
+		),
+		CHECK (
+			subject_type <> 'extractor_heal' OR (
+				length(subject_id) = 36 AND
+				substr(subject_id, 9, 1) = '-' AND
+				substr(subject_id, 14, 1) = '-' AND
+				substr(subject_id, 19, 1) = '-' AND
+				substr(subject_id, 24, 1) = '-' AND
+				length(replace(subject_id, '-', '')) = 32 AND
+				subject_id NOT GLOB '*[^0-9a-f-]*'
+			)
+		),
+		CHECK (
+			subject_type <> 'extractor_heal' OR
+			event_type IN ('extractor.promoted', 'extractor.degraded')
+		),
+		CHECK (next_attempt_at >= created_at),
+		CHECK (last_attempt_at IS NULL OR last_attempt_at >= created_at),
+		CHECK (delivered_at IS NULL OR (
+			delivered_at >= created_at AND
+			(last_attempt_at IS NULL OR delivered_at >= last_attempt_at)
+		)),
+		CHECK (failed_at IS NULL OR (
+			failed_at >= created_at AND
+			(last_attempt_at IS NULL OR failed_at >= last_attempt_at)
+		)),
+		CHECK (delivered_at IS NULL OR failed_at IS NULL),
+		CHECK (failed_at IS NULL OR last_error <> ''),
+		CHECK (
+			(attempt_count = 0 AND last_attempt_at IS NULL AND last_error = '') OR
+			(attempt_count > 0 AND last_attempt_at IS NOT NULL AND last_error <> '')
+		)
+	) STRICT;
+
+	CREATE TRIGGER trg_outbox_events_verification_subject
+	BEFORE INSERT ON outbox_events
+	WHEN NEW.subject_type = 'verification' AND NOT EXISTS (
+		SELECT 1 FROM verifications verification
+		WHERE verification.verification_id = NEW.subject_id
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'verification outbox subject does not exist');
+	END;
+
+	CREATE TRIGGER trg_outbox_events_heal_terminal_subject
+	BEFORE INSERT ON outbox_events
+	WHEN NEW.subject_type = 'extractor_heal' AND NOT EXISTS (
+		SELECT 1 FROM extractor_heal_runs run
+		WHERE run.id = NEW.subject_id AND (
+			(NEW.event_type = 'extractor.promoted' AND run.state = 'promoted') OR
+			(NEW.event_type = 'extractor.degraded' AND
+				run.state IN ('degraded', 'failed'))
+		)
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'extractor heal outbox subject is not terminal');
+	END;
+
+	INSERT INTO outbox_events (
+		id, verification_id, subject_type, subject_id, event_type,
+		destination_url, secret, payload, created_at, attempt_count,
+		last_attempt_at, last_error, next_attempt_at, delivered_at, failed_at
+	)
+	SELECT
+		id, verification_id, 'verification', verification_id, event_type,
+		destination_url, secret, payload, created_at, attempt_count,
+		last_attempt_at, last_error, next_attempt_at, delivered_at, failed_at
+	FROM outbox_events_verification_v2;
+
+	DROP TABLE outbox_events_verification_v2;
+
+	CREATE INDEX idx_outbox_events_pending
+		ON outbox_events(next_attempt_at, created_at, id)
+		WHERE delivered_at IS NULL AND failed_at IS NULL;
+	CREATE INDEX idx_outbox_events_verification
+		ON outbox_events(verification_id)
+		WHERE verification_id IS NOT NULL;
+	CREATE INDEX idx_outbox_events_subject
+		ON outbox_events(subject_type, subject_id);
+
+	CREATE TRIGGER trg_outbox_events_immutable_identity
+	BEFORE UPDATE ON outbox_events
+	WHEN
+		OLD.id IS NOT NEW.id OR
+		OLD.verification_id IS NOT NEW.verification_id OR
+		OLD.subject_type IS NOT NEW.subject_type OR
+		OLD.subject_id IS NOT NEW.subject_id OR
+		OLD.event_type IS NOT NEW.event_type OR
+		OLD.destination_url IS NOT NEW.destination_url OR
+		OLD.secret IS NOT NEW.secret OR
+		OLD.payload IS NOT NEW.payload OR
+		OLD.created_at IS NOT NEW.created_at
+	BEGIN
+		SELECT RAISE(ABORT, 'outbox event identity is immutable');
+	END;`,
 }

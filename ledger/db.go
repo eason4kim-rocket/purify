@@ -216,9 +216,12 @@ func (s *Store) RecordVerificationBatch(
 	}
 	var validatedEvent *validatedOutboxEvent
 	if event != nil {
-		value, err := validateNewOutboxEvent(*event, verificationID)
+		value, err := validateNewOutboxEvent(*event)
 		if err != nil {
 			return err
+		}
+		if value.SubjectType != SubjectVerification || value.SubjectID != verificationID {
+			return outboxEventError("verification subject_id must match the verification batch")
 		}
 		validatedEvent = &value
 	}
@@ -266,11 +269,11 @@ func (s *Store) RecordVerificationBatch(
 			}
 		}
 		if validatedEvent != nil {
-			matches, err := existingOutboxMatches(ctx, tx, *validatedEvent)
+			found, matches, err := findExistingOutbox(ctx, tx, *validatedEvent)
 			if err != nil {
 				return err
 			}
-			if !matches {
+			if !found || !matches {
 				return fmt.Errorf("%w: type %q verification_id %q", ErrOutboxConflict, validatedEvent.Type, verificationID)
 			}
 		}

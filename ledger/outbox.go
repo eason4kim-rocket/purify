@@ -33,6 +33,16 @@ const (
 	// MaxOutboxLastErrorBytes is the largest persisted delivery error.
 	MaxOutboxLastErrorBytes = 64 << 10
 
+	// SubjectVerification retains the original verification-scoped outbox
+	// identity. SubjectExtractorHeal scopes extractor lifecycle events to one
+	// durable extractor_heal_runs row, rather than to an extractor lineage that
+	// can produce more than one event over time.
+	SubjectVerification  = "verification"
+	SubjectExtractorHeal = "extractor_heal"
+
+	ExtractorPromotedEvent = "extractor.promoted"
+	ExtractorDegradedEvent = "extractor.degraded"
+
 	outboxTimeLayout = "2006-01-02T15:04:05.000000000Z07:00"
 )
 
@@ -44,12 +54,15 @@ var (
 )
 
 // OutboxEvent is one durable webhook delivery. ID is the downstream
-// idempotency key; Type plus VerificationID is the ledger's logical uniqueness
-// key. Mutable delivery fields are populated by PendingOutbox and changed only
-// through the MarkOutbox methods.
+// idempotency key; Type plus SubjectType plus SubjectID is the ledger's logical
+// uniqueness key. VerificationID is retained as a compatibility alias for a
+// verification subject. Mutable delivery fields are populated by PendingOutbox
+// and changed only through the MarkOutbox methods.
 type OutboxEvent struct {
 	ID             string
 	VerificationID string
+	SubjectType    string
+	SubjectID      string
 	Type           string
 	URL            string
 	Secret         string
@@ -66,6 +79,8 @@ type OutboxEvent struct {
 type validatedOutboxEvent struct {
 	ID             string
 	VerificationID string
+	SubjectType    string
+	SubjectID      string
 	Type           string
 	URL            string
 	Secret         string
@@ -74,25 +89,24 @@ type validatedOutboxEvent struct {
 	NextAttemptAt  string
 }
 
-func validateNewOutboxEvent(event OutboxEvent, verificationID string) (validatedOutboxEvent, error) {
+func validateNewOutboxEvent(event OutboxEvent) (validatedOutboxEvent, error) {
 	id, err := validateOutboxIdentifier("id", event.ID, MaxOutboxIDBytes)
 	if err != nil {
 		return validatedOutboxEvent{}, err
 	}
-	eventVerificationID, err := validateOutboxIdentifier(
-		"verification_id",
-		event.VerificationID,
-		MaxOutboxIDBytes,
-	)
+	subjectType, subjectID, eventVerificationID, err := validateOutboxSubject(event)
 	if err != nil {
 		return validatedOutboxEvent{}, err
-	}
-	if eventVerificationID != verificationID {
-		return validatedOutboxEvent{}, outboxEventError("verification_id must match the verification batch")
 	}
 	eventType, err := validateOutboxIdentifier("type", event.Type, MaxOutboxTypeBytes)
 	if err != nil {
 		return validatedOutboxEvent{}, err
+	}
+	if subjectType == SubjectExtractorHeal &&
+		eventType != ExtractorPromotedEvent && eventType != ExtractorDegradedEvent {
+		return validatedOutboxEvent{}, outboxEventError(
+			"extractor_heal events must use a supported extractor lifecycle type",
+		)
 	}
 	if err := validateOutboxURL(event.URL); err != nil {
 		return validatedOutboxEvent{}, err
@@ -127,6 +141,8 @@ func validateNewOutboxEvent(event OutboxEvent, verificationID string) (validated
 	return validatedOutboxEvent{
 		ID:             id,
 		VerificationID: eventVerificationID,
+		SubjectType:    subjectType,
+		SubjectID:      subjectID,
 		Type:           eventType,
 		URL:            event.URL,
 		Secret:         event.Secret,
@@ -134,6 +150,90 @@ func validateNewOutboxEvent(event OutboxEvent, verificationID string) (validated
 		CreatedAt:      formatOutboxTime(event.CreatedAt),
 		NextAttemptAt:  formatOutboxTime(nextAttemptAt),
 	}, nil
+}
+
+func validateOutboxSubject(event OutboxEvent) (subjectType, subjectID, verificationID string, err error) {
+	subjectType = event.SubjectType
+	subjectID = event.SubjectID
+	verificationID = event.VerificationID
+
+	// The original public contract identified verification events with only
+	// VerificationID. Preserve it exactly while normalizing every new write to
+	// the subject-aware durable representation.
+	if subjectType == "" && subjectID == "" {
+		verificationID, err = validateOutboxIdentifier(
+			"verification_id",
+			verificationID,
+			MaxOutboxIDBytes,
+		)
+		if err != nil {
+			return "", "", "", err
+		}
+		return SubjectVerification, verificationID, verificationID, nil
+	}
+	if subjectType == "" || subjectID == "" {
+		return "", "", "", outboxEventError("subject_type and subject_id must be supplied together")
+	}
+	subjectType, err = validateOutboxIdentifier("subject_type", subjectType, MaxOutboxTypeBytes)
+	if err != nil {
+		return "", "", "", err
+	}
+	subjectID, err = validateOutboxIdentifier("subject_id", subjectID, MaxOutboxIDBytes)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	switch subjectType {
+	case SubjectVerification:
+		if verificationID == "" {
+			verificationID = subjectID
+		} else {
+			verificationID, err = validateOutboxIdentifier(
+				"verification_id",
+				verificationID,
+				MaxOutboxIDBytes,
+			)
+			if err != nil {
+				return "", "", "", err
+			}
+			if verificationID != subjectID {
+				return "", "", "", outboxEventError(
+					"verification_id must equal the verification subject_id",
+				)
+			}
+		}
+	case SubjectExtractorHeal:
+		if verificationID != "" {
+			return "", "", "", outboxEventError(
+				"extractor_heal events cannot contain verification_id",
+			)
+		}
+		if !isLowercaseUUID(subjectID) {
+			return "", "", "", outboxEventError(
+				"extractor_heal subject_id must be a lowercase UUID",
+			)
+		}
+	default:
+		return "", "", "", outboxEventError("unsupported subject_type")
+	}
+	return subjectType, subjectID, verificationID, nil
+}
+
+func isLowercaseUUID(value string) bool {
+	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
+		return false
+	}
+	for index, current := range value {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			continue
+		}
+		if current < '0' || current > '9' {
+			if current < 'a' || current > 'f' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validateOutboxIdentifier(label, value string, maximum int) (string, error) {
@@ -217,13 +317,50 @@ func parseOutboxTime(label, value string) (time.Time, error) {
 	return parsed.UTC(), nil
 }
 
-func insertOutboxEvent(ctx context.Context, tx *sql.Tx, event validatedOutboxEvent) error {
+type outboxWriteTx interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+// EnqueueOutbox validates and durably enqueues one terminal extractor-heal
+// event inside a caller-owned Store.Update transaction. Verification events
+// must use RecordVerificationBatch so they cannot become detached from their
+// verification rows. An exact logical retry is an idempotent no-op. Reusing
+// either its logical key with different immutable content or its downstream ID
+// for another event fails with ErrOutboxConflict.
+func EnqueueOutbox(ctx context.Context, tx WriteTx, event OutboxEvent) error {
+	if ctx == nil {
+		return outboxEventError("context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if tx == nil {
+		return outboxEventError("write transaction is required")
+	}
+	validated, err := validateNewOutboxEvent(event)
+	if err != nil {
+		return err
+	}
+	if validated.SubjectType != SubjectExtractorHeal {
+		return outboxEventError("verification events require RecordVerificationBatch")
+	}
+	return enqueueValidatedOutbox(ctx, tx, validated)
+}
+
+func insertOutboxEvent(ctx context.Context, tx outboxWriteTx, event validatedOutboxEvent) error {
+	var verificationID any
+	if event.VerificationID != "" {
+		verificationID = event.VerificationID
+	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO outbox_events (
-		id, verification_id, event_type, destination_url, secret, payload,
-		created_at, next_attempt_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, verification_id, subject_type, subject_id, event_type,
+		destination_url, secret, payload, created_at, next_attempt_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.ID,
-		event.VerificationID,
+		verificationID,
+		event.SubjectType,
+		event.SubjectID,
 		event.Type,
 		event.URL,
 		event.Secret,
@@ -237,24 +374,87 @@ func insertOutboxEvent(ctx context.Context, tx *sql.Tx, event validatedOutboxEve
 	return nil
 }
 
-func existingOutboxMatches(ctx context.Context, tx *sql.Tx, event validatedOutboxEvent) (bool, error) {
+func findExistingOutbox(
+	ctx context.Context,
+	tx outboxWriteTx,
+	event validatedOutboxEvent,
+) (found, matches bool, err error) {
 	var id, destinationURL, secret, payload, createdAt string
-	err := tx.QueryRowContext(ctx, `SELECT id, destination_url, secret, payload, created_at
-		FROM outbox_events WHERE event_type = ? AND verification_id = ?`,
+	err = tx.QueryRowContext(ctx, `SELECT
+		id, destination_url, secret, payload, created_at
+		FROM outbox_events
+		WHERE event_type = ? AND subject_type = ? AND subject_id = ?`,
 		event.Type,
-		event.VerificationID,
+		event.SubjectType,
+		event.SubjectID,
 	).Scan(&id, &destinationURL, &secret, &payload, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return false, false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("ledger: read existing outbox event: %w", err)
+		return false, false, fmt.Errorf("ledger: read existing outbox event: %w", err)
 	}
-	// Type plus VerificationID is the logical idempotency key. The first durable
-	// ID remains the downstream key when a semantically identical retry supplies
-	// a different generated ID.
+	// The first durable ID remains the downstream key when a semantically
+	// identical retry supplies a different generated ID.
 	_ = id
-	return destinationURL == event.URL && secret == event.Secret && payload == event.Payload && createdAt == event.CreatedAt, nil
+	return true, destinationURL == event.URL && secret == event.Secret &&
+		payload == event.Payload && createdAt == event.CreatedAt, nil
+}
+
+func enqueueValidatedOutbox(ctx context.Context, tx outboxWriteTx, event validatedOutboxEvent) error {
+	if err := validateOutboxSubjectState(ctx, tx, event); err != nil {
+		return err
+	}
+	found, matches, err := findExistingOutbox(ctx, tx, event)
+	if err != nil {
+		return err
+	}
+	if found {
+		if matches {
+			return nil
+		}
+		return fmt.Errorf("%w: logical event content differs", ErrOutboxConflict)
+	}
+
+	var existingSubjectType string
+	err = tx.QueryRowContext(ctx,
+		"SELECT subject_type FROM outbox_events WHERE id = ?",
+		event.ID,
+	).Scan(&existingSubjectType)
+	if err == nil {
+		return fmt.Errorf("%w: downstream event id is already in use", ErrOutboxConflict)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("ledger: inspect outbox event id: %w", err)
+	}
+	return insertOutboxEvent(ctx, tx, event)
+}
+
+func validateOutboxSubjectState(
+	ctx context.Context,
+	tx outboxWriteTx,
+	event validatedOutboxEvent,
+) error {
+	if event.SubjectType != SubjectExtractorHeal {
+		return nil
+	}
+	var state string
+	err := tx.QueryRowContext(ctx,
+		"SELECT state FROM extractor_heal_runs WHERE id = ?",
+		event.SubjectID,
+	).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return outboxEventError("extractor_heal subject must reference a durable terminal heal run")
+	}
+	if err != nil {
+		return fmt.Errorf("ledger: validate outbox subject state: %w", err)
+	}
+	valid := event.Type == ExtractorPromotedEvent && state == "promoted" ||
+		event.Type == ExtractorDegradedEvent && (state == "degraded" || state == "failed")
+	if !valid {
+		return outboxEventError("extractor_heal event type must match the durable terminal state")
+	}
+	return nil
 }
 
 // PendingOutbox returns at most limit due, non-terminal events in stable order.
@@ -307,7 +507,8 @@ func (s *Store) PendingOutbox(
 		FROM candidates
 	)
 	SELECT
-		e.id, e.verification_id, e.event_type, e.destination_url, e.secret, e.payload,
+		e.id, e.verification_id, e.subject_type, e.subject_id, e.event_type,
+		e.destination_url, e.secret, e.payload,
 		e.created_at, e.attempt_count, e.last_attempt_at, e.last_error,
 		e.next_attempt_at, e.delivered_at, e.failed_at
 	FROM selected AS s
@@ -350,11 +551,14 @@ func scanOutboxEvent(scanner outboxScanner) (OutboxEvent, error) {
 	var (
 		event                                OutboxEvent
 		payload, createdAt, nextAttemptAt    string
+		verificationID                       sql.NullString
 		lastAttemptAt, deliveredAt, failedAt sql.NullString
 	)
 	if err := scanner.Scan(
 		&event.ID,
-		&event.VerificationID,
+		&verificationID,
+		&event.SubjectType,
+		&event.SubjectID,
 		&event.Type,
 		&event.URL,
 		&event.Secret,
@@ -372,11 +576,17 @@ func scanOutboxEvent(scanner outboxScanner) (OutboxEvent, error) {
 	if _, err := validateOutboxIdentifier("stored id", event.ID, MaxOutboxIDBytes); err != nil {
 		return OutboxEvent{}, err
 	}
-	if _, err := validateOutboxIdentifier("stored verification_id", event.VerificationID, MaxOutboxIDBytes); err != nil {
-		return OutboxEvent{}, err
+	if verificationID.Valid {
+		event.VerificationID = verificationID.String
 	}
-	if _, err := validateOutboxIdentifier("stored type", event.Type, MaxOutboxTypeBytes); err != nil {
+	if _, _, _, err := validateOutboxSubject(event); err != nil {
+		return OutboxEvent{}, outboxEventError("stored subject is invalid")
+	}
+	if eventType, err := validateOutboxIdentifier("stored type", event.Type, MaxOutboxTypeBytes); err != nil {
 		return OutboxEvent{}, err
+	} else if event.SubjectType == SubjectExtractorHeal &&
+		eventType != ExtractorPromotedEvent && eventType != ExtractorDegradedEvent {
+		return OutboxEvent{}, outboxEventError("stored extractor_heal event type is invalid")
 	}
 	if err := validateOutboxURL(event.URL); err != nil {
 		return OutboxEvent{}, err
