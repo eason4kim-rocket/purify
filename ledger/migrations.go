@@ -265,4 +265,118 @@ var migrations = []string{
 
 	CREATE INDEX idx_extractor_page_bindings_extractor
 		ON extractor_page_bindings(extractor_id);`,
+	`CREATE TABLE compiler_samples (
+		host TEXT NOT NULL CHECK (
+			typeof(host) = 'text' AND length(host) BETWEEN 1 AND 253 AND
+			host = lower(host) AND host = trim(host)
+		),
+		schema_hash TEXT NOT NULL CHECK (
+			typeof(schema_hash) = 'text' AND length(schema_hash) = 64 AND
+			schema_hash NOT GLOB '*[^0-9a-f]*'
+		),
+		content_profile TEXT NOT NULL CHECK (
+			typeof(content_profile) = 'text' AND
+			content_profile = 'extract-default-v1'
+		),
+		template_cluster_id TEXT NOT NULL CHECK (
+			typeof(template_cluster_id) = 'text' AND
+			length(template_cluster_id) = 64 AND
+			template_cluster_id NOT GLOB '*[^0-9a-f]*'
+		),
+		cluster_simhash BLOB NOT NULL CHECK (
+			typeof(cluster_simhash) = 'blob' AND
+			length(cluster_simhash) = 8 AND
+			cluster_simhash <> zeroblob(8)
+		),
+		sample_simhash BLOB NOT NULL CHECK (
+			typeof(sample_simhash) = 'blob' AND
+			length(sample_simhash) = 8 AND
+			sample_simhash <> zeroblob(8)
+		),
+		page_hash TEXT NOT NULL CHECK (
+			typeof(page_hash) = 'text' AND length(page_hash) = 64 AND
+			page_hash NOT GLOB '*[^0-9a-f]*'
+		),
+		snapshot_id TEXT NOT NULL CHECK (
+			typeof(snapshot_id) = 'text' AND length(snapshot_id) = 71 AND
+			substr(snapshot_id, 1, 7) = 'sha256:' AND
+			substr(snapshot_id, 8) NOT GLOB '*[^0-9a-f]*'
+		),
+		fetched_at TEXT NOT NULL CHECK (
+			typeof(fetched_at) = 'text' AND length(fetched_at) = 30 AND
+			substr(fetched_at, 5, 1) = '-' AND substr(fetched_at, 8, 1) = '-' AND
+			substr(fetched_at, 11, 1) = 'T' AND substr(fetched_at, 14, 1) = ':' AND
+			substr(fetched_at, 17, 1) = ':' AND substr(fetched_at, 20, 1) = '.' AND
+			substr(fetched_at, 30, 1) = 'Z' AND julianday(fetched_at) IS NOT NULL
+		),
+		first_seen_at TEXT NOT NULL CHECK (
+			typeof(first_seen_at) = 'text' AND length(first_seen_at) = 30 AND
+			substr(first_seen_at, 5, 1) = '-' AND substr(first_seen_at, 8, 1) = '-' AND
+			substr(first_seen_at, 11, 1) = 'T' AND substr(first_seen_at, 14, 1) = ':' AND
+			substr(first_seen_at, 17, 1) = ':' AND substr(first_seen_at, 20, 1) = '.' AND
+			substr(first_seen_at, 30, 1) = 'Z' AND julianday(first_seen_at) IS NOT NULL
+		),
+		last_seen_at TEXT NOT NULL CHECK (
+			typeof(last_seen_at) = 'text' AND length(last_seen_at) = 30 AND
+			substr(last_seen_at, 5, 1) = '-' AND substr(last_seen_at, 8, 1) = '-' AND
+			substr(last_seen_at, 11, 1) = 'T' AND substr(last_seen_at, 14, 1) = ':' AND
+			substr(last_seen_at, 17, 1) = ':' AND substr(last_seen_at, 20, 1) = '.' AND
+			substr(last_seen_at, 30, 1) = 'Z' AND julianday(last_seen_at) IS NOT NULL
+		),
+		CHECK (last_seen_at >= first_seen_at),
+		PRIMARY KEY (host, schema_hash, content_profile, page_hash)
+	) STRICT, WITHOUT ROWID;
+
+	CREATE INDEX idx_compiler_samples_compile
+		ON compiler_samples(
+			host, schema_hash, content_profile, template_cluster_id,
+			fetched_at DESC, page_hash, snapshot_id
+		);
+	CREATE INDEX idx_compiler_samples_cluster
+		ON compiler_samples(
+			host, schema_hash, content_profile, template_cluster_id,
+			cluster_simhash
+		);
+
+	CREATE TRIGGER trg_compiler_samples_fixed_cluster_insert
+	BEFORE INSERT ON compiler_samples
+	WHEN EXISTS (
+		SELECT 1 FROM compiler_samples existing
+		WHERE existing.host = NEW.host
+			AND existing.schema_hash = NEW.schema_hash
+			AND existing.content_profile = NEW.content_profile
+			AND (
+				(existing.template_cluster_id = NEW.template_cluster_id AND
+					existing.cluster_simhash IS NOT NEW.cluster_simhash) OR
+				(existing.cluster_simhash = NEW.cluster_simhash AND
+					existing.template_cluster_id IS NOT NEW.template_cluster_id)
+			)
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'compiler sample cluster representative is not fixed');
+	END;
+
+	CREATE TRIGGER trg_compiler_samples_identity_immutable
+	BEFORE UPDATE ON compiler_samples
+	WHEN
+		OLD.host IS NOT NEW.host OR
+		OLD.schema_hash IS NOT NEW.schema_hash OR
+		OLD.content_profile IS NOT NEW.content_profile OR
+		OLD.template_cluster_id IS NOT NEW.template_cluster_id OR
+		OLD.cluster_simhash IS NOT NEW.cluster_simhash OR
+		OLD.sample_simhash IS NOT NEW.sample_simhash OR
+		OLD.page_hash IS NOT NEW.page_hash OR
+		OLD.snapshot_id IS NOT NEW.snapshot_id OR
+		OLD.fetched_at IS NOT NEW.fetched_at OR
+		OLD.first_seen_at IS NOT NEW.first_seen_at
+	BEGIN
+		SELECT RAISE(ABORT, 'compiler sample identity is immutable');
+	END;
+
+	CREATE TRIGGER trg_compiler_samples_last_seen_monotonic
+	BEFORE UPDATE OF last_seen_at ON compiler_samples
+	WHEN NEW.last_seen_at < OLD.last_seen_at
+	BEGIN
+		SELECT RAISE(ABORT, 'compiler sample last_seen_at cannot move backward');
+	END;`,
 }
