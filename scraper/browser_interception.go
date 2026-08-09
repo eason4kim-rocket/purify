@@ -200,11 +200,9 @@ func handlePausedRequest(
 		_ = (proto.FetchContinueRequest{RequestID: event.RequestID}).Call(page)
 		return
 	}
-	isMainDocument := event.ResourceType == proto.NetworkResourceTypeDocument && event.FrameID == mainFrameID
-	perResourceLimit := int64(0)
-	if isMainDocument {
-		perResourceLimit = maximumBodyBytes
-	}
+	// Every decoded HTTP(S) response gets the caller's main-document limit;
+	// the separate shared budget still caps the whole page session at 4x.
+	perResourceLimit := maximumBodyBytes
 	if length, known := decodedContentLength(event.ResponseHeaders); known &&
 		(perResourceLimit > 0 && length > perResourceLimit || length > interception.budget.remaining()) {
 		if perResourceLimit > 0 && length > perResourceLimit {

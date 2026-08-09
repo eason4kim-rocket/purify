@@ -149,11 +149,12 @@ func TestBoundedBrowserEnforcesOneDecodedBudgetAcrossSubresources(t *testing.T) 
 	browserBin := boundedBrowserTestBinary(t)
 	const mainLimit = int64(1024)
 	const totalLimit = mainLimit * 4
-	exactPage := `<html><head><script src="/resource-exact.js"></script></head><body>total-exact</body></html>`
-	overPage := `<html><head><script src="/resource-over.js"></script></head><body>total-over</body></html>`
-	exactResourceSize := int(totalLimit) - len(exactPage)
-	overResourceSize := int(totalLimit) - len(overPage)
-	if exactResourceSize <= 4 || overResourceSize <= 4 {
+	exactPage := `<html><head><script src="/exact-0.js"></script><script src="/exact-1.js"></script><script src="/exact-2.js"></script><script src="/exact-3.js"></script></head><body>total-exact</body></html>`
+	overPage := `<html><head><script src="/over-0.js"></script><script src="/over-1.js"></script><script src="/over-2.js"></script><script src="/over-3.js"></script></head><body>total-over</body></html>`
+	exactFinalResourceSize := int(totalLimit) - len(exactPage) - 3*int(mainLimit)
+	overFinalResourceSize := int(totalLimit) - len(overPage) - 3*int(mainLimit)
+	if exactFinalResourceSize <= 4 || exactFinalResourceSize > int(mainLimit) ||
+		overFinalResourceSize <= 4 || overFinalResourceSize > int(mainLimit) {
 		t.Fatal("invalid total-resource fixture size")
 	}
 	var exactHits atomic.Int32
@@ -167,11 +168,19 @@ func TestBoundedBrowserEnforcesOneDecodedBudgetAcrossSubresources(t *testing.T) 
 		case "/over-page":
 			writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 			_, _ = writer.Write([]byte(overPage))
-		case "/resource-exact.js":
+		case "/exact-0.js", "/exact-1.js", "/exact-2.js":
 			exactHits.Add(1)
 			writer.Header().Set("Content-Type", "application/javascript")
-			_, _ = writer.Write(scriptFixture(exactResourceSize))
-		case "/resource-over.js":
+			_, _ = writer.Write(scriptFixture(int(mainLimit)))
+		case "/exact-3.js":
+			exactHits.Add(1)
+			writer.Header().Set("Content-Type", "application/javascript")
+			_, _ = writer.Write(scriptFixture(exactFinalResourceSize))
+		case "/over-0.js", "/over-1.js", "/over-2.js":
+			overHits.Add(1)
+			writer.Header().Set("Content-Type", "application/javascript")
+			_, _ = writer.Write(scriptFixture(int(mainLimit)))
+		case "/over-3.js":
 			overHits.Add(1)
 			writer.Header().Set("Content-Type", "application/javascript")
 			flusher, ok := writer.(http.Flusher)
@@ -179,7 +188,7 @@ func TestBoundedBrowserEnforcesOneDecodedBudgetAcrossSubresources(t *testing.T) 
 				t.Error("test response writer does not implement http.Flusher")
 				return
 			}
-			_, _ = writer.Write(scriptFixture(overResourceSize))
+			_, _ = writer.Write(scriptFixture(overFinalResourceSize))
 			flusher.Flush()
 			_, _ = writer.Write([]byte("x"))
 			flusher.Flush()
@@ -200,7 +209,7 @@ func TestBoundedBrowserEnforcesOneDecodedBudgetAcrossSubresources(t *testing.T) 
 		URL:     server.URL + "/exact-page",
 		Timeout: 5,
 	}, mainLimit)
-	if err != nil || !strings.Contains(result.RawHTML, "total-exact") || exactHits.Load() != 1 {
+	if err != nil || !strings.Contains(result.RawHTML, "total-exact") || exactHits.Load() != 4 {
 		t.Fatalf("exact total-resource budget = (%#v, %v), resource hits=%d", result, err, exactHits.Load())
 	}
 
@@ -208,13 +217,60 @@ func TestBoundedBrowserEnforcesOneDecodedBudgetAcrossSubresources(t *testing.T) 
 		URL:     server.URL + "/over-page",
 		Timeout: 5,
 	}, mainLimit)
-	if !errors.Is(err, engine.ErrResponseBodyTooLarge) || overHits.Load() != 1 {
+	if !errors.Is(err, engine.ErrResponseBodyTooLarge) || overHits.Load() != 4 {
 		t.Fatalf("total-resource N+1 error = %v, resource hits=%d", err, overHits.Load())
 	}
 	select {
 	case <-overCanceled:
 	case <-time.After(2 * time.Second):
 		t.Fatal("total-resource N+1 response remained open")
+	}
+}
+
+func TestBoundedBrowserEnforcesEachDecodedSubresourceLimit(t *testing.T) {
+	browserBin := boundedBrowserTestBinary(t)
+	const limit = int64(1024)
+	exactPage := `<html><head><script src="/resource-exact.js"></script></head><body>resource-exact</body></html>`
+	overPage := `<html><head><script src="/resource-over.js"></script></head><body>resource-over</body></html>`
+	var exactHits atomic.Int32
+	var overHits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/exact-page":
+			writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = writer.Write([]byte(exactPage))
+		case "/over-page":
+			writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = writer.Write([]byte(overPage))
+		case "/resource-exact.js":
+			exactHits.Add(1)
+			writer.Header().Set("Content-Type", "application/javascript")
+			_, _ = writer.Write(scriptFixture(int(limit)))
+		case "/resource-over.js":
+			overHits.Add(1)
+			writer.Header().Set("Content-Type", "application/javascript")
+			_, _ = writer.Write(scriptFixture(int(limit) + 1))
+		default:
+			writer.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	sc := newBoundedBrowserTestScraper(t, browserBin, 1)
+	result, err := sc.DoScrapeRodBounded(context.Background(), &models.ScrapeRequest{
+		URL:     server.URL + "/exact-page",
+		Timeout: 5,
+	}, limit)
+	if err != nil || !strings.Contains(result.RawHTML, "resource-exact") || exactHits.Load() != 1 {
+		t.Fatalf("exact subresource = (%#v, %v), hits=%d", result, err, exactHits.Load())
+	}
+
+	_, err = sc.DoScrapeRodBounded(context.Background(), &models.ScrapeRequest{
+		URL:     server.URL + "/over-page",
+		Timeout: 5,
+	}, limit)
+	if !errors.Is(err, engine.ErrResponseBodyTooLarge) || overHits.Load() != 1 {
+		t.Fatalf("subresource N+1 error = %v, hits=%d", err, overHits.Load())
 	}
 }
 

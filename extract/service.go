@@ -35,6 +35,7 @@ const (
 	maximumExtractBaseURLBytes    = 16 << 10
 	maximumExtractModelBytes      = 256
 	maximumExtractArtifactBytes   = consensus.MaxSourceDataBytes
+	defaultPublicArtifactTimeout  = 30
 	extractDataPreflightURL       = "https://preflight.example.com/"
 )
 
@@ -72,8 +73,10 @@ type CompileObserver interface {
 }
 
 // Artifact keeps the public cleaned page and its selected raw source together.
-// Source may be nil only when an external caller deliberately supplies a
-// response-only artifact; evidence and deterministic compilation require it.
+// Callers sharing one Artifact across content, verification, and structured
+// extraction consumers must treat it as read-only. Source may be nil only when
+// an external caller deliberately supplies a response-only artifact; evidence
+// and deterministic compilation require it.
 type Artifact struct {
 	Public *models.ScrapeResponse
 	Source *scraper.ScrapeResult
@@ -85,7 +88,8 @@ type Config struct {
 	CompiledRepository CompiledRepository
 	CompileObserver    CompileObserver
 	// SafeProxyURL is the process-owned loopback SOCKS5 boundary required by
-	// multi-source extraction. It is never accepted from a request.
+	// public artifact and multi-source fetching. It is never accepted from a
+	// request.
 	SafeProxyURL string
 	// SourceSlots bounds source work across all concurrent multi requests made
 	// through this Service. Zero selects the default of four.
@@ -222,8 +226,10 @@ func (s *Service) Extract(ctx context.Context, request *models.ExtractRequest) (
 	return response, nil
 }
 
-// FetchArtifact exposes one fresh canonical scrape for Search and other
-// orchestrators that need to reuse the same fetch across multiple consumers.
+// FetchArtifact exposes one fresh canonical scrape to trusted Go callers. It
+// accepts caller-controlled network options and therefore must not be used for
+// untrusted URLs such as search-provider results; use FetchPublicArtifact for
+// those instead.
 func (s *Service) FetchArtifact(ctx context.Context, request *models.ScrapeRequest) (*Artifact, error) {
 	if request == nil {
 		return nil, models.NewScrapeError(models.ErrCodeInvalidInput, "scrape request is required", nil)
@@ -232,6 +238,124 @@ func (s *Service) FetchArtifact(ctx context.Context, request *models.ScrapeReque
 	models.ApplyScrapeOptions(&cloned, models.ScrapeOptionsFromRequest(request))
 	cloned.MaxAge = 0
 	return s.fetchArtifact(ctx, &cloned)
+}
+
+// FetchPublicArtifact performs one fresh canonical scrape of an untrusted
+// public HTTP(S) URL. The caller controls only the URL and context deadline;
+// cache, proxy, browser state, and fetch-size policy are fixed by Service. The
+// returned Artifact can be reused by verification, content, and schema
+// consumers without another fetch and must be treated as read-only.
+func (s *Service) FetchPublicArtifact(ctx context.Context, rawURL string) (*Artifact, error) {
+	if ctx == nil {
+		return nil, models.NewScrapeError(models.ErrCodeInvalidInput, "public artifact context is required", nil)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, publicArtifactFetchError(ctx, err)
+	}
+	canonicalURL, err := normalizePublicArtifactURL(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	if s == nil || s.runner == nil || s.safeProxyURL == "" {
+		return nil, models.NewScrapeError(models.ErrCodeInternal, "public artifact fetching is unavailable", nil)
+	}
+
+	waitForNetworkIdle := true
+	artifact, err := s.fetchArtifact(ctx, &models.ScrapeRequest{
+		URL:                canonicalURL,
+		WaitForNetworkIdle: &waitForNetworkIdle,
+		Timeout:            defaultPublicArtifactTimeout,
+		ProxyURL:           s.safeProxyURL,
+		OutputFormat:       "markdown",
+		ExtractMode:        "readability",
+		MaxAge:             0,
+		MaximumBodyBytes:   maximumExtractArtifactBytes,
+	})
+	if err != nil {
+		return nil, publicArtifactFetchError(ctx, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, publicArtifactFetchError(ctx, err)
+	}
+	if err := validatePublicArtifact(artifact); err != nil {
+		return nil, err
+	}
+	return artifact, nil
+}
+
+func normalizePublicArtifactURL(rawURL string) (string, error) {
+	if err := validateExtractText("public artifact URL", rawURL, maximumExtractURLBytes, false); err != nil {
+		return "", models.NewScrapeError(models.ErrCodeInvalidInput, "public artifact URL is invalid", nil)
+	}
+	canonicalURL, _, err := publicnet.NormalizeHTTPURL(rawURL, nil, false)
+	if err != nil || len(canonicalURL) > maximumExtractURLBytes {
+		return "", models.NewScrapeError(models.ErrCodeInvalidInput, "public artifact URL is invalid", nil)
+	}
+	return canonicalURL, nil
+}
+
+func publicArtifactFetchError(ctx context.Context, err error) error {
+	if (ctx != nil && ctx.Err() != nil) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return models.NewScrapeError(models.ErrCodeTimeout, "public artifact fetch timed out", err)
+	}
+	code := models.ErrCodeNavigation
+	var scrapeError *models.ScrapeError
+	if errors.As(err, &scrapeError) && isPublicArtifactRunnerCode(scrapeError.Code) {
+		code = scrapeError.Code
+	}
+	return models.NewScrapeError(code, "public artifact fetch failed", err)
+}
+
+func isPublicArtifactRunnerCode(code string) bool {
+	switch code {
+	case models.ErrCodeTimeout,
+		models.ErrCodeNavigation,
+		models.ErrCodeReadability,
+		models.ErrCodeBrowserCrash,
+		models.ErrCodeRateLimited,
+		models.ErrCodeUnauthorized,
+		models.ErrCodeInternal,
+		models.ErrCodeActionFailed,
+		models.ErrCodeContentUnusable:
+		return true
+	default:
+		return false
+	}
+}
+
+func validatePublicArtifact(artifact *Artifact) error {
+	if artifact == nil || artifact.Public == nil || artifact.Source == nil || !artifact.Public.Success ||
+		strings.TrimSpace(artifact.Source.RawHTML) == "" || artifact.Source.FetchedAt.IsZero() ||
+		artifact.Source.StatusCode < 100 || artifact.Source.StatusCode > 599 {
+		return models.NewScrapeError(models.ErrCodeInternal, "public artifact result is invalid", nil)
+	}
+	if len(artifact.Public.Content) > maximumExtractArtifactBytes ||
+		len(artifact.Source.RawHTML) > maximumExtractArtifactBytes {
+		return models.NewScrapeError(models.ErrCodeNavigation, "public artifact exceeds maximum size", nil)
+	}
+	if artifact.Public.StatusCode != 0 && artifact.Public.StatusCode != artifact.Source.StatusCode {
+		return models.NewScrapeError(models.ErrCodeInternal, "public artifact result is invalid", nil)
+	}
+
+	finalURL, _, err := publicnet.NormalizeHTTPURL(artifact.Source.FinalURL, nil, false)
+	if err != nil || len(finalURL) > maximumExtractURLBytes {
+		return models.NewScrapeError(models.ErrCodeNavigation, "public artifact final URL is invalid", nil)
+	}
+	for _, candidate := range []string{artifact.Public.FinalURL, artifact.Public.Metadata.SourceURL} {
+		if candidate == "" {
+			continue
+		}
+		canonical, _, normalizeErr := publicnet.NormalizeHTTPURL(candidate, nil, false)
+		if normalizeErr != nil || canonical != finalURL {
+			return models.NewScrapeError(models.ErrCodeInternal, "public artifact result is invalid", nil)
+		}
+	}
+
+	artifact.Source.FinalURL = finalURL
+	artifact.Public.FinalURL = finalURL
+	artifact.Public.Metadata.SourceURL = finalURL
+	artifact.Public.StatusCode = artifact.Source.StatusCode
+	return nil
 }
 
 // ExtractArtifact performs structured extraction against an already selected

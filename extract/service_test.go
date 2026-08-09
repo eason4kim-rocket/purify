@@ -19,6 +19,8 @@ import (
 	"github.com/use-agent/purify/snapshot"
 )
 
+const testPublicArtifactProxyURL = "socks5://127.0.0.1:19080"
+
 func TestServiceExtractUsesCanonicalRunnerAndRepairsOnce(t *testing.T) {
 	runner := &recordingRunner{result: successfulScrapeResult()}
 	client := &recordingExtractor{
@@ -227,6 +229,289 @@ func TestFetchArtifactBypassesCacheAndDetachesRequest(t *testing.T) {
 	*runner.request.OnlyMainContent = true
 	if request.Headers["X-Test"] != "one" || request.Cookies[0].Value != "one" || request.Actions[0].Selector != "#one" || request.IncludeTags[0] != "main" || request.ExcludeTags[0] != "nav" || wait || onlyMain {
 		t.Fatalf("runner mutation escaped to caller: %#v", request)
+	}
+}
+
+func TestFetchPublicArtifactUsesFixedProfileAndReusesOneFetch(t *testing.T) {
+	result := successfulPublicArtifactResult()
+	result.Response.FinalURL = "HTTPS://Final.Example.Test:443/article#public"
+	result.Response.Metadata.SourceURL = "https://FINAL.example.test/article#metadata"
+	result.Source.FinalURL = "https://final.example.test:443/article#source"
+	runner := &recordingRunner{result: result}
+	client := &recordingExtractor{initial: &llm.ExtractResult{Data: json.RawMessage(`{"count":3}`)}}
+	service := newPublicArtifactTestService(t, runner, client)
+
+	artifact, err := service.FetchPublicArtifact(
+		context.Background(),
+		"HTTPS://Example.Test:443/page#provider-fragment",
+	)
+	if err != nil {
+		t.Fatalf("FetchPublicArtifact() error = %v", err)
+	}
+	if artifact == nil || artifact.Public == nil || artifact.Source == nil {
+		t.Fatalf("artifact = %#v", artifact)
+	}
+	if artifact.Public.FinalURL != "https://final.example.test/article" ||
+		artifact.Public.Metadata.SourceURL != artifact.Public.FinalURL ||
+		artifact.Source.FinalURL != artifact.Public.FinalURL {
+		t.Fatalf("canonical final URLs = public:%q metadata:%q source:%q",
+			artifact.Public.FinalURL, artifact.Public.Metadata.SourceURL, artifact.Source.FinalURL)
+	}
+	if runner.calls != 1 || runner.request == nil {
+		t.Fatalf("runner calls/request = %d/%#v", runner.calls, runner.request)
+	}
+	request := runner.request
+	if request.URL != "https://example.test/page" || request.ProxyURL != testPublicArtifactProxyURL ||
+		request.Timeout != defaultPublicArtifactTimeout || request.MaxAge != 0 ||
+		request.MaximumBodyBytes != maximumExtractArtifactBytes || request.OutputFormat != "markdown" ||
+		request.ExtractMode != "readability" || request.WaitForNetworkIdle == nil || !*request.WaitForNetworkIdle {
+		t.Fatalf("fixed public artifact request = %#v", request)
+	}
+	if request.Stealth || request.CDPURL != "" || request.CSSSelector != "" || len(request.Headers) != 0 ||
+		len(request.Cookies) != 0 || len(request.Actions) != 0 || len(request.IncludeTags) != 0 ||
+		len(request.ExcludeTags) != 0 || request.OnlyMainContent != nil || request.RemoveOverlays || request.BlockAds {
+		t.Fatalf("caller-controlled scrape state escaped fixed profile: %#v", request)
+	}
+
+	extractRequest := validExtractRequest()
+	extractRequest.URL = "https://example.test/page"
+	response, err := service.ExtractArtifact(context.Background(), artifact, extractRequest)
+	if err != nil || response == nil || !response.Success {
+		t.Fatalf("ExtractArtifact(reused) = %#v, %v", response, err)
+	}
+	if runner.calls != 1 || client.extractCalls != 1 {
+		t.Fatalf("reuse calls = runner:%d extractor:%d, want 1/1", runner.calls, client.extractCalls)
+	}
+}
+
+func TestFetchPublicArtifactValidatesURLBeforeExternalWork(t *testing.T) {
+	exactURL := "https://example.test/" + strings.Repeat("a", maximumExtractURLBytes-len("https://example.test/"))
+	invalidUTF8 := string(append([]byte("https://example.test/"), 0xff))
+	tests := []struct {
+		name    string
+		rawURL  string
+		wantErr bool
+	}{
+		{name: "exact URL bytes", rawURL: exactURL},
+		{name: "URL bytes N plus one", rawURL: exactURL + "a", wantErr: true},
+		{name: "empty", rawURL: "", wantErr: true},
+		{name: "relative", rawURL: "/relative", wantErr: true},
+		{name: "unsupported scheme", rawURL: "file:///etc/passwd", wantErr: true},
+		{name: "userinfo", rawURL: "https://user:secret@example.test/", wantErr: true},
+		{name: "localhost", rawURL: "http://localhost/", wantErr: true},
+		{name: "localhost suffix", rawURL: "http://api.localhost/", wantErr: true},
+		{name: "private IPv4", rawURL: "http://10.0.0.1/", wantErr: true},
+		{name: "reserved IPv4", rawURL: "http://169.254.169.254/latest/meta-data/", wantErr: true},
+		{name: "loopback IPv6", rawURL: "http://[::1]/", wantErr: true},
+		{name: "control", rawURL: "https://example.test/\nsecret", wantErr: true},
+		{name: "invalid UTF-8", rawURL: invalidUTF8, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &recordingRunner{result: successfulPublicArtifactResult()}
+			service := newPublicArtifactTestService(t, runner, &recordingExtractor{})
+			artifact, err := service.FetchPublicArtifact(context.Background(), test.rawURL)
+			if test.wantErr {
+				assertScrapeErrorCode(t, err, models.ErrCodeInvalidInput)
+				if artifact != nil || runner.calls != 0 {
+					t.Fatalf("invalid URL artifact/calls = %#v/%d", artifact, runner.calls)
+				}
+				return
+			}
+			if err != nil || artifact == nil || runner.calls != 1 || runner.request.URL != exactURL {
+				t.Fatalf("exact URL artifact/error/calls/request = %#v/%v/%d/%#v", artifact, err, runner.calls, runner.request)
+			}
+		})
+	}
+}
+
+func TestFetchPublicArtifactFailsClosedWithoutCapabilityOrContext(t *testing.T) {
+	t.Run("safe relay unavailable", func(t *testing.T) {
+		runner := &recordingRunner{result: successfulPublicArtifactResult()}
+		service := newTestService(t, runner, &recordingExtractor{}, nil)
+		_, err := service.FetchPublicArtifact(context.Background(), "https://example.test/")
+		assertScrapeErrorCode(t, err, models.ErrCodeInternal)
+		if runner.calls != 0 {
+			t.Fatalf("runner calls = %d, want zero", runner.calls)
+		}
+	})
+
+	t.Run("nil context", func(t *testing.T) {
+		runner := &recordingRunner{result: successfulPublicArtifactResult()}
+		service := newPublicArtifactTestService(t, runner, &recordingExtractor{})
+		_, err := service.FetchPublicArtifact(nil, "https://example.test/")
+		assertScrapeErrorCode(t, err, models.ErrCodeInvalidInput)
+		if runner.calls != 0 {
+			t.Fatalf("runner calls = %d, want zero", runner.calls)
+		}
+	})
+
+	t.Run("canceled context", func(t *testing.T) {
+		runner := &recordingRunner{result: successfulPublicArtifactResult()}
+		service := newPublicArtifactTestService(t, runner, &recordingExtractor{})
+		_, err := service.FetchPublicArtifact(canceledContext(), "https://example.test/")
+		assertScrapeErrorCode(t, err, models.ErrCodeTimeout)
+		if !errors.Is(err, context.Canceled) || runner.calls != 0 {
+			t.Fatalf("canceled error/calls = %v/%d", err, runner.calls)
+		}
+	})
+
+	t.Run("runner cancels before returning success", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		runner := &recordingRunner{
+			result:       successfulPublicArtifactResult(),
+			beforeReturn: cancel,
+		}
+		service := newPublicArtifactTestService(t, runner, &recordingExtractor{})
+		artifact, err := service.FetchPublicArtifact(ctx, "https://example.test/")
+		assertScrapeErrorCode(t, err, models.ErrCodeTimeout)
+		if artifact != nil || !errors.Is(err, context.Canceled) || runner.calls != 1 {
+			t.Fatalf("canceled artifact/error/calls = %#v/%v/%d", artifact, err, runner.calls)
+		}
+	})
+}
+
+func TestFetchPublicArtifactEnforcesArtifactByteBounds(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  int
+		rawHTML  int
+		wantCode string
+	}{
+		{name: "cleaned exact N", content: maximumExtractArtifactBytes, rawHTML: 16},
+		{name: "raw exact N", content: 16, rawHTML: maximumExtractArtifactBytes},
+		{name: "cleaned N plus one", content: maximumExtractArtifactBytes + 1, rawHTML: 16, wantCode: models.ErrCodeNavigation},
+		{name: "raw N plus one", content: 16, rawHTML: maximumExtractArtifactBytes + 1, wantCode: models.ErrCodeNavigation},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := successfulPublicArtifactResult()
+			result.Response.Content = strings.Repeat("c", test.content)
+			result.Source.RawHTML = strings.Repeat("r", test.rawHTML)
+			runner := &recordingRunner{result: result}
+			service := newPublicArtifactTestService(t, runner, &recordingExtractor{})
+			artifact, err := service.FetchPublicArtifact(context.Background(), "https://example.test/")
+			if test.wantCode != "" {
+				assertScrapeErrorCode(t, err, test.wantCode)
+				if artifact != nil {
+					t.Fatalf("oversized artifact = %#v", artifact)
+				}
+				return
+			}
+			if err != nil || artifact == nil {
+				t.Fatalf("exact artifact = %#v, %v", artifact, err)
+			}
+		})
+	}
+}
+
+func TestFetchPublicArtifactRejectsUnsafeOrInconsistentResults(t *testing.T) {
+	tests := []struct {
+		name     string
+		mutate   func(*scrape.Result)
+		wantCode string
+	}{
+		{name: "missing source", mutate: func(result *scrape.Result) { result.Source = nil }, wantCode: models.ErrCodeInternal},
+		{name: "empty raw source", mutate: func(result *scrape.Result) { result.Source.RawHTML = "" }, wantCode: models.ErrCodeInternal},
+		{name: "zero fetched at", mutate: func(result *scrape.Result) { result.Source.FetchedAt = time.Time{} }, wantCode: models.ErrCodeInternal},
+		{name: "invalid status", mutate: func(result *scrape.Result) { result.Source.StatusCode = 0 }, wantCode: models.ErrCodeInternal},
+		{name: "status mismatch", mutate: func(result *scrape.Result) { result.Response.StatusCode = 201 }, wantCode: models.ErrCodeInternal},
+		{name: "private final URL", mutate: func(result *scrape.Result) { result.Source.FinalURL = "http://127.0.0.1/admin" }, wantCode: models.ErrCodeNavigation},
+		{name: "relative final URL", mutate: func(result *scrape.Result) { result.Source.FinalURL = "/relative" }, wantCode: models.ErrCodeNavigation},
+		{name: "credential final URL", mutate: func(result *scrape.Result) { result.Source.FinalURL = "https://user:secret@example.test/" }, wantCode: models.ErrCodeNavigation},
+		{name: "public final mismatch", mutate: func(result *scrape.Result) { result.Response.FinalURL = "https://other.example.test/" }, wantCode: models.ErrCodeInternal},
+		{name: "metadata final mismatch", mutate: func(result *scrape.Result) { result.Response.Metadata.SourceURL = "https://other.example.test/" }, wantCode: models.ErrCodeInternal},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := successfulPublicArtifactResult()
+			test.mutate(result)
+			runner := &recordingRunner{result: result}
+			service := newPublicArtifactTestService(t, runner, &recordingExtractor{})
+			artifact, err := service.FetchPublicArtifact(context.Background(), "https://example.test/")
+			assertScrapeErrorCode(t, err, test.wantCode)
+			if artifact != nil || runner.calls != 1 {
+				t.Fatalf("artifact/calls = %#v/%d", artifact, runner.calls)
+			}
+		})
+	}
+}
+
+func TestFetchPublicArtifactRejectsEmptyOrUnsuccessfulRunnerResults(t *testing.T) {
+	tests := []struct {
+		name     string
+		result   *scrape.Result
+		wantCode string
+	}{
+		{name: "nil result", wantCode: models.ErrCodeInternal},
+		{name: "nil response", result: &scrape.Result{}, wantCode: models.ErrCodeInternal},
+		{name: "unsuccessful response", result: &scrape.Result{
+			Response: &models.ScrapeResponse{Success: false, Error: &models.ErrorDetail{
+				Code: models.ErrCodeNavigation, Message: "private runner detail",
+			}},
+		}, wantCode: models.ErrCodeNavigation},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &recordingRunner{result: test.result}
+			service := newPublicArtifactTestService(t, runner, &recordingExtractor{})
+			artifact, err := service.FetchPublicArtifact(context.Background(), "https://example.test/")
+			assertScrapeErrorCode(t, err, test.wantCode)
+			var scrapeError *models.ScrapeError
+			if artifact != nil || runner.calls != 1 || !errors.As(err, &scrapeError) ||
+				scrapeError.ToDetail().Message != "public artifact fetch failed" {
+				t.Fatalf("artifact/calls/error = %#v/%d/%#v", artifact, runner.calls, scrapeError)
+			}
+		})
+	}
+}
+
+func TestFetchPublicArtifactPreservesDeadHTTPStatuses(t *testing.T) {
+	for _, statusCode := range []int{404, 410} {
+		t.Run(strconv.Itoa(statusCode), func(t *testing.T) {
+			result := successfulPublicArtifactResult()
+			result.Response.StatusCode = statusCode
+			result.Source.StatusCode = statusCode
+			runner := &recordingRunner{result: result}
+			service := newPublicArtifactTestService(t, runner, &recordingExtractor{})
+			artifact, err := service.FetchPublicArtifact(context.Background(), "https://example.test/dead")
+			if err != nil || artifact == nil || artifact.Public.StatusCode != statusCode || artifact.Source.StatusCode != statusCode {
+				t.Fatalf("dead artifact = %#v, %v", artifact, err)
+			}
+		})
+	}
+}
+
+func TestFetchPublicArtifactSanitizesRunnerErrorDetail(t *testing.T) {
+	runner := &recordingRunner{err: models.NewScrapeError(
+		models.ErrCodeNavigation,
+		"private upstream detail",
+		errors.New("private socket detail"),
+	)}
+	service := newPublicArtifactTestService(t, runner, &recordingExtractor{})
+	_, err := service.FetchPublicArtifact(context.Background(), "https://example.test/")
+	assertScrapeErrorCode(t, err, models.ErrCodeNavigation)
+	var scrapeError *models.ScrapeError
+	if !errors.As(err, &scrapeError) || scrapeError.ToDetail().Message != "public artifact fetch failed" ||
+		strings.Contains(scrapeError.ToDetail().Message, "private") {
+		t.Fatalf("public detail = %#v", scrapeError)
+	}
+}
+
+func TestFetchPublicArtifactRejectsUnknownRunnerErrorCode(t *testing.T) {
+	runner := &recordingRunner{err: models.NewScrapeError(
+		"PRIVATE_PROVIDER_FAILURE",
+		"private upstream detail",
+		errors.New("private socket detail"),
+	)}
+	service := newPublicArtifactTestService(t, runner, &recordingExtractor{})
+	_, err := service.FetchPublicArtifact(context.Background(), "https://example.test/")
+	assertScrapeErrorCode(t, err, models.ErrCodeNavigation)
+	var scrapeError *models.ScrapeError
+	if !errors.As(err, &scrapeError) || scrapeError.ToDetail().Message != "public artifact fetch failed" ||
+		strings.Contains(scrapeError.ToDetail().Code, "PRIVATE") ||
+		strings.Contains(scrapeError.ToDetail().Message, "private") {
+		t.Fatalf("public detail = %#v", scrapeError)
 	}
 }
 
@@ -460,10 +745,11 @@ func TestNewServiceRejectsMissingRequiredDependencies(t *testing.T) {
 }
 
 type recordingRunner struct {
-	result  *scrape.Result
-	err     error
-	calls   int
-	request *models.ScrapeRequest
+	result       *scrape.Result
+	err          error
+	beforeReturn func()
+	calls        int
+	request      *models.ScrapeRequest
 }
 
 func (runner *recordingRunner) Run(ctx context.Context, request *models.ScrapeRequest, _ scrape.Observer) (*scrape.Result, error) {
@@ -475,6 +761,9 @@ func (runner *recordingRunner) Run(ctx context.Context, request *models.ScrapeRe
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if runner.beforeReturn != nil {
+		runner.beforeReturn()
 	}
 	return runner.result, runner.err
 }
@@ -529,8 +818,10 @@ func newTestService(t *testing.T, runner Runner, client StructuredExtractor, sig
 func successfulScrapeResult() *scrape.Result {
 	return &scrape.Result{
 		Response: &models.ScrapeResponse{
-			Success: true,
-			Content: "Count: 3",
+			Success:    true,
+			StatusCode: 200,
+			FinalURL:   "https://example.test/final",
+			Content:    "Count: 3",
 			Metadata: models.Metadata{
 				Title:     "Example",
 				SourceURL: "https://example.test/final",
@@ -546,6 +837,19 @@ func successfulScrapeResult() *scrape.Result {
 			StatusCode: 200,
 		},
 	}
+}
+
+func successfulPublicArtifactResult() *scrape.Result {
+	return successfulScrapeResult()
+}
+
+func newPublicArtifactTestService(t *testing.T, runner Runner, client StructuredExtractor) *Service {
+	t.Helper()
+	service, err := NewService(runner, client, nil, Config{SafeProxyURL: testPublicArtifactProxyURL})
+	if err != nil {
+		t.Fatalf("NewService(public artifact) error = %v", err)
+	}
+	return service
 }
 
 func validExtractRequest() *models.ExtractRequest {
