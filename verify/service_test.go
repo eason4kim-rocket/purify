@@ -34,8 +34,10 @@ const (
 )
 
 var (
-	oldFetchedAt = time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
-	newFetchedAt = time.Date(2026, 8, 9, 11, 12, 13, 456, time.FixedZone("fixture", 8*60*60))
+	oldFetchedAt        = time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	newFetchedAt        = time.Date(2026, 8, 9, 11, 12, 13, 456, time.FixedZone("fixture", 8*60*60))
+	testSchemaHash      = strings.Repeat("a", 64)
+	testTemplateCluster = strings.Repeat("b", 64)
 )
 
 func TestVerifyDecisionTable(t *testing.T) {
@@ -174,6 +176,9 @@ func TestVerifyDecisionTable(t *testing.T) {
 			if row.VerificationID != response.VerificationID || row.ClaimIndex != 0 || row.OldSnapshotID != oldSnapshotID {
 				t.Fatalf("recorded row identity/provenance = %#v", row)
 			}
+			if row.SchemaHash != "" || row.TemplateClusterID != "" || row.ExtractorID != "" {
+				t.Fatalf("generic direct claim recorded extractor provenance: %#v", row)
+			}
 			if row.Outcome != ledger.Outcome(test.wantStatus) {
 				t.Fatalf("recorded outcome = %q, want %q", row.Outcome, test.wantStatus)
 			}
@@ -258,6 +263,9 @@ func TestVerifyReceiptRestoresClaimAndRefreshesReceipt(t *testing.T) {
 	if rows[0].OldReceipt != oldReceipt {
 		t.Fatalf("old receipt was not retained in ledger row")
 	}
+	if rows[0].SchemaHash != "" || rows[0].TemplateClusterID != "" || rows[0].ExtractorID != "" {
+		t.Fatalf("generic receipt recorded extractor provenance: %#v", rows[0])
+	}
 	refreshed, err := signer.Verify(response.Results[0].Receipt)
 	if err != nil {
 		t.Fatalf("Verify(refreshed receipt) error = %v", err)
@@ -280,6 +288,7 @@ func TestVerifyCompiledReceiptReplaysImmutableRuleOnOldAndCurrentSnapshots(t *te
 		wantQuote     string
 		wantRange     [2]int
 		wantGoneScope models.VerifyGoneScope
+		statusCode    int
 	}{
 		{
 			name:        "date attribute unchanged",
@@ -359,6 +368,16 @@ func TestVerifyCompiledReceiptReplaysImmutableRuleOnOldAndCurrentSnapshots(t *te
 			wantGoneScope: models.VerifyGoneScopeField,
 		},
 		{
+			name:          "page returned 410 is gone",
+			rule:          compiler.FieldRule{Name: "price", Selector: ".price", Attr: "data-value", Type: compiler.TypeNumber, Required: true},
+			oldHTML:       `<span class="price" data-value="29.99"></span>`,
+			currentHTML:   "",
+			oldValue:      json.RawMessage(`29.99`),
+			wantStatus:    models.VerifyStatusGone,
+			wantGoneScope: models.VerifyGoneScopePage,
+			statusCode:    410,
+		},
+		{
 			name:         "literal dot and backslash field name round trips",
 			rule:         compiler.FieldRule{Name: `price.\usd`, Selector: ".price", Attr: "data-value", Type: compiler.TypeNumber, Required: true},
 			oldHTML:      `<span class="price" data-value="29.99"></span>`,
@@ -376,7 +395,7 @@ func TestVerifyCompiledReceiptReplaysImmutableRuleOnOldAndCurrentSnapshots(t *te
 			version := 7
 			ir := compiler.IR{Version: compiler.CurrentIRVersion, Fields: []compiler.FieldRule{test.rule}}
 			revisions := revisionResolverFunc(func(context.Context, string) (compiler.Extractor, error) {
-				return compiler.Extractor{ID: extractorID, Version: version, IR: ir}, nil
+				return testCompiledExtractor(extractorID, version, ir), nil
 			})
 			receiptPath := strings.ReplaceAll(test.rule.Name, ".", `\.`)
 			token, err := signer.Sign(receipts.Payload{
@@ -396,7 +415,12 @@ func TestVerifyCompiledReceiptReplaysImmutableRuleOnOldAndCurrentSnapshots(t *te
 			if err != nil {
 				t.Fatalf("Sign(): %v", err)
 			}
-			service := testService(t, test.oldHTML, observation(test.currentHTML, 200), signer, &fakeRecorder{}, revisions)
+			statusCode := test.statusCode
+			if statusCode == 0 {
+				statusCode = 200
+			}
+			recorder := &fakeRecorder{}
+			service := testService(t, test.oldHTML, observation(test.currentHTML, statusCode), signer, recorder, revisions)
 			response, err := service.Verify(context.Background(), models.VerifyRequest{Receipt: token})
 			if err != nil {
 				t.Fatalf("Verify(): %v", err)
@@ -404,6 +428,14 @@ func TestVerifyCompiledReceiptReplaysImmutableRuleOnOldAndCurrentSnapshots(t *te
 			result := response.Results[0]
 			if result.Status != test.wantStatus || result.GoneScope != test.wantGoneScope || !bytes.Equal(result.NewValue, test.wantNewValue) {
 				t.Fatalf("result = %#v", result)
+			}
+			batches := recorder.committedBatches()
+			if len(batches) != 1 || len(batches[0]) != 1 {
+				t.Fatalf("recorded batches = %#v, want one row", batches)
+			}
+			row := batches[0][0]
+			if row.SchemaHash != testSchemaHash || row.TemplateClusterID != testTemplateCluster || row.ExtractorID != extractorID {
+				t.Fatalf("compiled row provenance = (%q, %q, %q)", row.SchemaHash, row.TemplateClusterID, row.ExtractorID)
 			}
 			if test.wantStatus == models.VerifyStatusGone {
 				if result.Evidence != nil || result.Receipt != "" {
@@ -449,8 +481,31 @@ func TestVerifyCompiledReceiptFailsClosedBeforeVerdict(t *testing.T) {
 		{name: "revision not found", method: evidence.MethodCompiled, version: extractorID + "@1", resolver: revisionResolverFunc(func(context.Context, string) (compiler.Extractor, error) {
 			return compiler.Extractor{}, compiler.ErrExtractorNotFound
 		}), wantErr: ErrEvidenceUnavailable},
+		{name: "returned id mismatch", method: evidence.MethodCompiled, version: extractorID + "@1", resolver: revisionResolverFunc(func(context.Context, string) (compiler.Extractor, error) {
+			return testCompiledExtractor("223e4567-e89b-12d3-a456-426614174000", 1, validIR), nil
+		}), wantErr: ErrEvidenceUnavailable},
 		{name: "returned version mismatch", method: evidence.MethodCompiled, version: extractorID + "@1", resolver: revisionResolverFunc(func(context.Context, string) (compiler.Extractor, error) {
-			return compiler.Extractor{ID: extractorID, Version: 2, IR: validIR}, nil
+			return testCompiledExtractor(extractorID, 2, validIR), nil
+		}), wantErr: ErrEvidenceUnavailable},
+		{name: "missing schema hash", method: evidence.MethodCompiled, version: extractorID + "@1", resolver: revisionResolverFunc(func(context.Context, string) (compiler.Extractor, error) {
+			revision := testCompiledExtractor(extractorID, 1, validIR)
+			revision.SchemaHash = ""
+			return revision, nil
+		}), wantErr: ErrEvidenceUnavailable},
+		{name: "missing template cluster", method: evidence.MethodCompiled, version: extractorID + "@1", resolver: revisionResolverFunc(func(context.Context, string) (compiler.Extractor, error) {
+			revision := testCompiledExtractor(extractorID, 1, validIR)
+			revision.TemplateClusterID = ""
+			return revision, nil
+		}), wantErr: ErrEvidenceUnavailable},
+		{name: "uppercase schema hash", method: evidence.MethodCompiled, version: extractorID + "@1", resolver: revisionResolverFunc(func(context.Context, string) (compiler.Extractor, error) {
+			revision := testCompiledExtractor(extractorID, 1, validIR)
+			revision.SchemaHash = strings.ToUpper(revision.SchemaHash)
+			return revision, nil
+		}), wantErr: ErrEvidenceUnavailable},
+		{name: "spaced template cluster", method: evidence.MethodCompiled, version: extractorID + "@1", resolver: revisionResolverFunc(func(context.Context, string) (compiler.Extractor, error) {
+			revision := testCompiledExtractor(extractorID, 1, validIR)
+			revision.TemplateClusterID += " "
+			return revision, nil
 		}), wantErr: ErrEvidenceUnavailable},
 		{name: "noncompiled method with version", method: evidence.MethodExact, version: extractorID + "@1", wantErr: ErrInvalidReceipt},
 		{name: "direct compiled claim", method: evidence.MethodCompiled, direct: true, wantErr: ErrInvalidClaim},
@@ -557,7 +612,7 @@ func TestVerifyCompiledReceiptRejectsCorruptIRAndOldSnapshotMismatch(t *testing.
 			}
 			var revisits atomic.Int32
 			service := testService(t, test.oldHTML, observation(`<span class="price">29.99</span>`, 200), signer, &fakeRecorder{}, revisionResolverFunc(func(context.Context, string) (compiler.Extractor, error) {
-				return compiler.Extractor{ID: extractorID, Version: 1, IR: test.ir}, nil
+				return testCompiledExtractor(extractorID, 1, test.ir), nil
 			}))
 			service.revisitor = revisitorFunc(func(context.Context, string) (RevisitResult, error) {
 				revisits.Add(1)
@@ -596,12 +651,13 @@ func TestVerifyCompiledReceiptRejectsGenericEquivalentOldString(t *testing.T) {
 		signer,
 		&fakeRecorder{},
 		revisionResolverFunc(func(context.Context, string) (compiler.Extractor, error) {
-			return compiler.Extractor{
-				ID: extractorID, Version: 1,
-				IR: compiler.IR{Version: compiler.CurrentIRVersion, Fields: []compiler.FieldRule{{
+			return testCompiledExtractor(
+				extractorID,
+				1,
+				compiler.IR{Version: compiler.CurrentIRVersion, Fields: []compiler.FieldRule{{
 					Name: "brand", Selector: ".brand", Type: compiler.TypeString, Required: true,
 				}}},
-			}, nil
+			), nil
 		}),
 	)
 	service.revisitor = revisitorFunc(func(context.Context, string) (RevisitResult, error) {
@@ -2469,6 +2525,16 @@ func testSigner(t *testing.T) *receipts.Signer {
 		t.Fatalf("NewSigner() error = %v", err)
 	}
 	return signer
+}
+
+func testCompiledExtractor(id string, version int, ir compiler.IR) compiler.Extractor {
+	return compiler.Extractor{
+		ID:                id,
+		Version:           version,
+		SchemaHash:        testSchemaHash,
+		TemplateClusterID: testTemplateCluster,
+		IR:                ir,
+	}
 }
 
 func testClaim(path, value, quote, selector string) models.Claim {

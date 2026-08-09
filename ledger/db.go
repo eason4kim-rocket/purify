@@ -508,6 +508,33 @@ func validateVerification(v Verification) (validatedVerification, error) {
 		return fail("id cannot contain surrounding whitespace")
 	}
 
+	schemaHash := strings.TrimSpace(v.SchemaHash)
+	templateClusterID := strings.TrimSpace(v.TemplateClusterID)
+	extractorID := strings.TrimSpace(v.ExtractorID)
+	if schemaHash != v.SchemaHash || templateClusterID != v.TemplateClusterID || extractorID != v.ExtractorID {
+		return fail("extractor provenance cannot contain surrounding whitespace")
+	}
+	provenanceCount := 0
+	for _, value := range []string{schemaHash, templateClusterID, extractorID} {
+		if value != "" {
+			provenanceCount++
+		}
+	}
+	if provenanceCount != 0 && provenanceCount != 3 {
+		return fail("schema_hash, template_cluster_id, and extractor_id must be all empty or all present")
+	}
+	if provenanceCount == 3 {
+		if !validLowerHexIdentity(schemaHash, 64) {
+			return fail("schema_hash must be 64 lowercase hexadecimal characters")
+		}
+		if !validLowerHexIdentity(templateClusterID, 64) {
+			return fail("template_cluster_id must be 64 lowercase hexadecimal characters")
+		}
+		if !validLowercaseUUIDIdentity(extractorID) {
+			return fail("extractor_id must be a lowercase UUID")
+		}
+	}
+
 	return validatedVerification{
 		ID:                id,
 		VerificationID:    verificationID,
@@ -525,11 +552,38 @@ func validateVerification(v Verification) (validatedVerification, error) {
 		NewSnapshotID:     strings.TrimSpace(v.NewSnapshotID),
 		OldReceipt:        v.OldReceipt,
 		Receipt:           v.Receipt,
-		SchemaHash:        strings.TrimSpace(v.SchemaHash),
-		TemplateClusterID: strings.TrimSpace(v.TemplateClusterID),
-		ExtractorID:       strings.TrimSpace(v.ExtractorID),
+		SchemaHash:        schemaHash,
+		TemplateClusterID: templateClusterID,
+		ExtractorID:       extractorID,
 		VerifiedAt:        v.VerifiedAt.UTC().Format(time.RFC3339Nano),
 	}, nil
+}
+
+func validLowerHexIdentity(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validLowercaseUUIDIdentity(value string) bool {
+	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
+		return false
+	}
+	for index, character := range value {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			continue
+		}
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func randomID() (string, error) {

@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -197,9 +198,9 @@ func TestRecordVerificationsRoundTrip(t *testing.T) {
 			NewSnapshotID:     "sha256:new",
 			OldReceipt:        "old.receipt.token",
 			Receipt:           "new.receipt.token",
-			SchemaHash:        "schema-a",
-			TemplateClusterID: "cluster-a",
-			ExtractorID:       "extractor-a",
+			SchemaHash:        strings.Repeat("a", 64),
+			TemplateClusterID: strings.Repeat("b", 64),
+			ExtractorID:       "123e4567-e89b-12d3-a456-426614174000",
 			VerifiedAt:        verifiedAt,
 		},
 		{
@@ -332,6 +333,101 @@ func TestRecordVerificationsValidation(t *testing.T) {
 				t.Fatalf("error = %v, want errors.Is(%v)", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestRecordVerificationBatchRequiresCompleteExtractorProvenance(t *testing.T) {
+	const extractorID = "123e4567-e89b-12d3-a456-426614174000"
+	schemaHash := strings.Repeat("a", 64)
+	clusterID := strings.Repeat("b", 64)
+
+	for mask := 0; mask < 8; mask++ {
+		t.Run(fmt.Sprintf("presence mask %03b", mask), func(t *testing.T) {
+			store := openTestStore(t)
+			row := validVerification(0)
+			if mask&1 != 0 {
+				row.SchemaHash = schemaHash
+			}
+			if mask&2 != 0 {
+				row.TemplateClusterID = clusterID
+			}
+			if mask&4 != 0 {
+				row.ExtractorID = extractorID
+			}
+
+			err := store.RecordVerificationBatch(context.Background(), []Verification{row}, nil)
+			if mask == 0 || mask == 7 {
+				if err != nil {
+					t.Fatalf("RecordVerificationBatch() error = %v", err)
+				}
+				assertStoredVerificationCount(t, store, 1)
+				return
+			}
+			if !errors.Is(err, ErrInvalidVerification) {
+				t.Fatalf("RecordVerificationBatch() error = %v, want ErrInvalidVerification", err)
+			}
+			assertStoredVerificationCount(t, store, 0)
+		})
+	}
+}
+
+func TestRecordVerificationBatchRejectsInvalidExtractorProvenanceWithoutWriting(t *testing.T) {
+	validSchemaHash := strings.Repeat("a", 64)
+	validClusterID := strings.Repeat("b", 64)
+	const validExtractorID = "123e4567-e89b-12d3-a456-426614174000"
+	tests := []struct {
+		name              string
+		schemaHash        string
+		templateClusterID string
+		extractorID       string
+	}{
+		{name: "schema surrounding whitespace", schemaHash: " " + validSchemaHash, templateClusterID: validClusterID, extractorID: validExtractorID},
+		{name: "whitespace-only partial provenance", schemaHash: " ", templateClusterID: "", extractorID: ""},
+		{name: "cluster surrounding whitespace", schemaHash: validSchemaHash, templateClusterID: validClusterID + "\n", extractorID: validExtractorID},
+		{name: "extractor surrounding whitespace", schemaHash: validSchemaHash, templateClusterID: validClusterID, extractorID: "\t" + validExtractorID},
+		{name: "schema uppercase", schemaHash: strings.Repeat("A", 64), templateClusterID: validClusterID, extractorID: validExtractorID},
+		{name: "cluster not digest", schemaHash: validSchemaHash, templateClusterID: "cluster", extractorID: validExtractorID},
+		{name: "extractor uppercase", schemaHash: validSchemaHash, templateClusterID: validClusterID, extractorID: strings.ToUpper(validExtractorID)},
+		{name: "extractor not uuid", schemaHash: validSchemaHash, templateClusterID: validClusterID, extractorID: "extractor"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := openTestStore(t)
+			row := validVerification(0)
+			row.SchemaHash = test.schemaHash
+			row.TemplateClusterID = test.templateClusterID
+			row.ExtractorID = test.extractorID
+			if err := store.RecordVerificationBatch(context.Background(), []Verification{row}, nil); !errors.Is(err, ErrInvalidVerification) {
+				t.Fatalf("RecordVerificationBatch() error = %v, want ErrInvalidVerification", err)
+			}
+			assertStoredVerificationCount(t, store, 0)
+		})
+	}
+
+	t.Run("invalid row rejects whole batch", func(t *testing.T) {
+		store := openTestStore(t)
+		first := validVerification(0)
+		first.SchemaHash = validSchemaHash
+		first.TemplateClusterID = validClusterID
+		first.ExtractorID = validExtractorID
+		second := validVerification(1)
+		second.SchemaHash = validSchemaHash
+		if err := store.RecordVerificationBatch(context.Background(), []Verification{first, second}, nil); !errors.Is(err, ErrInvalidVerification) {
+			t.Fatalf("RecordVerificationBatch() error = %v, want ErrInvalidVerification", err)
+		}
+		assertStoredVerificationCount(t, store, 0)
+	})
+}
+
+func assertStoredVerificationCount(t *testing.T, store *Store, want int) {
+	t.Helper()
+	var count int
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM verifications").Scan(&count); err != nil {
+		t.Fatalf("count verifications: %v", err)
+	}
+	if count != want {
+		t.Fatalf("verification row count = %d, want %d", count, want)
 	}
 }
 

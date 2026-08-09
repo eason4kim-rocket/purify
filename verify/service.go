@@ -175,9 +175,11 @@ func NewService(config Config) (*Service, error) {
 }
 
 type compiledClaim struct {
-	id      string
-	version int
-	ir      compiler.IR
+	id                string
+	version           int
+	schemaHash        string
+	templateClusterID string
+	ir                compiler.IR
 }
 
 type resolvedClaim struct {
@@ -534,11 +536,21 @@ func (s *Service) resolveCompiledRevision(ctx context.Context, encoded string) (
 	if revision.ID != id || revision.Version != version {
 		return nil, fmt.Errorf("%w: extractor revision identity mismatch", ErrEvidenceUnavailable)
 	}
+	if !validLowercaseHex(revision.SchemaHash, 64) ||
+		!validLowercaseHex(revision.TemplateClusterID, 64) {
+		return nil, fmt.Errorf("%w: extractor revision provenance is invalid", ErrEvidenceUnavailable)
+	}
 	// ReplayField performs the definitive resource and IR validation against
 	// each snapshot. Keep a defensive copy so a mutable test or adapter cannot
 	// change the revision after identity validation.
 	ir := cloneIR(revision.IR)
-	return &compiledClaim{id: id, version: version, ir: ir}, nil
+	return &compiledClaim{
+		id:                id,
+		version:           version,
+		schemaHash:        revision.SchemaHash,
+		templateClusterID: revision.TemplateClusterID,
+		ir:                ir,
+	}, nil
 }
 
 func parseExtractorVersion(value string) (string, int, error) {
@@ -569,6 +581,18 @@ func validLowercaseUUID(value string) bool {
 		if index == 8 || index == 13 || index == 18 || index == 23 {
 			continue
 		}
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validLowercaseHex(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	for _, character := range value {
 		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
 			return false
 		}
@@ -936,6 +960,11 @@ func (s *Service) verifyOne(
 		NewSnapshotID:  observation.SnapshotID,
 		OldReceipt:     claim.oldReceipt,
 		VerifiedAt:     verifiedAt,
+	}
+	if claim.compiled != nil {
+		row.SchemaHash = claim.compiled.schemaHash
+		row.TemplateClusterID = claim.compiled.templateClusterID
+		row.ExtractorID = claim.compiled.id
 	}
 	if pageGone {
 		result.Status = models.VerifyStatusGone
