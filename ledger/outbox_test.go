@@ -524,8 +524,8 @@ func TestMigration002UpgradesVersionOneDatabaseIdempotently(t *testing.T) {
 	if err := reopened.db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrationCount != 2 {
-		t.Fatalf("migration count = %d, want 2", migrationCount)
+	if migrationCount != len(migrations) {
+		t.Fatalf("migration count = %d, want %d", migrationCount, len(migrations))
 	}
 }
 

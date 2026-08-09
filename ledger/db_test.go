@@ -462,6 +462,37 @@ func assertMigrationState(t *testing.T, db *sql.DB) {
 			t.Fatalf("index %q: %v", name, err)
 		}
 	}
+	for _, name := range []string{"extractors", "extractor_page_bindings"} {
+		if err := db.QueryRow(`SELECT name FROM sqlite_master
+			WHERE type = 'table' AND name = ?`, name).Scan(&table); err != nil {
+			t.Fatalf("table %q: %v", name, err)
+		}
+	}
+	for _, name := range []string{
+		"idx_extractors_active_cluster",
+		"idx_extractors_lookup",
+		"idx_extractors_ir_hash",
+		"idx_extractor_page_bindings_extractor",
+	} {
+		var got string
+		if err := db.QueryRow(`SELECT name FROM sqlite_master
+			WHERE type = 'index' AND name = ?`, name).Scan(&got); err != nil {
+			t.Fatalf("index %q: %v", name, err)
+		}
+	}
+	for _, name := range []string{
+		"trg_extractors_state_transition",
+		"trg_extractors_immutable_revision",
+		"trg_extractors_delete_retired_only",
+		"trg_extractors_empty_window_insert",
+		"trg_extractors_empty_window_update",
+	} {
+		var got string
+		if err := db.QueryRow(`SELECT name FROM sqlite_master
+			WHERE type = 'trigger' AND name = ?`, name).Scan(&got); err != nil {
+			t.Fatalf("trigger %q: %v", name, err)
+		}
+	}
 }
 
 type pragmaQuerier interface {
