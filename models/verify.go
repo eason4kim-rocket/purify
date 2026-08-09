@@ -73,3 +73,8 @@ type VerifyResponse struct {
 	SnapshotID     string        `json:"snapshot_id,omitempty"`
 	VerifiedAt     time.Time     `json:"verified_at"`
 }
+
+// VerifyErrorResponse is the stable error envelope returned by /verify.
+type VerifyErrorResponse struct {
+	Error *ErrorDetail `json:"error"`
+}
