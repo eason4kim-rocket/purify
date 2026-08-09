@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"reflect"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/use-agent/purify/evidence"
 	"github.com/use-agent/purify/models"
 )
 
@@ -67,8 +69,8 @@ func TestExtractDataToolContract(t *testing.T) {
 	if tool.Name != "extract_data" {
 		t.Fatalf("tool name = %q, want extract_data", tool.Name)
 	}
-	if !reflect.DeepEqual(tool.InputSchema.Required, []string{"url", "schema"}) {
-		t.Fatalf("required = %#v, want url and schema", tool.InputSchema.Required)
+	if !reflect.DeepEqual(tool.InputSchema.Required, []string{"schema"}) {
+		t.Fatalf("required = %#v, want schema", tool.InputSchema.Required)
 	}
 	if got, ok := tool.InputSchema.AdditionalProperties.(bool); !ok || got {
 		t.Fatalf("additionalProperties = %#v, want false", tool.InputSchema.AdditionalProperties)
@@ -85,6 +87,17 @@ func TestExtractDataToolContract(t *testing.T) {
 	}
 	if got := tool.InputSchema.Properties["llm_api_key"].(map[string]any)["type"]; got != "string" {
 		t.Fatalf("llm_api_key type = %#v, want string", got)
+	}
+	sources, ok := tool.InputSchema.Properties["sources"].(map[string]any)
+	if !ok {
+		t.Fatalf("sources property has type %T", tool.InputSchema.Properties["sources"])
+	}
+	if sources["type"] != "array" || sources["minItems"] != 1 || sources["maxItems"] != models.MaxExtractSources {
+		t.Fatalf("sources schema = %#v", sources)
+	}
+	items, ok := sources["items"].(map[string]any)
+	if !ok || items["type"] != "string" || items["maxLength"] != models.MaxExtractSourceURLBytes {
+		t.Fatalf("sources items schema = %#v", sources["items"])
 	}
 	limits := map[string]int{
 		"url":          maxVerifyURLBytes,
@@ -175,6 +188,12 @@ func TestHandleExtractDataRequestMatrixAndCredentialSeparation(t *testing.T) {
 				if err := json.Unmarshal(body, &raw); err != nil {
 					t.Errorf("decode raw request: %v", err)
 				}
+				if _, present := raw["url"]; !present {
+					t.Errorf("single request physically omitted url: %s", body)
+				}
+				if _, present := raw["sources"]; present {
+					t.Errorf("single request physically contains sources: %s", body)
+				}
 				for _, field := range []string{"llm_api_key", "llm_model", "llm_base_url"} {
 					_, present := raw[field]
 					if present != test.wantLLMCredential {
@@ -221,6 +240,440 @@ func TestHandleExtractDataRequestMatrixAndCredentialSeparation(t *testing.T) {
 	}
 }
 
+func TestHandleExtractDataMultiRequestMatrixAndCredentialSeparation(t *testing.T) {
+	tests := []struct {
+		name              string
+		arguments         map[string]any
+		wantEngine        string
+		wantLLMCredential bool
+	}{
+		{
+			name: "auto defaults without LLM fallback credential",
+			arguments: multiExtractArguments(
+				"https://one.example.com/product",
+				"https://two.example.net/product",
+			),
+			wantEngine: "auto",
+		},
+		{
+			name: "auto forwards caller fallback settings",
+			arguments: multiExtractArgumentsWithMany(map[string]any{
+				"engine": "auto", "llm_api_key": "caller-llm-secret",
+				"llm_model": "caller-model", "llm_base_url": "https://llm.example/v1",
+			}, "https://one.example.com/product", "https://two.example.net/product"),
+			wantEngine:        "auto",
+			wantLLMCredential: true,
+		},
+		{
+			name: "compiled physically strips all LLM settings",
+			arguments: multiExtractArgumentsWithMany(map[string]any{
+				"engine": "compiled", "llm_api_key": "caller-llm-secret",
+				"llm_model": "must-not-forward", "llm_base_url": "https://must-not-forward.example/v1",
+			}, "https://one.example.com/product", "https://two.example.net/product"),
+			wantEngine: "compiled",
+		},
+		{
+			name: "llm keeps API auth separate from caller credential",
+			arguments: multiExtractArgumentsWithMany(map[string]any{
+				"engine": "llm", "llm_api_key": "caller-llm-secret",
+				"llm_model": "caller-model", "llm_base_url": "https://llm.example/v1",
+			}, "https://one.example.com/product", "https://two.example.net/product"),
+			wantEngine:        "llm",
+			wantLLMCredential: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			responseBody := validMultiExtractResponseBody(t, models.MultiExtractStatusComplete)
+			client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				if request.Method != http.MethodPost || request.URL.String() != "http://purify.test/api/v1/extract" {
+					t.Errorf("request = %s %s", request.Method, request.URL)
+				}
+				if got := request.Header.Get("X-API-Key"); got != "purify-api-secret" {
+					t.Errorf("X-API-Key = %q, want Purify API credential", got)
+				}
+				body, err := io.ReadAll(request.Body)
+				if err != nil {
+					t.Errorf("read body: %v", err)
+				}
+				if bytes.Contains(body, []byte("purify-api-secret")) {
+					t.Errorf("Purify API credential leaked into body: %s", body)
+				}
+				var raw map[string]json.RawMessage
+				if err := json.Unmarshal(body, &raw); err != nil {
+					t.Errorf("decode raw request: %v", err)
+				}
+				if _, present := raw["url"]; present {
+					t.Errorf("multi request physically contains url: %s", body)
+				}
+				for _, field := range []string{"llm_api_key", "llm_model", "llm_base_url"} {
+					_, present := raw[field]
+					if present != test.wantLLMCredential {
+						t.Errorf("field %q present = %t, want %t; body=%s", field, present, test.wantLLMCredential, body)
+					}
+				}
+				decoder := json.NewDecoder(bytes.NewReader(body))
+				decoder.DisallowUnknownFields()
+				var payload models.ExtractRequest
+				if err := decoder.Decode(&payload); err != nil {
+					t.Errorf("decode request: %v", err)
+				}
+				if payload.URL != "" || !reflect.DeepEqual(payload.Sources, []string{
+					"https://one.example.com/product", "https://two.example.net/product",
+				}) || payload.Engine != test.wantEngine || !json.Valid(payload.Schema) {
+					t.Errorf("payload = %#v", payload)
+				}
+				if test.wantLLMCredential && (payload.LLMAPIKey != "caller-llm-secret" || payload.LLMModel != "caller-model" || payload.LLMBaseURL != "https://llm.example/v1") {
+					t.Errorf("LLM settings changed: %#v", payload)
+				}
+				return httpResponse(http.StatusOK, responseBody), nil
+			})}
+			handler := handleExtractDataWithClient(client, "http://purify.test", "purify-api-secret")
+
+			result, protocolErr := handler(context.Background(), extractRequest(test.arguments))
+			if protocolErr != nil {
+				t.Fatalf("protocol error: %v", protocolErr)
+			}
+			if result.IsError {
+				t.Fatalf("unexpected tool error: %s", toolResultText(t, result))
+			}
+			if _, ok := result.StructuredContent.(models.MultiExtractResponse); !ok {
+				t.Fatalf("structured content type = %T, want models.MultiExtractResponse", result.StructuredContent)
+			}
+			fallback := toolResultText(t, result)
+			for _, secret := range []string{"purify-api-secret", "caller-llm-secret"} {
+				if strings.Contains(fallback, secret) {
+					t.Fatalf("fallback leaked %q: %s", secret, fallback)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleExtractDataKnownMultiStatusesAreStructuredSuccess(t *testing.T) {
+	nullComplete := validMultiExtractResponse(models.MultiExtractStatusComplete)
+	nullComplete.Data = json.RawMessage(`null`)
+	nullField := nullComplete.Consensus.Fields["/name"]
+	nullField.Value = json.RawMessage(`null`)
+	nullComplete.Consensus.Fields["/name"] = nullField
+	mixedComplete := validMultiExtractResponse(models.MultiExtractStatusComplete)
+	mixedComplete.Sources[0].LLMUsage = &models.LLMUsage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5}
+	duplicate := mixedComplete.Sources[0]
+	duplicate.URL = "https://alias.example.org/product"
+	duplicate.Success = false
+	duplicate.Status = models.MultiExtractSourceStatusDuplicate
+	duplicate.DuplicateOf = mixedComplete.Sources[0].URL
+	timedOut := models.MultiExtractSource{
+		URL:     "https://timeout.example.net/product",
+		Success: false,
+		Status:  models.MultiExtractSourceStatusTimeout,
+		Timing:  models.ExtractTimingInfo{TotalMs: 8},
+		Error:   &models.ErrorDetail{Code: models.ErrCodeTimeout, Message: "source timed out"},
+	}
+	mixedComplete.Sources = append(mixedComplete.Sources, duplicate, timedOut)
+	mixedComplete.Tokens = models.TokenInfo{OriginalEstimate: 200, CleanedEstimate: 40, SavingsPercent: 80}
+	mixedComplete.Timing = models.ExtractTimingInfo{TotalMs: 10, NavigationMs: 12, CleaningMs: 4, ExtractionMs: 2}
+	mixedComplete.LLMUsage = &models.LLMUsage{PromptTokens: 6, CompletionTokens: 4, TotalTokens: 10}
+	whitespacePath := validMultiExtractResponse(models.MultiExtractStatusComplete)
+	whitespaceField := whitespacePath.Consensus.Fields["/name"]
+	delete(whitespacePath.Consensus.Fields, "/name")
+	whitespacePath.Consensus.Fields["   "] = whitespaceField
+	whitespacePath.Data = json.RawMessage(`{"   ":"Purify"}`)
+	tests := []struct {
+		name     string
+		response models.MultiExtractResponse
+	}{
+		{name: "complete", response: validMultiExtractResponse(models.MultiExtractStatusComplete)},
+		{name: "complete JSON null", response: nullComplete},
+		{name: "complete with duplicate and failed source", response: mixedComplete},
+		{name: "complete with whitespace-only JSON property path", response: whitespacePath},
+		{name: "complete with lower-scored conflict", response: validNonAmbiguousConflictMultiExtractResponse()},
+		{name: "object presence ambiguity without ambiguous scalar", response: validMultiExtractResponse(models.MultiExtractStatusAmbiguous)},
+		{name: "node kind ambiguity without ambiguous scalar", response: validMultiExtractResponse(models.MultiExtractStatusAmbiguous)},
+		{name: "array length ambiguity without ambiguous scalar", response: validMultiExtractResponse(models.MultiExtractStatusAmbiguous)},
+		{name: "field ambiguity", response: validFieldAmbiguousMultiExtractResponse()},
+		{name: "schema invalid", response: validMultiExtractResponse(models.MultiExtractStatusSchemaInvalid)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body, err := json.Marshal(test.response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return httpResponse(http.StatusOK, body), nil
+			})}
+			handler := handleExtractDataWithClient(client, "http://purify.test", "purify-api-secret")
+
+			result, protocolErr := handler(context.Background(), extractRequest(multiExtractArguments("https://one.example.com/product")))
+			if protocolErr != nil || result.IsError {
+				t.Fatalf("result = %#v, protocol error = %v, text = %s", result, protocolErr, toolResultText(t, result))
+			}
+			got, ok := result.StructuredContent.(models.MultiExtractResponse)
+			if !ok {
+				t.Fatalf("structured content type = %T", result.StructuredContent)
+			}
+			if !reflect.DeepEqual(got, test.response) {
+				t.Fatalf("structured response = %#v, want %#v", got, test.response)
+			}
+			var fallback models.MultiExtractResponse
+			if err := json.Unmarshal([]byte(toolResultText(t, result)), &fallback); err != nil {
+				t.Fatalf("fallback is not JSON: %v", err)
+			}
+			fallbackJSON, err := json.Marshal(fallback)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantJSON, err := json.Marshal(test.response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(fallbackJSON, wantJSON) {
+				t.Fatalf("fallback JSON = %s, want %s", fallbackJSON, wantJSON)
+			}
+		})
+	}
+}
+
+func TestDecodeMultiExtractResponseAcceptsEveryJSONScalarKind(t *testing.T) {
+	tests := []struct {
+		name  string
+		value json.RawMessage
+	}{
+		{name: "null", value: json.RawMessage(`null`)},
+		{name: "boolean", value: json.RawMessage(`true`)},
+		{name: "number", value: json.RawMessage(`12.5`)},
+		{name: "string", value: json.RawMessage(`"Purify"`)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := validMultiExtractResponse(models.MultiExtractStatusComplete)
+			field := response.Consensus.Fields["/name"]
+			field.Value = append(json.RawMessage(nil), test.value...)
+			response.Consensus.Fields["/name"] = field
+			response.Data = append(json.RawMessage(nil), test.value...)
+			body, err := json.Marshal(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := decodeMultiExtractResponse(body); err != nil {
+				t.Fatalf("decode scalar %s: %v", test.value, err)
+			}
+		})
+	}
+}
+
+func TestHandleExtractDataRejectsMalformedMultiSuccessResponse(t *testing.T) {
+	complete := validMultiExtractResponse(models.MultiExtractStatusComplete)
+	fieldAmbiguous := validFieldAmbiguousMultiExtractResponse()
+	nonAmbiguousConflict := validNonAmbiguousConflictMultiExtractResponse()
+	duplicateResponse := validMultiExtractResponse(models.MultiExtractStatusComplete)
+	duplicateSource := duplicateResponse.Sources[0]
+	duplicateSource.URL = "https://alias.example.org/product"
+	duplicateSource.Success = false
+	duplicateSource.Status = models.MultiExtractSourceStatusDuplicate
+	duplicateSource.DuplicateOf = duplicateResponse.Sources[0].URL
+	duplicateResponse.Sources = append(duplicateResponse.Sources, duplicateSource)
+	invalidUTF8Path := bytes.Replace(
+		validMultiExtractResponseBody(t, models.MultiExtractStatusComplete),
+		[]byte(`"/name"`),
+		[]byte{'"', 0xff, '"'},
+		1,
+	)
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{name: "invalid JSON", body: []byte(`{"success":`)},
+		{name: "null", body: []byte(`null`)},
+		{name: "trailing value", body: append(validMultiExtractResponseBody(t, models.MultiExtractStatusComplete), []byte(` {}`)...)},
+		{name: "unknown top-level field", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			document["unexpected"] = true
+		})},
+		{name: "missing status", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			delete(document, "status")
+		})},
+		{name: "unknown aggregate status", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			document["status"] = "future"
+		})},
+		{name: "complete missing data", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			delete(document, "data")
+		})},
+		{name: "ambiguous with data", body: mutateMultiExtractResponseBody(t, validMultiExtractResponse(models.MultiExtractStatusAmbiguous), func(document map[string]any) {
+			document["data"] = map[string]any{"name": "Purify"}
+		})},
+		{name: "schema invalid without violations", body: mutateMultiExtractResponseBody(t, validMultiExtractResponse(models.MultiExtractStatusSchemaInvalid), func(document map[string]any) {
+			delete(document, "violations")
+		})},
+		{name: "successful response with error", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			document["error"] = map[string]any{"code": "BAD", "message": "bad"}
+		})},
+		{name: "unknown source status", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			multiSourceDocument(t, document, 0)["status"] = "future"
+		})},
+		{name: "valid source marked unsuccessful", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			multiSourceDocument(t, document, 0)["success"] = false
+		})},
+		{name: "duplicate source summary URL", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			sources := document["sources"].([]any)
+			document["sources"] = append(sources, cloneJSONMap(t, sources[0].(map[string]any)))
+		})},
+		{name: "duplicate points to missing winner", body: mutateMultiExtractResponseBody(t, duplicateResponse, func(document map[string]any) {
+			multiSourceDocument(t, document, 1)["duplicate_of"] = "https://missing.example.net/product"
+		})},
+		{name: "duplicate points to failed source", body: mutateMultiExtractResponseBody(t, duplicateResponse, func(document map[string]any) {
+			sources := document["sources"].([]any)
+			failed := map[string]any{
+				"url": "https://failed.example.net/product", "success": false, "status": "timeout",
+				"tokens": map[string]any{"original_estimate": 0, "cleaned_estimate": 0, "savings_percent": 0},
+				"timing": map[string]any{"total_ms": 1, "navigation_ms": 0, "cleaning_ms": 0, "extraction_ms": 0},
+				"error":  map[string]any{"code": models.ErrCodeTimeout, "message": "source timed out"},
+			}
+			document["sources"] = append(sources, failed)
+			multiSourceDocument(t, document, 1)["duplicate_of"] = "https://failed.example.net/product"
+		})},
+		{name: "duplicate final URL differs from winner", body: mutateMultiExtractResponseBody(t, duplicateResponse, func(document map[string]any) {
+			multiSourceDocument(t, document, 1)["final_url"] = "https://other.example.net/product"
+		})},
+		{name: "negative source metric", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			multiSourceDocument(t, document, 0)["tokens"].(map[string]any)["cleaned_estimate"] = -1
+		})},
+		{name: "missing agreement component", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			agreement := multiConsensusFieldDocument(t, document, "/name")["agreement"].(map[string]any)
+			delete(agreement, "independent_roots")
+		})},
+		{name: "agreement exceeds page support", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			multiConsensusFieldDocument(t, document, "/name")["agreement"].(map[string]any)["pages"] = 2
+		})},
+		{name: "support root does not match URL", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			support := multiConsensusFieldDocument(t, document, "/name")["supports"].([]any)[0].(map[string]any)
+			support["root"] = "example.net"
+		})},
+		{name: "repeated support URL inflates agreement", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			field := multiConsensusFieldDocument(t, document, "/name")
+			supports := field["supports"].([]any)
+			field["supports"] = append(supports, cloneJSONMap(t, supports[0].(map[string]any)))
+			field["agreement"].(map[string]any)["pages"] = 2
+			field["agreement"].(map[string]any)["independent_roots"] = 2
+		})},
+		{name: "independent roots exceed distinct derived roots", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			sources := document["sources"].([]any)
+			secondSource := cloneJSONMap(t, sources[0].(map[string]any))
+			secondSource["url"] = "https://two.example.com/product"
+			secondSource["final_url"] = "https://two.example.com/product"
+			secondSource["snapshot_id"] = "snap-two"
+			document["sources"] = append(sources, secondSource)
+			field := multiConsensusFieldDocument(t, document, "/name")
+			supports := field["supports"].([]any)
+			secondSupport := cloneJSONMap(t, supports[0].(map[string]any))
+			secondSupport["url"] = "https://two.example.com/product"
+			secondSupport["root"] = "example.com"
+			secondSupport["receipt"] = "receipt-two"
+			secondSupport["evidence"].(map[string]any)["snapshot_id"] = "snap-two"
+			field["supports"] = append(supports, secondSupport)
+			field["agreement"].(map[string]any)["pages"] = 2
+			field["agreement"].(map[string]any)["independent_roots"] = 2
+		})},
+		{name: "missing support receipt", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			support := multiConsensusFieldDocument(t, document, "/name")["supports"].([]any)[0].(map[string]any)
+			delete(support, "receipt")
+		})},
+		{name: "unlocated support evidence", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			support := multiConsensusFieldDocument(t, document, "/name")["supports"].([]any)[0].(map[string]any)
+			support["evidence"].(map[string]any)["method"] = "unlocated"
+		})},
+		{name: "support references another snapshot", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			support := multiConsensusFieldDocument(t, document, "/name")["supports"].([]any)[0].(map[string]any)
+			support["evidence"].(map[string]any)["snapshot_id"] = "snap-other"
+		})},
+		{name: "evidence range has extra offset", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			support := multiConsensusFieldDocument(t, document, "/name")["supports"].([]any)[0].(map[string]any)
+			support["evidence"].(map[string]any)["text_range"] = []any{0, 6, 7}
+		})},
+		{name: "ambiguous field missing conflict receipt", body: mutateMultiExtractResponseBody(t, fieldAmbiguous, func(document map[string]any) {
+			conflict := multiConsensusFieldDocument(t, document, "/name")["conflicts"].([]any)[0].(map[string]any)
+			delete(conflict["supports"].([]any)[0].(map[string]any), "receipt")
+		})},
+		{name: "winner and conflict reuse one source", body: mutateMultiExtractResponseBody(t, nonAmbiguousConflict, func(document map[string]any) {
+			field := multiConsensusFieldDocument(t, document, "/name")
+			winnerSupport := cloneJSONMap(t, field["supports"].([]any)[0].(map[string]any))
+			field["conflicts"].([]any)[0].(map[string]any)["supports"] = []any{winnerSupport}
+		})},
+		{name: "ambiguous conflicts reuse one source", body: mutateMultiExtractResponseBody(t, fieldAmbiguous, func(document map[string]any) {
+			field := multiConsensusFieldDocument(t, document, "/name")
+			conflicts := field["conflicts"].([]any)
+			firstSupport := cloneJSONMap(t, conflicts[0].(map[string]any)["supports"].([]any)[0].(map[string]any))
+			conflicts[1].(map[string]any)["supports"] = []any{firstSupport}
+		})},
+		{name: "winner value is an object", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			multiConsensusFieldDocument(t, document, "/name")["value"] = map[string]any{}
+			document["data"] = map[string]any{"name": map[string]any{}}
+		})},
+		{name: "conflict value is an array", body: mutateMultiExtractResponseBody(t, fieldAmbiguous, func(document map[string]any) {
+			field := multiConsensusFieldDocument(t, document, "/name")
+			field["conflicts"].([]any)[0].(map[string]any)["value"] = []any{}
+		})},
+		{name: "non-ambiguous winner does not outrank conflict", body: mutateMultiExtractResponseBody(t, fieldAmbiguous, func(document map[string]any) {
+			field := multiConsensusFieldDocument(t, document, "/name")
+			conflicts := field["conflicts"].([]any)
+			winner := conflicts[0].(map[string]any)
+			field["value"] = winner["value"]
+			field["agreement"] = winner["agreement"]
+			field["supports"] = winner["supports"]
+			field["conflicts"] = conflicts[1:]
+			delete(field, "ambiguous")
+		})},
+		{name: "ambiguous leading conflicts are not tied", body: mutateMultiExtractResponseBody(t, fieldAmbiguous, func(document map[string]any) {
+			field := multiConsensusFieldDocument(t, document, "/name")
+			conflicts := field["conflicts"].([]any)
+			first := conflicts[0].(map[string]any)
+			secondSupport := cloneJSONMap(t, conflicts[1].(map[string]any)["supports"].([]any)[0].(map[string]any))
+			first["supports"] = append(first["supports"].([]any), secondSupport)
+			first["agreement"].(map[string]any)["pages"] = 2
+			first["agreement"].(map[string]any)["independent_roots"] = 2
+		})},
+		{name: "conflict scores increase", body: mutateMultiExtractResponseBody(t, fieldAmbiguous, func(document map[string]any) {
+			field := multiConsensusFieldDocument(t, document, "/name")
+			conflicts := field["conflicts"].([]any)
+			third := cloneJSONMap(t, conflicts[0].(map[string]any))
+			secondSupport := cloneJSONMap(t, conflicts[1].(map[string]any)["supports"].([]any)[0].(map[string]any))
+			third["supports"] = append(third["supports"].([]any), secondSupport)
+			third["agreement"].(map[string]any)["pages"] = 2
+			third["agreement"].(map[string]any)["independent_roots"] = 2
+			field["conflicts"] = append(conflicts, third)
+		})},
+		{name: "empty consensus path", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			fields := document["consensus"].(map[string]any)["fields"].(map[string]any)
+			fields[""] = fields["/name"]
+			delete(fields, "/name")
+		})},
+		{name: "oversized consensus path", body: mutateMultiExtractResponseBody(t, complete, func(document map[string]any) {
+			fields := document["consensus"].(map[string]any)["fields"].(map[string]any)
+			fields[strings.Repeat("p", maxExtractConsensusPathBytes+1)] = fields["/name"]
+			delete(fields, "/name")
+		})},
+		{name: "invalid UTF-8 consensus path", body: invalidUTF8Path},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return httpResponse(http.StatusOK, test.body), nil
+			})}
+			handler := handleExtractDataWithClient(client, "http://purify.test", "purify-api-secret")
+
+			result, protocolErr := handler(context.Background(), extractRequest(multiExtractArguments("https://one.example.com/product")))
+			if protocolErr != nil {
+				t.Fatalf("protocol error: %v", protocolErr)
+			}
+			if !result.IsError || !strings.Contains(toolResultText(t, result), "failed to parse multi-source extract response") {
+				t.Fatalf("result = %#v", result)
+			}
+		})
+	}
+}
+
 func TestHandleExtractDataRejectsInvalidArgumentsBeforeHTTP(t *testing.T) {
 	t.Parallel()
 
@@ -228,9 +681,24 @@ func TestHandleExtractDataRejectsInvalidArgumentsBeforeHTTP(t *testing.T) {
 		name      string
 		arguments map[string]any
 	}{
-		{name: "missing URL", arguments: map[string]any{"schema": validExtractSchemaJSON}},
+		{name: "missing target", arguments: map[string]any{"schema": validExtractSchemaJSON}},
+		{name: "both targets", arguments: map[string]any{
+			"url": "https://example.com", "sources": []any{"https://source.example.com"}, "schema": validExtractSchemaJSON,
+		}},
 		{name: "empty URL", arguments: map[string]any{"url": "  ", "schema": validExtractSchemaJSON}},
 		{name: "invalid URL", arguments: map[string]any{"url": "file:///private/page", "schema": validExtractSchemaJSON}},
+		{name: "null sources", arguments: map[string]any{"sources": nil, "schema": validExtractSchemaJSON}},
+		{name: "non-array sources", arguments: map[string]any{"sources": "https://example.com", "schema": validExtractSchemaJSON}},
+		{name: "empty sources", arguments: map[string]any{"sources": []any{}, "schema": validExtractSchemaJSON}},
+		{name: "too many sources", arguments: map[string]any{"sources": []any{
+			"https://1.example.com", "https://2.example.com", "https://3.example.com",
+			"https://4.example.com", "https://5.example.com", "https://6.example.com",
+			"https://7.example.com", "https://8.example.com", "https://9.example.com",
+		}, "schema": validExtractSchemaJSON}},
+		{name: "non-string source", arguments: map[string]any{"sources": []any{42}, "schema": validExtractSchemaJSON}},
+		{name: "empty source", arguments: map[string]any{"sources": []any{""}, "schema": validExtractSchemaJSON}},
+		{name: "invalid source URL", arguments: map[string]any{"sources": []any{"file:///private/page"}, "schema": validExtractSchemaJSON}},
+		{name: "invalid UTF-8 source", arguments: map[string]any{"sources": []any{"https://example.com/\xff"}, "schema": validExtractSchemaJSON}},
 		{name: "missing schema", arguments: map[string]any{"url": "https://example.com"}},
 		{name: "malformed schema", arguments: extractArguments("{")},
 		{name: "null schema", arguments: extractArguments("null")},
@@ -338,6 +806,49 @@ func TestHandleExtractDataInputLimits(t *testing.T) {
 	}
 }
 
+func TestHandleExtractDataSourceCountAndRawByteBudgets(t *testing.T) {
+	exactSources := make([]string, models.MaxExtractSources)
+	for index := range exactSources {
+		prefix := fmt.Sprintf("https://s%d.example/", index)
+		exactSources[index] = prefix + strings.Repeat("p", models.MaxExtractSourceURLBytes-len(prefix))
+		if len(exactSources[index]) != models.MaxExtractSourceURLBytes {
+			t.Fatal("source fixture is not at the per-source limit")
+		}
+	}
+	used := 0
+	for _, source := range exactSources {
+		used += len(source)
+	}
+	if used != models.MaxExtractSourcesURLBytes {
+		t.Fatalf("source fixture bytes = %d, want %d", used, models.MaxExtractSourcesURLBytes)
+	}
+
+	var calls atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return httpResponse(http.StatusOK, validMultiExtractResponseBody(t, models.MultiExtractStatusComplete)), nil
+	})}
+	handler := handleExtractDataWithClient(client, "http://purify.test", "purify-api-secret")
+
+	result, protocolErr := handler(context.Background(), extractRequest(multiExtractArguments(exactSources...)))
+	if protocolErr != nil || result.IsError {
+		t.Fatalf("exact source budget = (%#v, %v)", result, protocolErr)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("exact source budget HTTP calls = %d, want 1", got)
+	}
+
+	overSources := append([]string(nil), exactSources...)
+	overSources[len(overSources)-1] += "x"
+	result, protocolErr = handler(context.Background(), extractRequest(multiExtractArguments(overSources...)))
+	if protocolErr != nil || !result.IsError || !strings.Contains(toolResultText(t, result), "budget") {
+		t.Fatalf("source budget plus one = (%#v, %v)", result, protocolErr)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("source budget plus one made HTTP call; total = %d", got)
+	}
+}
+
 func TestDecodeExtractSchemaAcceptsExactLimitAndRejectsLimitPlusOne(t *testing.T) {
 	t.Parallel()
 
@@ -371,6 +882,49 @@ func TestHandleExtractDataNon2xxUsesStableStructuredError(t *testing.T) {
 	}
 	if got, want := toolResultText(t, result), "[EXTRACTOR_UNAVAILABLE] no active compiled extractor matches this page"; got != want {
 		t.Fatalf("tool error = %q, want %q", got, want)
+	}
+}
+
+func TestHandleExtractDataMultiNon2xxUsesStableRedactedError(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "aggregate error envelope with source summaries",
+			body: `{"success":false,"sources":[{"url":"https://one.example.com","success":false,"status":"fetch_failed","tokens":{"original_estimate":0,"cleaned_estimate":0,"savings_percent":0},"timing":{"total_ms":1,"navigation_ms":0,"cleaning_ms":0,"extraction_ms":0},"error":{"code":"NAVIGATION_FAILED","message":"source fetch failed"}}],"tokens":{"original_estimate":0,"cleaned_estimate":0,"savings_percent":0},"timing":{"total_ms":1,"navigation_ms":0,"cleaning_ms":0,"extraction_ms":0},"usage_complete":true,"error":{"code":"NO_VALID_SOURCE","message":"no valid extraction source"}}`,
+			want: "[NO_VALID_SOURCE] no valid extraction source",
+		},
+		{
+			name: "malformed envelope falls back to status",
+			body: `{"error":`,
+			want: "extraction failed (HTTP 502)",
+		},
+		{
+			name: "known credentials are redacted",
+			body: `{"error":{"code":"LLM_FAILURE","message":"Purify purify-api-secret and BYOK caller-llm-secret failed"}}`,
+			want: "[LLM_FAILURE] Purify [REDACTED] and BYOK [REDACTED] failed",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return httpResponse(http.StatusBadGateway, []byte(test.body)), nil
+			})}
+			handler := handleExtractDataWithClient(client, "http://purify.test", "purify-api-secret")
+			arguments := multiExtractArgumentsWithMany(map[string]any{
+				"engine": "llm", "llm_api_key": "caller-llm-secret",
+			}, "https://one.example.com")
+
+			result, protocolErr := handler(context.Background(), extractRequest(arguments))
+			if protocolErr != nil || !result.IsError {
+				t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
+			}
+			if got := toolResultText(t, result); got != test.want {
+				t.Fatalf("tool error = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -425,6 +979,57 @@ func TestExtractProductionClientRejectsCrossOriginRedirectWithoutLeakingAPIKey(t
 	}
 	if leakedKey.Load() {
 		t.Fatal("Purify API key leaked to redirect target")
+	}
+}
+
+func TestExtractProductionClientRejectsMultiSourceRedirectWithoutLeakingCredentials(t *testing.T) {
+	t.Parallel()
+
+	var sourceCalls atomic.Int32
+	var redirectCalls atomic.Int32
+	var leakedCredential atomic.Bool
+	client := newExtractHTTPClient()
+	client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Host {
+		case "purify.test":
+			sourceCalls.Add(1)
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Errorf("read source body: %v", err)
+			}
+			if request.Header.Get("X-API-Key") != "purify-api-secret" || bytes.Contains(body, []byte("purify-api-secret")) {
+				t.Errorf("Purify credential boundary violated: header=%q body=%s", request.Header.Get("X-API-Key"), body)
+			}
+			return &http.Response{
+				StatusCode: http.StatusTemporaryRedirect,
+				Header:     http.Header{"Location": []string{"https://redirect.test/capture"}},
+				Body:       io.NopCloser(strings.NewReader("redirecting")),
+				Request:    request,
+			}, nil
+		case "redirect.test":
+			redirectCalls.Add(1)
+			if request.Header.Get("X-API-Key") != "" {
+				leakedCredential.Store(true)
+			}
+			return httpResponse(http.StatusOK, validMultiExtractResponseBody(t, models.MultiExtractStatusComplete)), nil
+		default:
+			t.Fatalf("unexpected redirect host %q", request.URL.Host)
+			return nil, nil
+		}
+	})
+	handler := handleExtractDataWithClient(client, "http://purify.test", "purify-api-secret")
+
+	result, protocolErr := handler(context.Background(), extractRequest(multiExtractArgumentsWithMany(map[string]any{
+		"engine": "llm", "llm_api_key": "caller-llm-secret",
+	}, "https://one.example.com")))
+	if protocolErr != nil || !result.IsError {
+		t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
+	}
+	if got, want := toolResultText(t, result), "extraction failed (HTTP 307)"; got != want {
+		t.Fatalf("tool error = %q, want %q", got, want)
+	}
+	if sourceCalls.Load() != 1 || redirectCalls.Load() != 0 || leakedCredential.Load() {
+		t.Fatalf("redirect calls/source calls/leak = %d/%d/%t", redirectCalls.Load(), sourceCalls.Load(), leakedCredential.Load())
 	}
 }
 
@@ -756,6 +1361,21 @@ func TestAPIPostResponseRejectsOversizeBodyAndRetainsStatus(t *testing.T) {
 	}
 }
 
+func TestAPIPostResponseAcceptsExactResponseBodyLimit(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		body := io.NopCloser(io.LimitReader(zeroReader{}, maxAPIResponseBytes))
+		return &http.Response{StatusCode: http.StatusOK, Body: body, Header: make(http.Header)}, nil
+	})}
+
+	response, err := apiPostResponse(context.Background(), client, "http://purify.test", "secret-key", "/api/v1/extract", map[string]string{"url": "https://example.com"})
+	if err != nil {
+		t.Fatalf("exact response body limit: %v", err)
+	}
+	if response.StatusCode != http.StatusOK || int64(len(response.Body)) != maxAPIResponseBytes {
+		t.Fatalf("response status/bytes = %d/%d, want %d/%d", response.StatusCode, len(response.Body), http.StatusOK, maxAPIResponseBytes)
+	}
+}
+
 func TestHandleVerifyFactContextCancellationIsToolError(t *testing.T) {
 	t.Parallel()
 
@@ -816,6 +1436,25 @@ func extractArgumentsWithMany(values map[string]any) map[string]any {
 	return arguments
 }
 
+func multiExtractArguments(sources ...string) map[string]any {
+	values := make([]any, len(sources))
+	for index := range sources {
+		values[index] = sources[index]
+	}
+	return map[string]any{
+		"sources": values,
+		"schema":  validExtractSchemaJSON,
+	}
+}
+
+func multiExtractArgumentsWithMany(values map[string]any, sources ...string) map[string]any {
+	arguments := multiExtractArguments(sources...)
+	for name, value := range values {
+		arguments[name] = value
+	}
+	return arguments
+}
+
 func validExtractResponseBody(t *testing.T) []byte {
 	t.Helper()
 	body, err := json.Marshal(models.ExtractResponse{
@@ -829,6 +1468,204 @@ func validExtractResponseBody(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return body
+}
+
+func validMultiExtractResponseBody(t *testing.T, status models.MultiExtractStatus) []byte {
+	t.Helper()
+	body, err := json.Marshal(validMultiExtractResponse(status))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func validMultiExtractResponse(status models.MultiExtractStatus) models.MultiExtractResponse {
+	fetchedAt := time.Date(2026, time.August, 10, 1, 2, 3, 0, time.UTC)
+	support := models.MultiExtractSupport{
+		URL:  "https://one.example.com/product",
+		Root: "example.com",
+		Evidence: &evidence.Anchor{
+			Quote:      "Purify",
+			TextRange:  [2]int{0, len("Purify")},
+			Method:     evidence.MethodExact,
+			SnapshotID: "snap-one",
+			FetchedAt:  fetchedAt,
+		},
+		Receipt: "receipt-one",
+	}
+	response := models.MultiExtractResponse{
+		Success: true,
+		Status:  status,
+		Consensus: &models.MultiExtractConsensus{Fields: map[string]models.MultiExtractFieldConsensus{
+			"/name": {
+				Value:     json.RawMessage(`"Purify"`),
+				Agreement: models.MultiExtractAgreement{Pages: 1, IndependentRoots: 1},
+				Supports:  []models.MultiExtractSupport{support},
+			},
+		}},
+		Sources: []models.MultiExtractSource{{
+			URL:        "https://one.example.com/product",
+			FinalURL:   "https://one.example.com/product",
+			Success:    true,
+			Status:     models.MultiExtractSourceStatusValid,
+			SnapshotID: "snap-one",
+			Tokens:     models.TokenInfo{OriginalEstimate: 100, CleanedEstimate: 20, SavingsPercent: 80},
+			Timing:     models.ExtractTimingInfo{TotalMs: 9, NavigationMs: 6, CleaningMs: 2, ExtractionMs: 1},
+		}},
+		Tokens:        models.TokenInfo{OriginalEstimate: 100, CleanedEstimate: 20, SavingsPercent: 80},
+		Timing:        models.ExtractTimingInfo{TotalMs: 9, NavigationMs: 6, CleaningMs: 2, ExtractionMs: 1},
+		UsageComplete: true,
+	}
+	switch status {
+	case models.MultiExtractStatusComplete:
+		response.Data = json.RawMessage(`{"name":"Purify"}`)
+	case models.MultiExtractStatusSchemaInvalid:
+		response.Violations = []models.SchemaViolation{{Path: "/name", Message: "must be a number"}}
+	case models.MultiExtractStatusAmbiguous:
+		// Aggregate materialization may be ambiguous because of object presence,
+		// node kind, or array length even when no scalar field is ambiguous.
+	}
+	return response
+}
+
+func validFieldAmbiguousMultiExtractResponse() models.MultiExtractResponse {
+	response := validMultiExtractResponse(models.MultiExtractStatusAmbiguous)
+	fetchedAt := time.Date(2026, time.August, 10, 1, 2, 4, 0, time.UTC)
+	secondSupport := models.MultiExtractSupport{
+		URL:  "https://two.example.net/product",
+		Root: "example.net",
+		Evidence: &evidence.Anchor{
+			Quote:      "Other",
+			TextRange:  [2]int{0, len("Other")},
+			Method:     evidence.MethodNormalized,
+			SnapshotID: "snap-two",
+			FetchedAt:  fetchedAt,
+		},
+		Receipt: "receipt-two",
+	}
+	firstSupport := response.Consensus.Fields["/name"].Supports[0]
+	response.Consensus.Fields["/name"] = models.MultiExtractFieldConsensus{
+		Ambiguous: true,
+		Conflicts: []models.MultiExtractConflict{
+			{Value: json.RawMessage(`"Purify"`), Agreement: models.MultiExtractAgreement{Pages: 1, IndependentRoots: 1}, Supports: []models.MultiExtractSupport{firstSupport}},
+			{Value: json.RawMessage(`"Other"`), Agreement: models.MultiExtractAgreement{Pages: 1, IndependentRoots: 1}, Supports: []models.MultiExtractSupport{secondSupport}},
+		},
+	}
+	response.Sources = append(response.Sources, models.MultiExtractSource{
+		URL:        "https://two.example.net/product",
+		FinalURL:   "https://two.example.net/product",
+		Success:    true,
+		Status:     models.MultiExtractSourceStatusValid,
+		SnapshotID: "snap-two",
+		Tokens:     models.TokenInfo{OriginalEstimate: 90, CleanedEstimate: 18, SavingsPercent: 80},
+		Timing:     models.ExtractTimingInfo{TotalMs: 8, NavigationMs: 5, CleaningMs: 2, ExtractionMs: 1},
+	})
+	response.Tokens = models.TokenInfo{OriginalEstimate: 190, CleanedEstimate: 38, SavingsPercent: 80}
+	return response
+}
+
+func validNonAmbiguousConflictMultiExtractResponse() models.MultiExtractResponse {
+	response := validFieldAmbiguousMultiExtractResponse()
+	field := response.Consensus.Fields["/name"]
+	firstSupport := field.Conflicts[0].Supports[0]
+	secondSupport := field.Conflicts[1].Supports[0]
+	fetchedAt := time.Date(2026, time.August, 10, 1, 2, 5, 0, time.UTC)
+	thirdSupport := models.MultiExtractSupport{
+		URL:  "https://three.example.org/product",
+		Root: "example.org",
+		Evidence: &evidence.Anchor{
+			Quote:      "Other",
+			TextRange:  [2]int{0, len("Other")},
+			Method:     evidence.MethodFuzzy,
+			SnapshotID: "snap-three",
+			FetchedAt:  fetchedAt,
+		},
+		Receipt: "receipt-three",
+	}
+	response.Consensus.Fields["/name"] = models.MultiExtractFieldConsensus{
+		Value:     json.RawMessage(`"Purify"`),
+		Agreement: models.MultiExtractAgreement{Pages: 2, IndependentRoots: 2},
+		Supports:  []models.MultiExtractSupport{firstSupport, secondSupport},
+		Conflicts: []models.MultiExtractConflict{{
+			Value:     json.RawMessage(`"Other"`),
+			Agreement: models.MultiExtractAgreement{Pages: 1, IndependentRoots: 1},
+			Supports:  []models.MultiExtractSupport{thirdSupport},
+		}},
+	}
+	response.Status = models.MultiExtractStatusComplete
+	response.Data = json.RawMessage(`{"name":"Purify"}`)
+	response.Sources = append(response.Sources, models.MultiExtractSource{
+		URL:        "https://three.example.org/product",
+		FinalURL:   "https://three.example.org/product",
+		Success:    true,
+		Status:     models.MultiExtractSourceStatusValid,
+		SnapshotID: "snap-three",
+		Tokens:     models.TokenInfo{OriginalEstimate: 80, CleanedEstimate: 16, SavingsPercent: 80},
+		Timing:     models.ExtractTimingInfo{TotalMs: 7, NavigationMs: 4, CleaningMs: 2, ExtractionMs: 1},
+	})
+	response.Tokens = models.TokenInfo{OriginalEstimate: 270, CleanedEstimate: 54, SavingsPercent: 80}
+	return response
+}
+
+func mutateMultiExtractResponseBody(t *testing.T, response models.MultiExtractResponse, mutate func(map[string]any)) []byte {
+	t.Helper()
+	body, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(body, &document); err != nil {
+		t.Fatal(err)
+	}
+	mutate(document)
+	body, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func multiSourceDocument(t *testing.T, document map[string]any, index int) map[string]any {
+	t.Helper()
+	sources, ok := document["sources"].([]any)
+	if !ok || index < 0 || index >= len(sources) {
+		t.Fatalf("invalid sources fixture: %#v", document["sources"])
+	}
+	source, ok := sources[index].(map[string]any)
+	if !ok {
+		t.Fatalf("invalid source fixture: %#v", sources[index])
+	}
+	return source
+}
+
+func multiConsensusFieldDocument(t *testing.T, document map[string]any, path string) map[string]any {
+	t.Helper()
+	consensus, ok := document["consensus"].(map[string]any)
+	if !ok {
+		t.Fatalf("invalid consensus fixture: %#v", document["consensus"])
+	}
+	fields, ok := consensus["fields"].(map[string]any)
+	if !ok {
+		t.Fatalf("invalid consensus fields fixture: %#v", consensus["fields"])
+	}
+	field, ok := fields[path].(map[string]any)
+	if !ok {
+		t.Fatalf("invalid consensus field fixture: %#v", fields[path])
+	}
+	return field
+}
+
+func cloneJSONMap(t *testing.T, input map[string]any) map[string]any {
+	t.Helper()
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output map[string]any
+	if err := json.Unmarshal(encoded, &output); err != nil {
+		t.Fatal(err)
+	}
+	return output
 }
 
 func toolResultText(t *testing.T, result *mcp.CallToolResult) string {
