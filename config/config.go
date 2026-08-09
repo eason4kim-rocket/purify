@@ -36,6 +36,7 @@ type Config struct {
 	Storage      StorageConfig
 	Compiler     CompilerConfig
 	Heal         HealConfig
+	Search       SearchConfig
 }
 
 // CompilerConfig controls process-owned background extractor synthesis. The
@@ -54,6 +55,12 @@ type CompilerConfig struct {
 type HealConfig struct {
 	WebhookURL    string
 	WebhookSecret string
+}
+
+// SearchConfig controls the process-owned baseline Search provider. An empty
+// credential leaves Search unavailable without constructing provider state.
+type SearchConfig struct {
+	BraveKey string
 }
 
 // StorageConfig controls durable snapshots, the ledger, and receipt signing.
@@ -224,6 +231,9 @@ func Load() *Config {
 		Heal: HealConfig{
 			WebhookURL:    os.Getenv("PURIFY_HEAL_WEBHOOK_URL"),
 			WebhookSecret: os.Getenv("PURIFY_HEAL_WEBHOOK_SECRET"),
+		},
+		Search: SearchConfig{
+			BraveKey: os.Getenv("PURIFY_SEARCH_BRAVE_KEY"),
 		},
 	}
 }

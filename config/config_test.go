@@ -83,6 +83,20 @@ func TestHealConfigDefaultsAndEnvironment(t *testing.T) {
 	}
 }
 
+func TestSearchConfigDefaultsAndEnvironment(t *testing.T) {
+	t.Setenv("PURIFY_SEARCH_BRAVE_KEY", "")
+	cfg := Load()
+	if cfg.Search != (SearchConfig{}) {
+		t.Fatalf("Search defaults = %#v", cfg.Search)
+	}
+
+	t.Setenv("PURIFY_SEARCH_BRAVE_KEY", " raw-process-key ")
+	cfg = Load()
+	if cfg.Search.BraveKey != " raw-process-key " {
+		t.Fatalf("Search environment = %#v", cfg.Search)
+	}
+}
+
 func TestValidateHealConfigMatrixAndRedaction(t *testing.T) {
 	valid := HealConfig{WebhookURL: "https://hooks.example.com/heal", WebhookSecret: "process-secret"}
 	tests := []struct {

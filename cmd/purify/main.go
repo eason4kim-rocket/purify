@@ -57,6 +57,9 @@ func run() error {
 	if err := config.ValidateCompilerConfig(cfg.Compiler, cfg.Storage.SnapshotEnabled); err != nil {
 		return fmt.Errorf("validate managed compiler configuration: %w", err)
 	}
+	if err := validateManagedSearchConfig(cfg.Search); err != nil {
+		return fmt.Errorf("validate managed search configuration: %w", err)
+	}
 
 	// ── 2. Initialise structured logging ────────────────────────────
 	initLogger(cfg.Log)
@@ -115,7 +118,19 @@ func run() error {
 		return fmt.Errorf("initialise outbound network policy: %w", err)
 	}
 
-	// ── 3c. Initialise optional process-owned compiler synthesis ─────
+	// ── 3c. Initialise request-driven baseline Search ────────────────
+	managedSearch, err := newManagedSearchRuntime(cfg, outboundPolicy)
+	if err != nil {
+		return fmt.Errorf("initialise managed search: %w", err)
+	}
+	if managedSearch != nil {
+		defer managedSearch.Close()
+		slog.Info("search configured")
+	} else {
+		slog.Info("search disabled")
+	}
+
+	// ── 3d. Initialise optional process-owned compiler synthesis ─────
 	managedCompiler, err := newManagedCompilerRuntime(cfg.Compiler, ledgerStore, compiledStore, snapshotStore, outboundPolicy)
 	if err != nil {
 		return fmt.Errorf("initialise managed compiler: %w", err)
@@ -130,7 +145,7 @@ func run() error {
 	}
 	compilerBindings := bindCompilerServices(compiledStore, managedCompiler)
 
-	// ── 3d. Deliver transactionally queued verification webhooks ───
+	// ── 3e. Deliver transactionally queued verification webhooks ───
 	webhookClient, err := webhook.NewPublicHTTPClient(outboundPolicy, webhook.DefaultOutboxHTTPTimeout)
 	if err != nil {
 		return fmt.Errorf("initialise webhook HTTP client: %w", err)
@@ -146,7 +161,7 @@ func run() error {
 	}
 	defer outboxWorker.Close()
 
-	// ── 3e. Build a provenance-preserving verification service ──────
+	// ── 3f. Build a provenance-preserving verification service ──────
 	var verifyService handler.VerifyService
 	if snapshotStore != nil {
 		safeRelay, relayErr := proxy.StartDirectRelay(outboundPolicy.DialContext)
@@ -244,7 +259,20 @@ func run() error {
 
 	// ── 5. Setup router ─────────────────────────────────────────────
 	startTime := time.Now()
-	router := api.NewRouter(sc, extractService, receiptSigner, cfg, cc, startTime, scrapeService, batchService, crawlService, mapService, verifyService)
+	router := api.NewRouterWithOptions(
+		sc,
+		extractService,
+		receiptSigner,
+		cfg,
+		cc,
+		startTime,
+		scrapeService,
+		batchService,
+		crawlService,
+		mapService,
+		verifyService,
+		api.WithSearchService(managedSearchHandlerService(managedSearch)),
+	)
 
 	// ── 6. Start HTTP server ────────────────────────────────────────
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
