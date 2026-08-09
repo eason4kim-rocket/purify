@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/use-agent/purify/publicnet"
 )
 
 func TestSafeClientRejectsDNSPrivateTargetsBeforeDial(t *testing.T) {
@@ -87,17 +89,17 @@ func TestSafeClientRejectsDNSRebindingAtDial(t *testing.T) {
 	resolver := &sequenceResolver{answers: map[string][][]netip.Addr{
 		"rebind.test": {{publicAddress}, {privateAddress}},
 	}}
-	policy := targetPolicy{
-		resolver: resolver,
-		dial: func(context.Context, string, string) (net.Conn, error) {
+	policy := publicnet.NewPolicy(publicnet.Options{
+		Resolver: resolver,
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
 			t.Fatal("raw dial must not run after private rebinding")
 			return nil, nil
 		},
-	}
-	if _, err := policy.resolve(context.Background(), "rebind.test"); err != nil {
+	})
+	if _, err := policy.Resolve(context.Background(), "rebind.test"); err != nil {
 		t.Fatalf("first resolve error = %v", err)
 	}
-	if _, err := policy.dialContext(context.Background(), "tcp", "rebind.test:80"); err == nil {
+	if _, err := policy.DialContext(context.Background(), "tcp", "rebind.test:80"); err == nil {
 		t.Fatal("dialContext() error = nil")
 	}
 }

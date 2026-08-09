@@ -6,15 +6,21 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
+	"unicode"
 
+	"github.com/use-agent/purify/publicnet"
 	xproxy "golang.org/x/net/proxy"
 )
 
@@ -23,21 +29,39 @@ import (
 // handle SOCKS5 auth or HTTP proxy auth without CDP conflicts) to use
 // authenticated proxies transparently.
 type Relay struct {
-	listener    net.Listener
-	externalURL string
-	done        chan struct{}
-	serveDone   chan struct{}
-	ctx         context.Context
-	cancel      context.CancelFunc
-	closeOnce   sync.Once
-	closeErr    error
-	handlers    sync.WaitGroup
+	listener  net.Listener
+	dial      publicnet.DialContextFunc
+	done      chan struct{}
+	serveDone chan struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	closeErr  error
+	handlers  sync.WaitGroup
 }
 
 // StartRelay creates a local SOCKS5 relay on 127.0.0.1 (random port)
 // that forwards connections through the given external proxy URL.
 // Supports both socks5:// and http:// external proxies with auth.
 func StartRelay(externalProxyURL string) (*Relay, error) {
+	return startRelay(func(ctx context.Context, _ string, target string) (net.Conn, error) {
+		return dialExternal(ctx, externalProxyURL, target)
+	})
+}
+
+// StartDirectRelay creates a local SOCKS5 relay whose every CONNECT request is
+// passed to dialContext. Callers can inject publicnet.Policy.DialContext to
+// enforce fresh DNS validation and literal-IP pinning for browser traffic.
+// dialContext must honor context cancellation so Close can stop in-flight
+// connection attempts promptly.
+func StartDirectRelay(dialContext publicnet.DialContextFunc) (*Relay, error) {
+	if dialContext == nil {
+		return nil, errors.New("proxy relay: direct dialer is nil")
+	}
+	return startRelay(dialContext)
+}
+
+func startRelay(dialContext publicnet.DialContextFunc) (*Relay, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("proxy relay: listen: %w", err)
@@ -45,12 +69,12 @@ func StartRelay(externalProxyURL string) (*Relay, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &Relay{
-		listener:    listener,
-		externalURL: externalProxyURL,
-		done:        make(chan struct{}),
-		serveDone:   make(chan struct{}),
-		ctx:         ctx,
-		cancel:      cancel,
+		listener:  listener,
+		dial:      dialContext,
+		done:      make(chan struct{}),
+		serveDone: make(chan struct{}),
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 
 	go r.serve()
@@ -126,16 +150,16 @@ func (r *Relay) handle(client net.Conn) {
 		return
 	}
 
-	// Parse target address based on ATYP
+	// Parse target address based on ATYP. Keep host resolution delegated to the
+	// injected dialer so domain requests from Chrome cannot bypass its policy.
 	var target string
 	switch buf[3] {
 	case 0x01: // IPv4
 		if _, err := io.ReadFull(client, buf[:6]); err != nil {
 			return
 		}
-		target = fmt.Sprintf("%d.%d.%d.%d:%d",
-			buf[0], buf[1], buf[2], buf[3],
-			binary.BigEndian.Uint16(buf[4:6]))
+		host := net.IP(buf[:4]).String()
+		target = net.JoinHostPort(host, fmt.Sprint(binary.BigEndian.Uint16(buf[4:6])))
 	case 0x03: // Domain
 		if _, err := io.ReadFull(client, buf[:1]); err != nil {
 			return
@@ -144,28 +168,29 @@ func (r *Relay) handle(client net.Conn) {
 		if _, err := io.ReadFull(client, buf[:domainLen+2]); err != nil {
 			return
 		}
-		target = fmt.Sprintf("%s:%d",
+		target = net.JoinHostPort(
 			string(buf[:domainLen]),
-			binary.BigEndian.Uint16(buf[domainLen:domainLen+2]))
+			fmt.Sprint(binary.BigEndian.Uint16(buf[domainLen:domainLen+2])),
+		)
 	case 0x04: // IPv6
 		if _, err := io.ReadFull(client, buf[:18]); err != nil {
 			return
 		}
 		ip := net.IP(buf[:16])
 		port := binary.BigEndian.Uint16(buf[16:18])
-		target = fmt.Sprintf("[%s]:%d", ip.String(), port)
+		target = net.JoinHostPort(ip.String(), fmt.Sprint(port))
 	default:
-		client.Write([]byte{0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		writeSOCKSReply(client, 0x08)
 		return
 	}
 
-	// ── Connect through external proxy ──────────────────────────────
+	// ── Connect through the configured policy or external proxy ─────
 	dialCtx, cancel := context.WithTimeout(r.ctx, 10*time.Second)
-	remote, err := dialExternal(dialCtx, r.externalURL, target)
+	remote, err := r.dial(dialCtx, "tcp", target)
 	cancel()
 	if err != nil {
-		slog.Debug("proxy relay: dial failed", "target", target, "error", err)
-		client.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		slog.Debug("proxy relay: dial failed", "error", err)
+		writeSOCKSReply(client, socksReplyForError(err))
 		return
 	}
 	defer remote.Close()
@@ -173,14 +198,47 @@ func (r *Relay) handle(client net.Conn) {
 	defer stopRemoteClose()
 
 	// 4. Reply: success
-	client.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+	if !writeSOCKSReply(client, 0x00) {
+		return
+	}
 
 	// ── Relay data ──────────────────────────────────────────────────
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); io.Copy(remote, client) }()
-	go func() { defer wg.Done(); io.Copy(client, remote) }()
-	wg.Wait()
+	copyDone := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(remote, client)
+		copyDone <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(client, remote)
+		copyDone <- struct{}{}
+	}()
+	// A half-closed browser connection must not leave the opposite copy and its
+	// upstream socket alive until the whole relay shuts down. Closing both ends
+	// after either direction finishes makes every tunnel self-reaping.
+	<-copyDone
+	_ = client.Close()
+	_ = remote.Close()
+	<-copyDone
+}
+
+func writeSOCKSReply(connection net.Conn, reply byte) bool {
+	_, err := connection.Write([]byte{0x05, reply, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+	return err == nil
+}
+
+func socksReplyForError(err error) byte {
+	switch {
+	case errors.Is(err, publicnet.ErrNotPublic), errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
+		return 0x02 // connection not allowed by ruleset
+	case errors.Is(err, syscall.ENETUNREACH):
+		return 0x03 // network unreachable
+	case errors.Is(err, syscall.EHOSTUNREACH):
+		return 0x04 // host unreachable
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return 0x05 // connection refused
+	default:
+		return 0x01 // general SOCKS server failure
+	}
 }
 
 // dialExternal connects to the target through the external proxy.
@@ -222,6 +280,9 @@ func dialExternalHTTPConnect(ctx context.Context, u *url.URL, target string) (ne
 }
 
 func dialExternalHTTPConnectWithTLSConfig(ctx context.Context, u *url.URL, target string, tlsConfig *tls.Config) (net.Conn, error) {
+	if err := validateHTTPConnectTarget(target); err != nil {
+		return nil, err
+	}
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", u.Host)
 	if err != nil {
@@ -291,4 +352,24 @@ func dialExternalHTTPConnectWithTLSConfig(ctx context.Context, u *url.URL, targe
 	}
 	connectionOK = true
 	return conn, nil
+}
+
+func validateHTTPConnectTarget(target string) error {
+	host, rawPort, err := net.SplitHostPort(target)
+	if err != nil || host == "" || rawPort == "" || strings.Trim(rawPort, "0123456789") != "" {
+		return errors.New("proxy relay: invalid CONNECT target")
+	}
+	port, err := strconv.ParseUint(rawPort, 10, 16)
+	if err != nil || port == 0 {
+		return errors.New("proxy relay: invalid CONNECT target")
+	}
+	if (strings.HasPrefix(target, "[") || strings.Contains(host, ":")) && net.ParseIP(host) == nil {
+		return errors.New("proxy relay: invalid CONNECT target")
+	}
+	for _, character := range host {
+		if unicode.IsControl(character) || unicode.IsSpace(character) || strings.ContainsRune("/?#\\[]@", character) {
+			return errors.New("proxy relay: invalid CONNECT target")
+		}
+	}
+	return nil
 }
