@@ -34,7 +34,13 @@ var (
 	ErrInvalidConfig       = errors.New("ledger: invalid configuration")
 	ErrInvalidVerification = errors.New("ledger: invalid verification")
 	ErrUnsupportedOutcome  = errors.New("ledger: unsupported outcome")
-	ledgerOpenCoordinator  openCoordinator
+	// ErrVerificationBatchHook identifies a hook failure without exposing the
+	// hook's potentially sensitive error text.
+	ErrVerificationBatchHook = errors.New("ledger: verification batch hook failed")
+	// ErrVerificationBatchHookPanic identifies a recovered hook panic. Its
+	// fixed text never includes the recovered value or stack.
+	ErrVerificationBatchHookPanic = &verificationBatchHookPanicError{}
+	ledgerOpenCoordinator         openCoordinator
 )
 
 // Outcome is the durable three-state verdict for a claim.
@@ -77,6 +83,44 @@ type Verification struct {
 	TemplateClusterID string
 	ExtractorID       string
 	VerifiedAt        time.Time
+}
+
+// VerificationBatchState identifies the durable verification batch visible to
+// a VerificationBatchHook. Existing is true for an exact idempotent retry.
+type VerificationBatchState struct {
+	VerificationID string
+	Existing       bool
+}
+
+// VerificationBatchHook extends a verification batch transaction after its
+// normalized rows are durable within tx and before its outbox event is written.
+// The hook must use only the supplied tx, must not retain it, and must not call
+// Store methods: re-entering the Store would deadlock on its writer lock. It
+// should not perform external side effects because a later rollback cannot undo
+// them. Returned errors and panics roll back the entire transaction; panic
+// values are never exposed to callers.
+type VerificationBatchHook func(context.Context, WriteTx, VerificationBatchState) error
+
+type verificationBatchHookError struct {
+	cause error
+}
+
+func (e verificationBatchHookError) Error() string {
+	return ErrVerificationBatchHook.Error()
+}
+
+func (e verificationBatchHookError) Unwrap() []error {
+	return []error{ErrVerificationBatchHook, e.cause}
+}
+
+type verificationBatchHookPanicError struct{}
+
+func (*verificationBatchHookPanicError) Error() string {
+	return "ledger: verification batch hook panicked"
+}
+
+func (*verificationBatchHookPanicError) Unwrap() error {
+	return ErrVerificationBatchHook
 }
 
 // Store owns the SQLite connection pool. gate prevents Close from racing an
@@ -184,6 +228,20 @@ func (s *Store) RecordVerificationBatch(
 	rows []Verification,
 	event *OutboxEvent,
 ) error {
+	return s.RecordVerificationBatchWithHook(ctx, rows, event, nil)
+}
+
+// RecordVerificationBatchWithHook has the same validation, idempotency, and
+// outbox guarantees as RecordVerificationBatch and invokes hook in the same
+// transaction after normalized verification rows are available through tx.
+// Exact retries also invoke hook with Existing set to true. See
+// VerificationBatchHook for the callback's non-reentrancy contract.
+func (s *Store) RecordVerificationBatchWithHook(
+	ctx context.Context,
+	rows []Verification,
+	event *OutboxEvent,
+	hook VerificationBatchHook,
+) error {
 	if s == nil {
 		return ErrClosed
 	}
@@ -226,100 +284,114 @@ func (s *Store) RecordVerificationBatch(
 		validatedEvent = &value
 	}
 
-	s.gate.RLock()
-	defer s.gate.RUnlock()
-	if s.closed {
-		return ErrClosed
-	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("ledger: begin verification transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var existingCount int
-	if err := tx.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM verifications WHERE verification_id = ?",
-		verificationID,
-	).Scan(&existingCount); err != nil {
-		return fmt.Errorf("ledger: inspect existing verification batch: %w", err)
-	}
-	if existingCount > 0 {
-		if existingCount != len(validated) {
-			return fmt.Errorf("%w: retry row count differs for verification_id %q", ErrInvalidVerification, verificationID)
+	return s.Update(ctx, func(tx WriteTx) error {
+		var existingCount int
+		if err := tx.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM verifications WHERE verification_id = ?",
+			verificationID,
+		).Scan(&existingCount); err != nil {
+			return fmt.Errorf("ledger: inspect existing verification batch: %w", err)
 		}
-		for _, row := range validated {
-			matches, err := existingVerificationMatches(ctx, tx, row)
-			if err != nil {
-				return err
+		existing := existingCount > 0
+		if existing {
+			if existingCount != len(validated) {
+				return fmt.Errorf("%w: retry row count differs for verification_id %q", ErrInvalidVerification, verificationID)
 			}
-			if !matches {
-				return fmt.Errorf(
-					"%w: retry differs at claim_index %d for verification_id %q",
-					ErrInvalidVerification,
-					row.ClaimIndex,
-					verificationID,
-				)
+			for _, row := range validated {
+				matches, err := existingVerificationMatches(ctx, tx, row)
+				if err != nil {
+					return err
+				}
+				if !matches {
+					return fmt.Errorf(
+						"%w: retry differs at claim_index %d for verification_id %q",
+						ErrInvalidVerification,
+						row.ClaimIndex,
+						verificationID,
+					)
+				}
 			}
-		}
-		if validatedEvent != nil {
-			found, matches, err := findExistingOutbox(ctx, tx, *validatedEvent)
-			if err != nil {
-				return err
-			}
-			if !found || !matches {
-				return fmt.Errorf("%w: type %q verification_id %q", ErrOutboxConflict, validatedEvent.Type, verificationID)
-			}
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("ledger: commit idempotent verification transaction: %w", err)
-		}
-		return nil
-	}
-
-	const insert = `INSERT INTO verifications (
+		} else {
+			const insert = `INSERT INTO verifications (
 		id, verification_id, claim_index, url, host, final_url, path,
 		old_value, new_value, outcome, gone_scope, page_similarity,
 		old_snapshot_id, new_snapshot_id, old_receipt, receipt,
 		schema_hash, template_cluster_id, extractor_id, verified_at
 	) VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''),
 		NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)`
-	stmt, err := tx.PrepareContext(ctx, insert)
-	if err != nil {
-		return fmt.Errorf("ledger: prepare verification insert: %w", err)
-	}
-	defer stmt.Close()
-	for _, row := range validated {
-		if _, err := stmt.ExecContext(ctx,
-			row.ID, row.VerificationID, row.ClaimIndex, row.URL, row.Host,
-			row.FinalURL, row.Path, row.OldValue, row.NewValue,
-			row.Outcome, row.GoneScope, row.PageSimilarity,
-			row.OldSnapshotID, row.NewSnapshotID, row.OldReceipt, row.Receipt,
-			row.SchemaHash, row.TemplateClusterID, row.ExtractorID, row.VerifiedAt,
-		); err != nil {
-			return fmt.Errorf("ledger: insert verification claim %d: %w", row.ClaimIndex, err)
+			for _, row := range validated {
+				if _, err := tx.ExecContext(ctx, insert,
+					row.ID, row.VerificationID, row.ClaimIndex, row.URL, row.Host,
+					row.FinalURL, row.Path, row.OldValue, row.NewValue,
+					row.Outcome, row.GoneScope, row.PageSimilarity,
+					row.OldSnapshotID, row.NewSnapshotID, row.OldReceipt, row.Receipt,
+					row.SchemaHash, row.TemplateClusterID, row.ExtractorID, row.VerifiedAt,
+				); err != nil {
+					return fmt.Errorf("ledger: insert verification claim %d: %w", row.ClaimIndex, err)
+				}
+			}
 		}
-	}
-	if validatedEvent != nil {
-		if err := insertOutboxEvent(ctx, tx, *validatedEvent); err != nil {
+
+		if err := callVerificationBatchHook(ctx, hook, tx, VerificationBatchState{
+			VerificationID: verificationID,
+			Existing:       existing,
+		}); err != nil {
 			return err
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		if validatedEvent != nil {
+			if existing {
+				found, matches, err := findExistingOutbox(ctx, tx, *validatedEvent)
+				if err != nil {
+					return err
+				}
+				if !found || !matches {
+					return fmt.Errorf("%w: type %q verification_id %q", ErrOutboxConflict, validatedEvent.Type, verificationID)
+				}
+			} else if err := insertOutboxEvent(ctx, tx, *validatedEvent); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func callVerificationBatchHook(
+	ctx context.Context,
+	hook VerificationBatchHook,
+	tx WriteTx,
+	state VerificationBatchState,
+) (err error) {
+	if hook == nil {
+		return nil
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("ledger: commit verification transaction: %w", err)
+	completed := false
+	defer func() {
+		if !completed {
+			// recover can itself return nil for panic(nil) under the legacy
+			// GODEBUG=panicnil=1 behavior. Normal completion is therefore
+			// tracked independently from the recovered panic value.
+			_ = recover()
+			err = ErrVerificationBatchHookPanic
+		}
+	}()
+	hookErr := hook(ctx, tx, state)
+	completed = true
+	if hookErr != nil {
+		return verificationBatchHookError{cause: hookErr}
+	}
+	if err := ctx.Err(); err != nil {
+		return verificationBatchHookError{cause: err}
 	}
 	return nil
 }
 
 func existingVerificationMatches(
 	ctx context.Context,
-	tx *sql.Tx,
+	tx ReadTx,
 	row validatedVerification,
 ) (bool, error) {
 	var (
