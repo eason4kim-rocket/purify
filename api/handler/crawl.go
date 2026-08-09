@@ -172,13 +172,7 @@ func runCrawl(sc *scraper.Scraper, cl *cleaner.Cleaner, job *models.CrawlJob, re
 				sem <- struct{}{}
 				defer func() { <-sem }()
 
-				// Build scrape options.
-				opts := models.BatchOptions{
-					OutputFormat: req.Options.OutputFormat,
-					ExtractMode:  req.Options.ExtractMode,
-				}
-
-				resp := scrapeOne(sc, cl, it.url, opts)
+				resp := scrapeOne(sc, cl, it.url, req.Options)
 
 				mu.Lock()
 				results = append(results, resp)
@@ -342,4 +336,3 @@ func isExcluded(rawURL string, patterns []string) bool {
 	}
 	return false
 }
-

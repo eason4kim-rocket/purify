@@ -1,5 +1,7 @@
 package models
 
+import "slices"
+
 // ScrapeRequest is the payload for POST /api/v1/scrape.
 type ScrapeRequest struct {
 	// URL is the target page to scrape. Required.
@@ -75,6 +77,112 @@ type ScrapeRequest struct {
 	// may be served from cache if a cached entry exists within this age.
 	// Default: 0 (no caching).
 	MaxAge int `json:"max_age,omitempty" binding:"omitempty,min=0"`
+}
+
+// ScrapeOptions is the URL-independent option set shared by single-page,
+// batch, and crawl scraping. ScrapeRequest intentionally keeps these fields
+// directly addressable so existing Go callers can continue to use composite
+// literals such as ScrapeRequest{Timeout: 30} while batch and crawl keep their
+// existing nested "options" JSON object.
+//
+// Keep this field set, its types, and its tags in sync with every ScrapeRequest
+// field except URL. The contract is guarded by reflection tests.
+type ScrapeOptions struct {
+	WaitForNetworkIdle *bool             `json:"wait_for_network_idle,omitempty"`
+	Timeout            int               `json:"timeout,omitempty" binding:"omitempty,min=1,max=120"`
+	Stealth            bool              `json:"stealth,omitempty"`
+	ProxyURL           string            `json:"proxy_url,omitempty" binding:"omitempty,url"`
+	OutputFormat       string            `json:"output_format,omitempty" binding:"omitempty,oneof=markdown html text markdown_citations"`
+	ExtractMode        string            `json:"extract_mode,omitempty" binding:"omitempty,oneof=readability raw pruning auto"`
+	CSSSelector        string            `json:"css_selector,omitempty"`
+	Headers            map[string]string `json:"headers,omitempty"`
+	Cookies            []Cookie          `json:"cookies,omitempty"`
+	Actions            []Action          `json:"actions,omitempty" binding:"omitempty,max=50,dive"`
+	IncludeTags        []string          `json:"include_tags,omitempty"`
+	ExcludeTags        []string          `json:"exclude_tags,omitempty"`
+	OnlyMainContent    *bool             `json:"only_main_content,omitempty"`
+	RemoveOverlays     bool              `json:"remove_overlays,omitempty"`
+	BlockAds           bool              `json:"block_ads,omitempty"`
+	CDPURL             string            `json:"cdp_url,omitempty"`
+	MaxAge             int               `json:"max_age,omitempty" binding:"omitempty,min=0"`
+}
+
+// ScrapeOptionsFromRequest returns a detached copy of every URL-independent
+// option in request. URL is deliberately not part of ScrapeOptions.
+func ScrapeOptionsFromRequest(request *ScrapeRequest) ScrapeOptions {
+	if request == nil {
+		return ScrapeOptions{}
+	}
+	return CloneScrapeOptions(ScrapeOptions{
+		WaitForNetworkIdle: request.WaitForNetworkIdle,
+		Timeout:            request.Timeout,
+		Stealth:            request.Stealth,
+		ProxyURL:           request.ProxyURL,
+		OutputFormat:       request.OutputFormat,
+		ExtractMode:        request.ExtractMode,
+		CSSSelector:        request.CSSSelector,
+		Headers:            request.Headers,
+		Cookies:            request.Cookies,
+		Actions:            request.Actions,
+		IncludeTags:        request.IncludeTags,
+		ExcludeTags:        request.ExcludeTags,
+		OnlyMainContent:    request.OnlyMainContent,
+		RemoveOverlays:     request.RemoveOverlays,
+		BlockAds:           request.BlockAds,
+		CDPURL:             request.CDPURL,
+		MaxAge:             request.MaxAge,
+	})
+}
+
+// ApplyScrapeOptions replaces every URL-independent option on request with a
+// detached copy of options. It leaves request.URL unchanged.
+func ApplyScrapeOptions(request *ScrapeRequest, options ScrapeOptions) {
+	if request == nil {
+		return
+	}
+	options = CloneScrapeOptions(options)
+	request.WaitForNetworkIdle = options.WaitForNetworkIdle
+	request.Timeout = options.Timeout
+	request.Stealth = options.Stealth
+	request.ProxyURL = options.ProxyURL
+	request.OutputFormat = options.OutputFormat
+	request.ExtractMode = options.ExtractMode
+	request.CSSSelector = options.CSSSelector
+	request.Headers = options.Headers
+	request.Cookies = options.Cookies
+	request.Actions = options.Actions
+	request.IncludeTags = options.IncludeTags
+	request.ExcludeTags = options.ExcludeTags
+	request.OnlyMainContent = options.OnlyMainContent
+	request.RemoveOverlays = options.RemoveOverlays
+	request.BlockAds = options.BlockAds
+	request.CDPURL = options.CDPURL
+	request.MaxAge = options.MaxAge
+}
+
+// CloneScrapeOptions returns a deep copy suitable for crossing asynchronous
+// job and transport ownership boundaries. Ordered collections retain order.
+func CloneScrapeOptions(options ScrapeOptions) ScrapeOptions {
+	if options.WaitForNetworkIdle != nil {
+		value := *options.WaitForNetworkIdle
+		options.WaitForNetworkIdle = &value
+	}
+	if options.OnlyMainContent != nil {
+		value := *options.OnlyMainContent
+		options.OnlyMainContent = &value
+	}
+	if options.Headers != nil {
+		headers := make(map[string]string, len(options.Headers))
+		for key, value := range options.Headers {
+			headers[key] = value
+		}
+		options.Headers = headers
+	}
+	options.Cookies = slices.Clone(options.Cookies)
+	options.Actions = slices.Clone(options.Actions)
+	options.IncludeTags = slices.Clone(options.IncludeTags)
+	options.ExcludeTags = slices.Clone(options.ExcludeTags)
+	return options
 }
 
 // Action represents a single browser interaction in the actions pipeline.

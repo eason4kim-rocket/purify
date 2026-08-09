@@ -444,24 +444,7 @@ func cloneRequest(source *models.ScrapeRequest) *models.ScrapeRequest {
 		return nil
 	}
 	cloned := *source
-	if source.WaitForNetworkIdle != nil {
-		value := *source.WaitForNetworkIdle
-		cloned.WaitForNetworkIdle = &value
-	}
-	if source.OnlyMainContent != nil {
-		value := *source.OnlyMainContent
-		cloned.OnlyMainContent = &value
-	}
-	if source.Headers != nil {
-		cloned.Headers = make(map[string]string, len(source.Headers))
-		for key, value := range source.Headers {
-			cloned.Headers[key] = value
-		}
-	}
-	cloned.Cookies = slices.Clone(source.Cookies)
-	cloned.Actions = slices.Clone(source.Actions)
-	cloned.IncludeTags = slices.Clone(source.IncludeTags)
-	cloned.ExcludeTags = slices.Clone(source.ExcludeTags)
+	models.ApplyScrapeOptions(&cloned, models.ScrapeOptionsFromRequest(source))
 	return &cloned
 }
 

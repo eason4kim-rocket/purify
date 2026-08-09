@@ -128,7 +128,7 @@ func (service *Service) Submit(request models.BatchRequest) (*models.BatchRespon
 	}
 
 	urls := append([]string(nil), request.URLs...)
-	options := cloneBatchOptions(request.Options)
+	options := models.CloneScrapeOptions(request.Options)
 	initial := batchState{
 		ID:            id,
 		Status:        statusProcessing,
@@ -184,7 +184,7 @@ func (service *Service) Close() {
 	service.manager.Close()
 }
 
-func (service *Service) runOneSafely(ctx context.Context, targetURL string, options models.BatchOptions) (response *models.ScrapeResponse) {
+func (service *Service) runOneSafely(ctx context.Context, targetURL string, options models.ScrapeOptions) (response *models.ScrapeResponse) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			response = failureResponse(models.NewScrapeError(
@@ -197,7 +197,7 @@ func (service *Service) runOneSafely(ctx context.Context, targetURL string, opti
 	return service.runOne(ctx, targetURL, options)
 }
 
-func (service *Service) runOne(ctx context.Context, targetURL string, options models.BatchOptions) *models.ScrapeResponse {
+func (service *Service) runOne(ctx context.Context, targetURL string, options models.ScrapeOptions) *models.ScrapeResponse {
 	request := requestForURL(targetURL, options)
 	var observedFailure *models.ScrapeResponse
 	result, err := service.runner.Run(ctx, request, func(event scrape.Event) {
@@ -283,27 +283,10 @@ func (service *Service) notifyCompletion(state batchState) {
 	}()
 }
 
-func requestForURL(targetURL string, options models.BatchOptions) *models.ScrapeRequest {
-	request := &models.ScrapeRequest{
-		URL:          targetURL,
-		OutputFormat: options.OutputFormat,
-		ExtractMode:  options.ExtractMode,
-		Timeout:      options.Timeout,
-		Stealth:      options.Stealth,
-	}
-	if options.WaitForNetworkIdle != nil {
-		wait := *options.WaitForNetworkIdle
-		request.WaitForNetworkIdle = &wait
-	}
+func requestForURL(targetURL string, options models.ScrapeOptions) *models.ScrapeRequest {
+	request := &models.ScrapeRequest{URL: targetURL}
+	models.ApplyScrapeOptions(request, options)
 	return request
-}
-
-func cloneBatchOptions(source models.BatchOptions) models.BatchOptions {
-	if source.WaitForNetworkIdle != nil {
-		wait := *source.WaitForNetworkIdle
-		source.WaitForNetworkIdle = &wait
-	}
-	return source
 }
 
 func executorFailureResponse(err error) *models.ScrapeResponse {

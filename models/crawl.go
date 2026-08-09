@@ -28,11 +28,9 @@ type CrawlRequest struct {
 	WebhookSecret string `json:"webhook_secret,omitempty"`
 }
 
-// CrawlOptions are the scrape settings for each crawled page.
-type CrawlOptions struct {
-	OutputFormat string `json:"output_format,omitempty" binding:"omitempty,oneof=markdown html text"`
-	ExtractMode  string `json:"extract_mode,omitempty" binding:"omitempty,oneof=readability raw"`
-}
+// CrawlOptions is retained as a source-compatible name for the shared scrape
+// settings applied to every crawled page.
+type CrawlOptions = ScrapeOptions
 
 // CrawlResponse is the immediate response for POST /api/v1/crawl.
 type CrawlResponse struct {
@@ -42,10 +40,10 @@ type CrawlResponse struct {
 
 // CrawlStatusResponse is the response for GET /api/v1/crawl/:id.
 type CrawlStatusResponse struct {
-	ID        string           `json:"id"`
-	Status    string           `json:"status"`
-	Completed int              `json:"completed"`
-	Total     int              `json:"total"`
+	ID        string            `json:"id"`
+	Status    string            `json:"status"`
+	Completed int               `json:"completed"`
+	Total     int               `json:"total"`
 	Results   []*ScrapeResponse `json:"results,omitempty"`
 }
 

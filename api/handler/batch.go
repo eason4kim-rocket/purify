@@ -100,18 +100,12 @@ func writeBatchError(c *gin.Context, status int, code, message string) {
 
 // scrapeOne is retained only until Crawl migrates to its own canonical scrape
 // service path. Batch HTTP and domain execution no longer use this helper.
-func scrapeOne(sc *scraper.Scraper, cl *cleaner.Cleaner, targetURL string, opts models.BatchOptions) *models.ScrapeResponse {
+func scrapeOne(sc *scraper.Scraper, cl *cleaner.Cleaner, targetURL string, opts models.ScrapeOptions) *models.ScrapeResponse {
 	totalStart := time.Now()
 
 	// Build a ScrapeRequest from shared options.
-	sreq := &models.ScrapeRequest{
-		URL:                targetURL,
-		OutputFormat:       opts.OutputFormat,
-		ExtractMode:        opts.ExtractMode,
-		WaitForNetworkIdle: opts.WaitForNetworkIdle,
-		Timeout:            opts.Timeout,
-		Stealth:            opts.Stealth,
-	}
+	sreq := &models.ScrapeRequest{URL: targetURL}
+	models.ApplyScrapeOptions(sreq, opts)
 	sreq.Defaults()
 
 	// Scrape.
@@ -136,7 +130,17 @@ func scrapeOne(sc *scraper.Scraper, cl *cleaner.Cleaner, targetURL string, opts 
 
 	// Clean.
 	cleanStart := time.Now()
-	resp, err := cl.Clean(result.RawHTML, sreq.URL, sreq.OutputFormat, sreq.ExtractMode)
+	resp, err := cl.Clean(
+		result.RawHTML,
+		sreq.URL,
+		sreq.OutputFormat,
+		sreq.ExtractMode,
+		cleaner.CleanOptions{
+			IncludeTags: sreq.IncludeTags,
+			ExcludeTags: sreq.ExcludeTags,
+			CSSSelector: sreq.CSSSelector,
+		},
+	)
 	cleaningMs := time.Since(cleanStart).Milliseconds()
 
 	if err != nil {

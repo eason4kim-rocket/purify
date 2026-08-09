@@ -130,6 +130,7 @@ func TestNotifierPanicCannotEscapeSynchronousCompletion(t *testing.T) {
 
 func TestServicePreservesInputOrderAndPropagatesOptions(t *testing.T) {
 	waitForNetwork := false
+	onlyMainContent := false
 	urls := []string{"https://example.test/slow", "https://example.test/fast", "https://example.test/middle"}
 	delays := map[string]time.Duration{
 		urls[0]: 35 * time.Millisecond,
@@ -142,12 +143,7 @@ func TestServicePreservesInputOrderAndPropagatesOptions(t *testing.T) {
 		if _, hasDeadline := ctx.Deadline(); hasDeadline {
 			return nil, errors.New("batch job context unexpectedly inherited a deadline")
 		}
-		requestCopy := *request
-		if request.WaitForNetworkIdle != nil {
-			wait := *request.WaitForNetworkIdle
-			requestCopy.WaitForNetworkIdle = &wait
-		}
-		requests.Store(request.URL, requestCopy)
+		requests.Store(request.URL, models.ScrapeOptionsFromRequest(request))
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -163,12 +159,31 @@ func TestServicePreservesInputOrderAndPropagatesOptions(t *testing.T) {
 		URLs: urls,
 		Options: models.BatchOptions{
 			OutputFormat:       "html",
-			ExtractMode:        "raw",
+			ExtractMode:        "pruning",
 			WaitForNetworkIdle: &waitForNetwork,
 			Timeout:            17,
 			Stealth:            true,
+			ProxyURL:           "https://proxy.example:8443",
+			CSSSelector:        "main.content",
+			Headers:            map[string]string{"X-First": "one", "X-Second": "two"},
+			Cookies: []models.Cookie{
+				{Name: "first", Value: "one", Domain: "example.test", Path: "/"},
+				{Name: "second", Value: "two", Domain: "example.test", Path: "/docs"},
+			},
+			Actions: []models.Action{
+				{Type: "click", Selector: "#first"},
+				{Type: "execute_js", Code: "() => document.title"},
+			},
+			IncludeTags:     []string{"main", "article"},
+			ExcludeTags:     []string{"nav", ".ad"},
+			OnlyMainContent: &onlyMainContent,
+			RemoveOverlays:  true,
+			BlockAds:        true,
+			CDPURL:          "wss://browser.example/devtools/browser/id",
+			MaxAge:          12_345,
 		},
 	}
+	wantOptions := models.CloneScrapeOptions(request.Options)
 	accepted, err := service.Submit(request)
 	if err != nil {
 		t.Fatalf("Submit() error = %v", err)
@@ -180,6 +195,12 @@ func TestServicePreservesInputOrderAndPropagatesOptions(t *testing.T) {
 	// Mutating caller-owned input after Submit must not affect queued work.
 	urls[0] = "https://mutated.invalid/"
 	waitForNetwork = true
+	onlyMainContent = true
+	request.Options.Headers["X-First"] = "mutated"
+	request.Options.Cookies[0].Value = "mutated"
+	request.Options.Actions[0].Selector = "#mutated"
+	request.Options.IncludeTags[0] = ".mutated"
+	request.Options.ExcludeTags[0] = ".mutated"
 
 	status := awaitTerminal(t, service, accepted.ID)
 	if status.Status != statusCompleted || status.Completed != 3 || status.Total != 3 {
@@ -194,12 +215,9 @@ func TestServicePreservesInputOrderAndPropagatesOptions(t *testing.T) {
 		if !ok {
 			t.Fatalf("runner did not receive %q", wantURL)
 		}
-		got := stored.(models.ScrapeRequest)
-		if got.OutputFormat != "html" || got.ExtractMode != "raw" || got.Timeout != 17 || !got.Stealth {
-			t.Fatalf("request options for %q = %#v", wantURL, got)
-		}
-		if got.WaitForNetworkIdle == nil || *got.WaitForNetworkIdle {
-			t.Fatalf("wait_for_network_idle for %q = %#v, want false", wantURL, got.WaitForNetworkIdle)
+		got := stored.(models.ScrapeOptions)
+		if !reflect.DeepEqual(got, wantOptions) {
+			t.Fatalf("request options for %q = %#v, want %#v", wantURL, got, wantOptions)
 		}
 	}
 }

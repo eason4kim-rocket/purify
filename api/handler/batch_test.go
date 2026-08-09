@@ -33,14 +33,33 @@ var _ BatchService = (*batchdomain.Service)(nil)
 
 func TestPostBatchDelegatesToServiceAndPreservesResponse(t *testing.T) {
 	waitForNetworkIdle := false
+	onlyMainContent := false
 	wantRequest := models.BatchRequest{
 		URLs: []string{"https://one.example/page", "https://two.example/page"},
 		Options: models.BatchOptions{
 			OutputFormat:       "html",
-			ExtractMode:        "raw",
+			ExtractMode:        "pruning",
 			WaitForNetworkIdle: &waitForNetworkIdle,
 			Timeout:            42,
 			Stealth:            true,
+			ProxyURL:           "https://proxy.example:8443",
+			CSSSelector:        "main.content",
+			Headers:            map[string]string{"X-First": "one", "X-Second": "two"},
+			Cookies: []models.Cookie{
+				{Name: "first", Value: "one", Domain: "example.test", Path: "/"},
+				{Name: "second", Value: "two", Domain: "example.test", Path: "/docs"},
+			},
+			Actions: []models.Action{
+				{Type: "click", Selector: "#first"},
+				{Type: "execute_js", Code: "() => document.title"},
+			},
+			IncludeTags:     []string{"main", "article"},
+			ExcludeTags:     []string{"nav", ".ad"},
+			OnlyMainContent: &onlyMainContent,
+			RemoveOverlays:  true,
+			BlockAds:        true,
+			CDPURL:          "wss://browser.example/devtools/browser/id",
+			MaxAge:          12_345,
 		},
 		WebhookURL:    "https://hook.example/completed",
 		WebhookSecret: "secret",

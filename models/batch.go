@@ -13,14 +13,9 @@ type BatchRequest struct {
 	WebhookSecret string `json:"webhook_secret,omitempty"`
 }
 
-// BatchOptions are the shared scrape settings applied to every URL in a batch.
-type BatchOptions struct {
-	OutputFormat       string `json:"output_format,omitempty" binding:"omitempty,oneof=markdown html text"`
-	ExtractMode        string `json:"extract_mode,omitempty" binding:"omitempty,oneof=readability raw"`
-	WaitForNetworkIdle *bool  `json:"wait_for_network_idle,omitempty"`
-	Timeout            int    `json:"timeout,omitempty" binding:"omitempty,min=1,max=120"`
-	Stealth            bool   `json:"stealth,omitempty"`
-}
+// BatchOptions is retained as a source-compatible name for the shared scrape
+// settings applied to every URL in a batch.
+type BatchOptions = ScrapeOptions
 
 // BatchResponse is the immediate response for POST /api/v1/batch/scrape.
 type BatchResponse struct {
@@ -31,10 +26,10 @@ type BatchResponse struct {
 
 // BatchStatusResponse is the response for GET /api/v1/batch/:id.
 type BatchStatusResponse struct {
-	ID        string           `json:"id"`
-	Status    string           `json:"status"`
-	Completed int              `json:"completed"`
-	Total     int              `json:"total"`
+	ID        string            `json:"id"`
+	Status    string            `json:"status"`
+	Completed int               `json:"completed"`
+	Total     int               `json:"total"`
 	Results   []*ScrapeResponse `json:"results,omitempty"`
 }
 
