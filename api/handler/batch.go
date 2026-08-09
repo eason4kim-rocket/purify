@@ -1,19 +1,13 @@
 package handler
 
 import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	batchdomain "github.com/use-agent/purify/batch"
-	"github.com/use-agent/purify/cleaner"
 	"github.com/use-agent/purify/jobs"
 	"github.com/use-agent/purify/models"
-	"github.com/use-agent/purify/scraper"
 )
 
 // BatchService is the transport-neutral subset of batch.Service used by the
@@ -96,89 +90,4 @@ func writeBatchError(c *gin.Context, status int, code, message string) {
 			Message: message,
 		},
 	})
-}
-
-// scrapeOne is retained only until Crawl migrates to its own canonical scrape
-// service path. Batch HTTP and domain execution no longer use this helper.
-func scrapeOne(sc *scraper.Scraper, cl *cleaner.Cleaner, targetURL string, opts models.ScrapeOptions) *models.ScrapeResponse {
-	totalStart := time.Now()
-
-	// Build a ScrapeRequest from shared options.
-	sreq := &models.ScrapeRequest{URL: targetURL}
-	models.ApplyScrapeOptions(sreq, opts)
-	sreq.Defaults()
-
-	// Scrape.
-	navStart := time.Now()
-	result, err := sc.DoScrape(context.Background(), sreq)
-	navigationMs := time.Since(navStart).Milliseconds()
-
-	if err != nil {
-		scrapeErr, ok := err.(*models.ScrapeError)
-		if !ok {
-			scrapeErr = models.NewScrapeError(models.ErrCodeInternal, err.Error(), err)
-		}
-		return &models.ScrapeResponse{
-			Success: false,
-			Error:   scrapeErr.ToDetail(),
-			Timing: models.TimingInfo{
-				TotalMs:      time.Since(totalStart).Milliseconds(),
-				NavigationMs: navigationMs,
-			},
-		}
-	}
-
-	// Clean.
-	cleanStart := time.Now()
-	resp, err := cl.Clean(
-		result.RawHTML,
-		sreq.URL,
-		sreq.OutputFormat,
-		sreq.ExtractMode,
-		cleaner.CleanOptions{
-			IncludeTags: sreq.IncludeTags,
-			ExcludeTags: sreq.ExcludeTags,
-			CSSSelector: sreq.CSSSelector,
-		},
-	)
-	cleaningMs := time.Since(cleanStart).Milliseconds()
-
-	if err != nil {
-		scrapeErr, ok := err.(*models.ScrapeError)
-		if !ok {
-			scrapeErr = models.NewScrapeError(models.ErrCodeInternal, err.Error(), err)
-		}
-		return &models.ScrapeResponse{
-			Success: false,
-			Error:   scrapeErr.ToDetail(),
-			Timing: models.TimingInfo{
-				TotalMs:      time.Since(totalStart).Milliseconds(),
-				NavigationMs: navigationMs,
-				CleaningMs:   cleaningMs,
-			},
-		}
-	}
-
-	// Title fallback.
-	if resp.Metadata.Title == "" {
-		resp.Metadata.Title = result.Title
-	}
-
-	resp.StatusCode = result.StatusCode
-	resp.FinalURL = result.FinalURL
-	resp.EngineUsed = result.EngineUsed
-	resp.Timing = models.TimingInfo{
-		TotalMs:      time.Since(totalStart).Milliseconds(),
-		NavigationMs: navigationMs,
-		CleaningMs:   cleaningMs,
-	}
-
-	return resp
-}
-
-// randomID is retained only until Crawl migrates to its domain job manager.
-func randomID() string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
 }

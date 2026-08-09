@@ -15,6 +15,7 @@ import (
 	"github.com/use-agent/purify/cache"
 	"github.com/use-agent/purify/cleaner"
 	"github.com/use-agent/purify/config"
+	crawldomain "github.com/use-agent/purify/crawl"
 	"github.com/use-agent/purify/engine"
 	extractdomain "github.com/use-agent/purify/extract"
 	"github.com/use-agent/purify/jobs"
@@ -93,7 +94,7 @@ func main() {
 	if jobWorkers <= 0 {
 		jobWorkers = 5
 	}
-	jobExecutor, err := jobs.NewExecutor(jobWorkers, 100)
+	jobExecutor, err := jobs.NewExecutor(jobWorkers, 500)
 	if err != nil {
 		slog.Error("failed to initialise background job executor", "error", err)
 		os.Exit(1)
@@ -108,6 +109,15 @@ func main() {
 	}
 	defer batchService.Close()
 
+	crawlService, err := crawldomain.NewService(scrapeService, jobExecutor, crawldomain.Config{})
+	if err != nil {
+		slog.Error("failed to initialise crawl service", "error", err)
+		batchService.Close()
+		jobExecutor.Close()
+		os.Exit(1)
+	}
+	defer crawlService.Close()
+
 	// ── 4e. Initialise LLM client ───────────────────────────────────
 	llmClient := llm.NewClient(nil)
 	extractService, err := extractdomain.NewService(scrapeService, llmClient, receiptSigner, extractdomain.Config{})
@@ -118,7 +128,7 @@ func main() {
 
 	// ── 5. Setup router ─────────────────────────────────────────────
 	startTime := time.Now()
-	router := api.NewRouter(sc, cl, extractService, receiptSigner, cfg, cc, startTime, scrapeService, batchService)
+	router := api.NewRouter(sc, cl, extractService, receiptSigner, cfg, cc, startTime, scrapeService, batchService, crawlService)
 
 	// ── 6. Start HTTP server ────────────────────────────────────────
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
