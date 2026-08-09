@@ -127,6 +127,7 @@ type preparedSource struct {
 	rootJSON  int
 	simText   uint64
 	signature []byte
+	document  any
 	fields    map[string]scalarValue
 	paths     map[string]string
 	basis     map[string]evidence.Anchor
@@ -159,13 +160,27 @@ type exactNumber struct {
 
 // Merge performs field-level consensus over one to eight successful source
 // results. It is pure: inputs are copied, and output ordering is independent
-// of input order.
+// of input order. It shares the MergeWithMaterialization implementation while
+// preserving the original field-only 32 MiB output contract.
 func Merge(results []SourceResult) (Result, error) {
+	result, _, err := merge(results, false)
+	return result, err
+}
+
+// MergeWithMaterialization returns both the existing field-level consensus and
+// a typed merged document when every topology, presence, length, and scalar
+// vote has an unambiguous winner. Ambiguity is a successful outcome represented
+// by MaterializationStatusAmbiguous and a nil Data field.
+func MergeWithMaterialization(results []SourceResult) (Result, Materialization, error) {
+	return merge(results, true)
+}
+
+func merge(results []SourceResult, withMaterialization bool) (Result, Materialization, error) {
 	if len(results) == 0 {
-		return Result{}, fmt.Errorf("%w: at least one source is required", ErrInvalidInput)
+		return Result{}, Materialization{}, fmt.Errorf("%w: at least one source is required", ErrInvalidInput)
 	}
 	if len(results) > MaxSources {
-		return Result{}, fmt.Errorf("%w: sources exceed %d", ErrResourceLimit, MaxSources)
+		return Result{}, Materialization{}, fmt.Errorf("%w: sources exceed %d", ErrResourceLimit, MaxSources)
 	}
 
 	prepared := make([]preparedSource, 0, len(results))
@@ -176,14 +191,14 @@ func Merge(results []SourceResult) (Result, error) {
 	for index, result := range results {
 		source, dataBytes, metadataBytes, err := prepareSource(index, result)
 		if err != nil {
-			return Result{}, err
+			return Result{}, Materialization{}, err
 		}
 		if dataBytes > MaxTotalDataBytes-totalDataBytes {
-			return Result{}, fmt.Errorf("%w: source data exceeds %d aggregate bytes", ErrResourceLimit, MaxTotalDataBytes)
+			return Result{}, Materialization{}, fmt.Errorf("%w: source data exceeds %d aggregate bytes", ErrResourceLimit, MaxTotalDataBytes)
 		}
 		totalDataBytes += dataBytes
 		if metadataBytes > MaxTotalMetadataBytes-totalMetadataBytes {
-			return Result{}, fmt.Errorf("%w: source metadata exceeds %d aggregate bytes", ErrResourceLimit, MaxTotalMetadataBytes)
+			return Result{}, Materialization{}, fmt.Errorf("%w: source metadata exceeds %d aggregate bytes", ErrResourceLimit, MaxTotalMetadataBytes)
 		}
 		totalMetadataBytes += metadataBytes
 		sourcePaths := make([]string, 0, len(source.paths))
@@ -194,14 +209,14 @@ func Merge(results []SourceResult) (Result, error) {
 		for _, path := range sourcePaths {
 			identity := source.paths[path]
 			if prior, exists := pathIdentities[path]; exists && prior != identity {
-				return Result{}, fmt.Errorf("%w: evidence path %q has inconsistent JSON structure", ErrInvalidInput, path)
+				return Result{}, Materialization{}, fmt.Errorf("%w: evidence path %q has inconsistent JSON structure", ErrInvalidInput, path)
 			}
 			pathIdentities[path] = identity
 		}
 
 		if priorIndex, duplicate := byURL[source.url]; duplicate {
 			if !sourcesEqual(prepared[priorIndex], source) {
-				return Result{}, fmt.Errorf("%w: canonical URL %q has non-identical results", ErrDuplicateSourceConflict, source.url)
+				return Result{}, Materialization{}, fmt.Errorf("%w: canonical URL %q has non-identical results", ErrDuplicateSourceConflict, source.url)
 			}
 			continue
 		}
@@ -213,13 +228,21 @@ func Merge(results []SourceResult) (Result, error) {
 	components := independentComponents(prepared)
 	paths := collectPaths(prepared)
 	if err := preflightOutput(paths, prepared, components); err != nil {
-		return Result{}, err
+		return Result{}, Materialization{}, err
+	}
+	materialization := Materialization{}
+	if withMaterialization {
+		var materializationErr error
+		materialization, materializationErr = materializePrepared(prepared, components)
+		if materializationErr != nil {
+			return Result{}, Materialization{}, materializationErr
+		}
 	}
 	fields := make(map[string]FieldConsensus, len(paths))
 	for _, path := range paths {
 		fields[path] = mergeField(path, prepared, components)
 	}
-	return Result{Fields: fields}, nil
+	return Result{Fields: fields}, materialization, nil
 }
 
 func prepareSource(index int, result SourceResult) (preparedSource, int, int, error) {
@@ -314,6 +337,7 @@ func prepareSource(index int, result SourceResult) (preparedSource, int, int, er
 		rootJSON:  jsonMarshalStringLen(root),
 		simText:   result.SimText,
 		signature: documentSignature(document),
+		document:  document,
 		fields:    fields,
 		paths:     structuralPaths,
 		basis:     basis,
