@@ -165,6 +165,362 @@ func TestSearchWebToolContract(t *testing.T) {
 	assertHint(t, "openWorldHint", tool.Annotations.OpenWorldHint, true)
 }
 
+func TestAnswerFactToolContract(t *testing.T) {
+	t.Parallel()
+
+	tool := newAnswerFactTool()
+	if tool.Name != "answer_fact" {
+		t.Fatalf("tool name = %q, want answer_fact", tool.Name)
+	}
+	if !reflect.DeepEqual(tool.InputSchema.Required, []string{"subject", "predicate"}) {
+		t.Fatalf("required = %#v, want subject and predicate", tool.InputSchema.Required)
+	}
+	if got, ok := tool.InputSchema.AdditionalProperties.(bool); !ok || got {
+		t.Fatalf("additionalProperties = %#v, want false", tool.InputSchema.AdditionalProperties)
+	}
+	wantTypes := map[string]string{
+		"subject": "string", "predicate": "string", "freshness": "string",
+		"min_independent_sources": "integer", "on_conflict": "string", "timeout": "integer",
+	}
+	for name, want := range wantTypes {
+		property, ok := tool.InputSchema.Properties[name].(map[string]any)
+		if !ok || property["type"] != want {
+			t.Fatalf("property %q = %#v, want type %q", name, tool.InputSchema.Properties[name], want)
+		}
+	}
+	if got := tool.InputSchema.Properties["freshness"].(map[string]any)["default"]; got != models.DefaultAnswerFreshness {
+		t.Fatalf("freshness default = %#v", got)
+	}
+	if got := tool.InputSchema.Properties["freshness"].(map[string]any)["enum"]; !reflect.DeepEqual(got, []string{"day", "1d", "week", "7d", "month", "year"}) {
+		t.Fatalf("freshness enum = %#v", got)
+	}
+	if got := tool.InputSchema.Properties["min_independent_sources"].(map[string]any)["default"]; got != float64(models.DefaultAnswerMinIndependentSources) {
+		t.Fatalf("minimum default = %#v", got)
+	}
+	if got := tool.InputSchema.Properties["on_conflict"].(map[string]any)["default"]; got != string(models.FactConflictExpose) {
+		t.Fatalf("on_conflict default = %#v", got)
+	}
+	if got := tool.InputSchema.Properties["timeout"].(map[string]any)["default"]; got != float64(models.DefaultAnswerTimeoutSeconds) {
+		t.Fatalf("timeout default = %#v", got)
+	}
+	if got := tool.InputSchema.Properties["subject"].(map[string]any)["maxLength"]; got != models.MaxAnswerSubjectRunes {
+		t.Fatalf("subject maxLength = %#v", got)
+	}
+	if got := tool.InputSchema.Properties["predicate"].(map[string]any)["maxLength"]; got != models.MaxAnswerPredicateBytes {
+		t.Fatalf("predicate maxLength = %#v", got)
+	}
+	assertHint(t, "readOnlyHint", tool.Annotations.ReadOnlyHint, true)
+	assertHint(t, "destructiveHint", tool.Annotations.DestructiveHint, false)
+	assertHint(t, "idempotentHint", tool.Annotations.IdempotentHint, false)
+	assertHint(t, "openWorldHint", tool.Annotations.OpenWorldHint, true)
+}
+
+func TestHandleAnswerFactNestedPayloadAndStructuredResult(t *testing.T) {
+	t.Parallel()
+
+	response := validKnownAnswerResponse()
+	body, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodPost || request.URL.String() != "http://purify.test/api/v1/answer" {
+			t.Errorf("request = %s %s", request.Method, request.URL)
+		}
+		if got := request.Header.Get("X-API-Key"); got != "purify-api-secret" {
+			t.Errorf("X-API-Key = %q", got)
+		}
+		requestBody, readErr := io.ReadAll(request.Body)
+		if readErr != nil {
+			t.Errorf("read request: %v", readErr)
+		}
+		if bytes.Contains(requestBody, []byte("purify-api-secret")) {
+			t.Errorf("process credential leaked into body: %s", requestBody)
+		}
+		var document map[string]json.RawMessage
+		if err := json.Unmarshal(requestBody, &document); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if len(document) != 2 || document["spec"] == nil || document["timeout"] == nil {
+			t.Errorf("top-level request = %s", requestBody)
+		}
+		for _, forbidden := range []string{"schema", "engine", "llm_api_key", "llm_model", "llm_base_url"} {
+			if _, present := document[forbidden]; present {
+				t.Errorf("request contains forbidden field %q", forbidden)
+			}
+		}
+		var payload answerAPIPayload
+		decoder := json.NewDecoder(bytes.NewReader(requestBody))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&payload); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		if payload.Spec.Subject != "anthropic claude" || payload.Spec.Predicate != "price_per_mtok_input" ||
+			payload.Spec.Freshness != models.DefaultAnswerFreshness ||
+			payload.Spec.MinIndependentSources != models.DefaultAnswerMinIndependentSources ||
+			payload.Spec.OnConflict != models.FactConflictExpose || payload.Timeout != models.DefaultAnswerTimeoutSeconds {
+			t.Errorf("payload = %#v", payload)
+		}
+		return httpResponse(http.StatusOK, body), nil
+	})}
+
+	result, protocolErr := handleAnswerFactWithClient(client, "http://purify.test", "purify-api-secret")(
+		context.Background(), answerRequest(map[string]any{
+			"subject": "  anthropic\u00a0 claude  ", "predicate": "price_per_mtok_input",
+		}),
+	)
+	if protocolErr != nil || result == nil || result.IsError {
+		t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
+	}
+	got, ok := result.StructuredContent.(models.AnswerResponse)
+	if !ok || !reflect.DeepEqual(got, response) {
+		t.Fatalf("structured response = %#v, want %#v", result.StructuredContent, response)
+	}
+	fallback := toolResultText(t, result)
+	var decodedFallback models.AnswerResponse
+	if err := json.Unmarshal([]byte(fallback), &decodedFallback); err != nil || !reflect.DeepEqual(decodedFallback, response) {
+		t.Fatalf("fallback = %q, decoded=%#v, err=%v", fallback, decodedFallback, err)
+	}
+}
+
+func TestAnswerPayloadStrictRuntimeValidation(t *testing.T) {
+	t.Parallel()
+
+	invalidUTF8 := string([]byte{0xff})
+	threeHundredRunes := strings.Repeat("s", models.MaxAnswerSubjectRunes)
+	tests := []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "missing subject", args: map[string]any{"predicate": "price"}},
+		{name: "missing predicate", args: map[string]any{"subject": "model"}},
+		{name: "unknown", args: map[string]any{"subject": "model", "predicate": "price", "schema": `{}`}},
+		{name: "subject type", args: map[string]any{"subject": true, "predicate": "price"}},
+		{name: "subject empty", args: map[string]any{"subject": "   ", "predicate": "price"}},
+		{name: "subject bytes", args: map[string]any{"subject": strings.Repeat("s", models.MaxAnswerSubjectBytes+1), "predicate": "price"}},
+		{name: "subject UTF-8", args: map[string]any{"subject": invalidUTF8, "predicate": "price"}},
+		{name: "subject control", args: map[string]any{"subject": "bad\tmodel", "predicate": "price"}},
+		{name: "subject runes", args: map[string]any{"subject": strings.Repeat("界", models.MaxAnswerSubjectRunes+1), "predicate": "price"}},
+		{name: "subject words", args: map[string]any{"subject": strings.Repeat("w ", models.MaxAnswerSubjectWords) + "w", "predicate": "price"}},
+		{name: "predicate empty", args: map[string]any{"subject": "model", "predicate": ""}},
+		{name: "predicate bytes", args: map[string]any{"subject": "model", "predicate": strings.Repeat("p", models.MaxAnswerPredicateBytes+1)}},
+		{name: "predicate whitespace", args: map[string]any{"subject": "model", "predicate": "unit price"}},
+		{name: "combined query", args: map[string]any{"subject": threeHundredRunes, "predicate": strings.Repeat("p", 101)}},
+		{name: "freshness", args: map[string]any{"subject": "model", "predicate": "price", "freshness": "hour"}},
+		{name: "minimum type", args: map[string]any{"subject": "model", "predicate": "price", "min_independent_sources": "2"}},
+		{name: "minimum fraction", args: map[string]any{"subject": "model", "predicate": "price", "min_independent_sources": 2.5}},
+		{name: "minimum NaN", args: map[string]any{"subject": "model", "predicate": "price", "min_independent_sources": math.NaN()}},
+		{name: "minimum infinity", args: map[string]any{"subject": "model", "predicate": "price", "min_independent_sources": math.Inf(1)}},
+		{name: "minimum low", args: map[string]any{"subject": "model", "predicate": "price", "min_independent_sources": 0}},
+		{name: "minimum high", args: map[string]any{"subject": "model", "predicate": "price", "min_independent_sources": 9}},
+		{name: "conflict", args: map[string]any{"subject": "model", "predicate": "price", "on_conflict": "choose"}},
+		{name: "timeout fraction", args: map[string]any{"subject": "model", "predicate": "price", "timeout": 1.5}},
+		{name: "timeout high", args: map[string]any{"subject": "model", "predicate": "price", "timeout": 121}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := answerPayload(test.args); err == nil {
+				t.Fatalf("answerPayload accepted %#v", test.args)
+			}
+		})
+	}
+
+	atLimit, err := answerPayload(map[string]any{
+		"subject": strings.Repeat("界", models.MaxAnswerSubjectRunes), "predicate": strings.Repeat("p", 99),
+		"min_independent_sources": float64(models.MaxAnswerMinIndependentSources), "timeout": float64(models.MaxAnswerTimeoutSeconds),
+	})
+	if err != nil || atLimit.Spec.MinIndependentSources != models.MaxAnswerMinIndependentSources || atLimit.Timeout != models.MaxAnswerTimeoutSeconds {
+		t.Fatalf("at-limit payload = %#v, err=%v", atLimit, err)
+	}
+}
+
+func TestDecodeAnswerFactResponseAcceptsKnownAndEveryUnknownReason(t *testing.T) {
+	t.Parallel()
+
+	responses := []models.AnswerResponse{
+		validKnownAnswerResponse(),
+		validUnknownAnswerResponse(models.AnswerUnknownNoSearchResults),
+		validUnknownAnswerResponse(models.AnswerUnknownNoValidSources),
+		validUnknownAnswerResponse(models.AnswerUnknownMissingValue),
+		validUnknownAnswerResponse(models.AnswerUnknownInsufficient),
+		validUnknownAnswerResponse(models.AnswerUnknownConflict),
+	}
+	for _, response := range responses {
+		response := response
+		t.Run(string(response.Status)+"/"+string(response.Reason), func(t *testing.T) {
+			body, err := json.Marshal(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := decodeAnswerFactResponse(body, models.DefaultAnswerMinIndependentSources)
+			if err != nil || !reflect.DeepEqual(got, response) {
+				t.Fatalf("decode = %#v, err=%v, want %#v", got, err, response)
+			}
+		})
+	}
+}
+
+func TestDecodeAnswerFactResponseRejectsMalformedOrInconsistentDocuments(t *testing.T) {
+	base := validKnownAnswerResponse()
+	baseBody, err := json.Marshal(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name    string
+		body    []byte
+		minimum int
+	}{
+		{name: "null", body: []byte(`null`), minimum: 2},
+		{name: "trailing value", body: append(append([]byte(nil), baseBody...), []byte(` {}`)...), minimum: 2},
+		{name: "duplicate field", body: bytes.Replace(baseBody, []byte(`{"status":"known"`), []byte(`{"status":"known","status":"known"`), 1), minimum: 2},
+		{name: "escaped duplicate field", body: bytes.Replace(baseBody, []byte(`{"status":"known"`), []byte(`{"status":"known","\u0073tatus":"known"`), 1), minimum: 2},
+		{name: "case-smuggled top field", body: mutateAnswerResponseBody(t, base, func(document map[string]any) { document["Status"] = "known" }), minimum: 2},
+		{name: "case-smuggled nested field", body: mutateAnswerResponseBody(t, base, func(document map[string]any) {
+			document["belief"].(map[string]any)["agreement"].(map[string]any)["Pages"] = float64(2)
+		}), minimum: 2},
+		{name: "200 error envelope", body: []byte(`{"error":{"code":"BAD","message":"bad"}}`), minimum: 2},
+		{name: "request minimum not met", body: baseBody, minimum: 3},
+		{name: "overstated distinct roots", body: mutateAnswerResponseBody(t, base, func(document map[string]any) {
+			evidence := document["belief"].(map[string]any)["evidence"].([]any)
+			evidence[1].(map[string]any)["url"] = "https://b.example.com/price"
+			evidence[1].(map[string]any)["root"] = "example.com"
+		}), minimum: 2},
+		{name: "lease is not exact 24h", body: mutateAnswerResponseBody(t, base, func(document map[string]any) {
+			document["lease"].(map[string]any)["expires_at"] = "2026-08-11T01:02:04Z"
+		}), minimum: 2},
+		{name: "known alternative ties winner", body: mutateAnswerResponseBody(t, base, func(document map[string]any) {
+			document["conflicts"] = []any{map[string]any{"value": "$20", "agreement": map[string]any{"pages": float64(2), "independent_roots": float64(2)}}}
+		}), minimum: 2},
+		{name: "known page budget", body: mutateAnswerResponseBody(t, base, func(document map[string]any) {
+			document["conflicts"] = []any{map[string]any{"value": "$20", "agreement": map[string]any{"pages": float64(7), "independent_roots": float64(1)}}}
+		}), minimum: 2},
+		{name: "non-string belief", body: mutateAnswerResponseBody(t, base, func(document map[string]any) {
+			document["belief"].(map[string]any)["value"] = float64(19)
+		}), minimum: 2},
+		{name: "receipt key mismatch", body: mutateAnswerResponseBody(t, base, func(document map[string]any) {
+			receipts := document["belief"].(map[string]any)["receipts"].(map[string]any)
+			delete(receipts, "https://b.example.org/price")
+			receipts["https://unmatched.example.net/"] = "receipt"
+		}), minimum: 2},
+		{name: "unknown conflict repeats closest", body: mutateAnswerResponseBody(t, validUnknownAnswerResponse(models.AnswerUnknownConflict), func(document map[string]any) {
+			document["conflicts"].([]any)[0].(map[string]any)["value"] = "$19"
+		}), minimum: 2},
+		{name: "unknown wrong need", body: mutateAnswerResponseBody(t, validUnknownAnswerResponse(models.AnswerUnknownInsufficient), func(document map[string]any) {
+			document["needs"].(map[string]any)["more_independent_sources"] = float64(2)
+		}), minimum: 2},
+		{name: "empty optional conflicts", body: mutateAnswerResponseBody(t, base, func(document map[string]any) { document["conflicts"] = []any{} }), minimum: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := decodeAnswerFactResponse(test.body, test.minimum); err == nil {
+				t.Fatalf("decoder accepted malformed body: %s", test.body)
+			}
+		})
+	}
+}
+
+func TestHandleAnswerFactErrorsSecretScanAndResponseLimit(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		body        []byte
+		wantContain string
+		wantAbsent  string
+	}{
+		{name: "structured error", status: http.StatusTooManyRequests, body: []byte(`{"error":{"code":"RATE_LIMITED","message":"slow down"}}`), wantContain: "[RATE_LIMITED] slow down"},
+		{name: "malformed error", status: http.StatusBadGateway, body: []byte(`{"error":{"code":"BAD"}}`), wantContain: "answer failed (HTTP 502)"},
+		{name: "escaped secret success", status: http.StatusOK, body: bytes.Replace(mustJSON(t, validKnownAnswerResponse()), []byte(`"$19"`), []byte(`"purify-api-\u0073ecret"`), 1), wantContain: "sensitive data", wantAbsent: "purify-api-secret"},
+		{name: "escaped secret error", status: http.StatusBadRequest, body: []byte(`{"error":{"code":"BAD","message":"purify-api-\u0073ecret"}}`), wantContain: "sensitive data", wantAbsent: "purify-api-secret"},
+		{name: "exact response limit", status: http.StatusOK, body: answerResponseBodyAtSize(t, int(maxAPIResponseBytes)), wantContain: `"status":"unknown"`},
+		{name: "response limit plus one", status: http.StatusOK, body: answerResponseBodyAtSize(t, int(maxAPIResponseBytes)+1), wantContain: "exceeds"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return httpResponse(test.status, test.body), nil
+			})}
+			result, protocolErr := handleAnswerFactWithClient(client, "http://purify.test", "purify-api-secret")(
+				context.Background(), answerRequest(map[string]any{"subject": "model", "predicate": "price"}),
+			)
+			if protocolErr != nil || result == nil {
+				t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
+			}
+			text := toolResultText(t, result)
+			if !strings.Contains(text, test.wantContain) {
+				t.Fatalf("text = %q, want %q", text, test.wantContain)
+			}
+			if test.wantAbsent != "" && strings.Contains(text, test.wantAbsent) {
+				t.Fatalf("text leaks %q: %q", test.wantAbsent, text)
+			}
+			if test.name == "exact response limit" && result.IsError {
+				t.Fatalf("exact limit rejected: %s", text)
+			}
+			if test.name != "exact response limit" && test.status == http.StatusOK && !strings.Contains(test.name, "secret") && !result.IsError {
+				t.Fatalf("malformed/oversized success was accepted: %s", text)
+			}
+		})
+	}
+}
+
+func TestHandleAnswerFactContextRedirectAndRequestMinimumAreFrozen(t *testing.T) {
+	t.Run("client timeout and redirects", func(t *testing.T) {
+		client := newAnswerHTTPClient()
+		if client.Timeout != 120*time.Second {
+			t.Fatalf("timeout = %s", client.Timeout)
+		}
+		if err := client.CheckRedirect(&http.Request{}, nil); err != http.ErrUseLastResponse {
+			t.Fatalf("redirect error = %v", err)
+		}
+	})
+
+	t.Run("cancelled before HTTP", func(t *testing.T) {
+		var calls atomic.Int32
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return httpResponse(http.StatusOK, mustJSON(t, validKnownAnswerResponse())), nil
+		})}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		result, protocolErr := handleAnswerFactWithClient(client, "http://purify.test", "purify-api-secret")(
+			ctx, answerRequest(map[string]any{"subject": "model", "predicate": "price"}),
+		)
+		if protocolErr != nil || !result.IsError || calls.Load() != 0 || !strings.Contains(toolResultText(t, result), "canceled") {
+			t.Fatalf("result=%#v, protocolErr=%v, calls=%d", result, protocolErr, calls.Load())
+		}
+	})
+
+	t.Run("request minimum copied before transport", func(t *testing.T) {
+		arguments := map[string]any{"subject": "model", "predicate": "price", "min_independent_sources": 3}
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			arguments["min_independent_sources"] = 1
+			return httpResponse(http.StatusOK, mustJSON(t, validKnownAnswerResponse())), nil
+		})}
+		result, protocolErr := handleAnswerFactWithClient(client, "http://purify.test", "purify-api-secret")(
+			context.Background(), answerRequest(arguments),
+		)
+		if protocolErr != nil || !result.IsError || !strings.Contains(toolResultText(t, result), "known answer belief is invalid") {
+			t.Fatalf("result=%#v, protocolErr=%v", result, protocolErr)
+		}
+	})
+
+	t.Run("encoding slot wait observes cancellation", func(t *testing.T) {
+		for range cap(answerEncodingSlots) {
+			answerEncodingSlots <- struct{}{}
+		}
+		defer func() {
+			for range cap(answerEncodingSlots) {
+				<-answerEncodingSlots
+			}
+		}()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := encodeAnswerToolResponse(ctx, validUnknownAnswerResponse(models.AnswerUnknownNoSearchResults)); err == nil {
+			t.Fatal("encoding accepted cancelled context")
+		}
+	})
+}
+
 func TestHandleSearchWebRequestShapeAndCredentialSeparation(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -2231,6 +2587,99 @@ func extractRequest(arguments map[string]any) mcp.CallToolRequest {
 
 func searchRequest(arguments map[string]any) mcp.CallToolRequest {
 	return mcp.CallToolRequest{Params: mcp.CallToolParams{Arguments: arguments}}
+}
+
+func answerRequest(arguments map[string]any) mcp.CallToolRequest {
+	return mcp.CallToolRequest{Params: mcp.CallToolParams{Arguments: arguments}}
+}
+
+func validKnownAnswerResponse() models.AnswerResponse {
+	asOf := time.Date(2026, time.August, 10, 1, 2, 3, 0, time.UTC)
+	firstURL := "https://a.example.com/price"
+	secondURL := "https://b.example.org/price"
+	return models.AnswerResponse{
+		Status: models.AnswerStatusKnown,
+		Belief: &models.AnswerBelief{
+			Value:      json.RawMessage(`"$19"`),
+			Confidence: models.AnswerConfidenceMedium,
+			Agreement:  models.MultiExtractAgreement{Pages: 2, IndependentRoots: 2},
+			AsOf:       asOf,
+			Evidence: []models.AnswerEvidence{
+				{
+					URL: firstURL, Root: "example.com", Quote: "$19", TextRange: [2]int{0, 3},
+					Method: evidence.MethodExact, SnapshotID: "sha256:" + strings.Repeat("a", 64), FetchedAt: asOf.Add(-time.Minute),
+				},
+				{
+					URL: secondURL, Root: "example.org", Quote: "$19", TextRange: [2]int{4, 7},
+					Selector: ".price", Method: evidence.MethodCompiled, SnapshotID: "sha256:" + strings.Repeat("b", 64), FetchedAt: asOf,
+				},
+			},
+			Receipts: map[string]string{firstURL: "receipt-one", secondURL: "receipt-two"},
+		},
+		Lease: &models.AnswerLease{
+			ExpiresAt:          asOf.Add(time.Duration(models.DefaultAnswerLeaseSeconds) * time.Second),
+			RenewURL:           models.DefaultAnswerRenewURL,
+			ConfidenceHalflife: models.DefaultAnswerConfidenceHalflifeSeconds,
+		},
+	}
+}
+
+func validUnknownAnswerResponse(reason models.AnswerUnknownReason) models.AnswerResponse {
+	response := models.AnswerResponse{
+		Status: models.AnswerStatusUnknown,
+		Belief: nil,
+		Reason: reason,
+		Needs:  &models.AnswerNeeds{MoreIndependentSources: models.DefaultAnswerMinIndependentSources},
+	}
+	switch reason {
+	case models.AnswerUnknownInsufficient:
+		response.Closest = &models.AnswerClosest{
+			Value: json.RawMessage(`"$19"`), IndependentRoots: 1, Note: "insufficient independent roots",
+		}
+		response.Needs.MoreIndependentSources = 1
+	case models.AnswerUnknownConflict:
+		response.Closest = &models.AnswerClosest{
+			Value: json.RawMessage(`"$19"`), IndependentRoots: 2, Note: "independent-root tie",
+		}
+		response.Needs.MoreIndependentSources = 1
+		response.Conflicts = []models.AnswerCandidate{{
+			Value: json.RawMessage(`"$20"`), Agreement: models.MultiExtractAgreement{Pages: 2, IndependentRoots: 2},
+		}}
+	}
+	return response
+}
+
+func mutateAnswerResponseBody(t *testing.T, response models.AnswerResponse, mutate func(map[string]any)) []byte {
+	t.Helper()
+	body := mustJSON(t, response)
+	var document map[string]any
+	if err := json.Unmarshal(body, &document); err != nil {
+		t.Fatal(err)
+	}
+	mutate(document)
+	return mustJSON(t, document)
+}
+
+func answerResponseBodyAtSize(t *testing.T, size int) []byte {
+	t.Helper()
+	body := mustJSON(t, validUnknownAnswerResponse(models.AnswerUnknownNoSearchResults))
+	if size < len(body) {
+		t.Fatalf("response size %d is smaller than fixture %d", size, len(body))
+	}
+	body = append(body, bytes.Repeat([]byte(" "), size-len(body))...)
+	if len(body) != size {
+		t.Fatalf("answer response bytes = %d, want %d", len(body), size)
+	}
+	return body
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	body, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
 }
 
 func validSearchResponse() models.SearchResponse {

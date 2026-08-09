@@ -39,6 +39,11 @@ const (
 	maxExtractConsensusPathBytes       = 4 << 10
 	maxSearchQueryBytes                = models.MaxSearchQueryRunes * utf8.UTFMax
 	maxSearchRawDomainBytes            = models.MaxSearchDomainBytes*utf8.UTFMax + 1
+	maxAnswerValueBytes                = 64 << 10
+	maxAnswerQuoteBytes                = 8 << 10
+	maxAnswerSelectorBytes             = 4 << 10
+	maxAnswerReceiptBytes              = 2 << 20
+	maxAnswerRootBytes                 = 253
 )
 
 type apiHTTPResponse struct {
@@ -76,6 +81,13 @@ type searchAPIPayload struct {
 	LLMModel       string          `json:"llm_model,omitempty"`
 	LLMBaseURL     string          `json:"llm_base_url,omitempty"`
 	Timeout        int             `json:"timeout,omitempty"`
+}
+
+// answerAPIPayload keeps the MCP's ergonomic flat arguments out of the HTTP
+// contract. The API always receives one explicit, fully-defaulted fact spec.
+type answerAPIPayload struct {
+	Spec    models.FactSpec `json:"spec"`
+	Timeout int             `json:"timeout"`
 }
 
 // scrapeRequest mirrors the Purify API request model.
@@ -290,6 +302,57 @@ func newSearchWebTool() mcp.Tool {
 	return tool
 }
 
+func newAnswerFactTool() mcp.Tool {
+	tool := mcp.NewTool("answer_fact",
+		mcp.WithDescription("Answer one scalar fact from independently rooted web evidence, returning either a supported belief or an honest unknown result."),
+		mcp.WithString("subject",
+			mcp.Required(),
+			mcp.Description("Fact subject, normalized to single spaces before search"),
+			mcp.MaxLength(models.MaxAnswerSubjectRunes),
+		),
+		mcp.WithString("predicate",
+			mcp.Required(),
+			mcp.Description("Whitespace-free scalar fact predicate"),
+			mcp.MaxLength(models.MaxAnswerPredicateBytes),
+		),
+		mcp.WithString("freshness",
+			mcp.Description("Provider-neutral recency requirement"),
+			mcp.Enum("day", "1d", "week", "7d", "month", "year"),
+			mcp.DefaultString(models.DefaultAnswerFreshness),
+		),
+		mcp.WithNumber("min_independent_sources",
+			mcp.Description("Independent roots required before returning a belief"),
+			mcp.Min(1),
+			mcp.Max(models.MaxAnswerMinIndependentSources),
+			mcp.DefaultNumber(models.DefaultAnswerMinIndependentSources),
+		),
+		mcp.WithString("on_conflict",
+			mcp.Description("Conflict policy; Phase 5 always exposes competing values"),
+			mcp.Enum(string(models.FactConflictExpose)),
+			mcp.DefaultString(string(models.FactConflictExpose)),
+		),
+		mcp.WithNumber("timeout",
+			mcp.Description("End-to-end timeout in seconds (default: 30, max: 120)"),
+			mcp.Min(1),
+			mcp.Max(models.MaxAnswerTimeoutSeconds),
+			mcp.DefaultNumber(models.DefaultAnswerTimeoutSeconds),
+		),
+		mcp.WithSchemaAdditionalProperties(false),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
+	)
+	// mcp-go v0.44 exposes WithNumber only. The runtime also enforces exact
+	// integral values, but advertise the narrower schema to clients.
+	for _, name := range []string{"min_independent_sources", "timeout"} {
+		if property, ok := tool.InputSchema.Properties[name].(map[string]any); ok {
+			property["type"] = "integer"
+		}
+	}
+	return tool
+}
+
 func main() {
 	apiURL := os.Getenv("PURIFY_API_URL")
 	if apiURL == "" {
@@ -376,6 +439,7 @@ func main() {
 
 	s.AddTool(newExtractDataTool(), handleExtractData(apiURL, apiKey))
 	s.AddTool(newSearchWebTool(), handleSearchWeb(apiURL, apiKey))
+	s.AddTool(newAnswerFactTool(), handleAnswerFact(apiURL, apiKey))
 
 	if err := server.ServeStdio(s); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
@@ -870,6 +934,214 @@ func handleExtractData(apiURL, apiKey string) server.ToolHandlerFunc {
 
 func handleSearchWeb(apiURL, apiKey string) server.ToolHandlerFunc {
 	return handleSearchWebWithClient(newSearchHTTPClient(), apiURL, apiKey)
+}
+
+func handleAnswerFact(apiURL, apiKey string) server.ToolHandlerFunc {
+	return handleAnswerFactWithClient(newAnswerHTTPClient(), apiURL, apiKey)
+}
+
+func newAnswerHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 120 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func handleAnswerFactWithClient(client *http.Client, apiURL, apiKey string) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		payload, err := answerPayload(request.GetArguments())
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if ctx == nil {
+			return mcp.NewToolResultError("answer request failed: context is required"), nil
+		}
+		if err := ctx.Err(); err != nil {
+			return answerContextToolError(err, apiKey), nil
+		}
+		taskContext, cancel := context.WithTimeout(ctx, time.Duration(payload.Timeout)*time.Second)
+		defer cancel()
+		if err := taskContext.Err(); err != nil {
+			return answerContextToolError(err, apiKey), nil
+		}
+
+		apiResponse, err := apiPostResponse(taskContext, client, apiURL, apiKey, "/api/v1/answer", payload)
+		if err != nil {
+			if contextErr := taskContext.Err(); contextErr != nil {
+				return answerContextToolError(contextErr, apiKey), nil
+			}
+			return mcp.NewToolResultError(redactAnswerSecrets(fmt.Sprintf("answer request failed: %v", err), apiKey)), nil
+		}
+		if err := taskContext.Err(); err != nil {
+			return answerContextToolError(err, apiKey), nil
+		}
+
+		containsSecret, scanErr := searchJSONContainsSecret(apiResponse.Body, apiKey)
+		if err := taskContext.Err(); err != nil {
+			return answerContextToolError(err, apiKey), nil
+		}
+		if scanErr != nil {
+			if apiResponse.StatusCode == http.StatusOK {
+				return mcp.NewToolResultError("failed to parse answer response"), nil
+			}
+			return mcp.NewToolResultError(fmt.Sprintf("answer failed (HTTP %d)", apiResponse.StatusCode)), nil
+		}
+		if containsSecret {
+			return mcp.NewToolResultError("failed to parse answer response: response contains sensitive data"), nil
+		}
+
+		if apiResponse.StatusCode != http.StatusOK {
+			message := answerAPIError(apiResponse.StatusCode, apiResponse.Body)
+			if err := taskContext.Err(); err != nil {
+				return answerContextToolError(err, apiKey), nil
+			}
+			return mcp.NewToolResultError(redactAnswerSecrets(message, apiKey)), nil
+		}
+
+		response, err := decodeAnswerFactResponse(apiResponse.Body, payload.Spec.MinIndependentSources)
+		if contextErr := taskContext.Err(); contextErr != nil {
+			return answerContextToolError(contextErr, apiKey), nil
+		}
+		if err != nil {
+			return mcp.NewToolResultError(redactAnswerSecrets(fmt.Sprintf("failed to parse answer response: %v", err), apiKey)), nil
+		}
+		encoded, err := encodeAnswerToolResponse(taskContext, response)
+		if contextErr := taskContext.Err(); contextErr != nil {
+			return answerContextToolError(contextErr, apiKey), nil
+		}
+		if err != nil {
+			return mcp.NewToolResultError("failed to format answer response"), nil
+		}
+		return mcp.NewToolResultStructured(response, string(encoded)), nil
+	}
+}
+
+func answerContextToolError(err error, secrets ...string) *mcp.CallToolResult {
+	return mcp.NewToolResultError(redactAnswerSecrets(fmt.Sprintf("answer request failed: %v", err), secrets...))
+}
+
+var answerEncodingSlots = make(chan struct{}, 4)
+
+func encodeAnswerToolResponse(ctx context.Context, response models.AnswerResponse) ([]byte, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case answerEncodingSlots <- struct{}{}:
+		defer func() { <-answerEncodingSlots }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(response)
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) == 0 || len(encoded) > models.MaxAnswerResponseBytes || !json.Valid(encoded) {
+		return nil, fmt.Errorf("encoded answer response exceeds its output budget")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return encoded, nil
+}
+
+var answerArgumentNames = map[string]struct{}{
+	"subject": {}, "predicate": {}, "freshness": {}, "min_independent_sources": {},
+	"on_conflict": {}, "timeout": {},
+}
+
+func answerPayload(arguments map[string]any) (answerAPIPayload, error) {
+	unknown := make([]string, 0)
+	for name := range arguments {
+		if _, ok := answerArgumentNames[name]; !ok {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return answerAPIPayload{}, fmt.Errorf("unsupported answer_fact argument %q", unknown[0])
+	}
+
+	subject, present, err := strictSearchString(arguments, "subject")
+	if err != nil || !present {
+		return answerAPIPayload{}, fmt.Errorf("subject is required and must be a string")
+	}
+	if len(subject) == 0 || len(subject) > models.MaxAnswerSubjectBytes || !utf8.ValidString(subject) ||
+		utf8.RuneCountInString(subject) > models.MaxAnswerSubjectRunes || strings.IndexFunc(subject, unicode.IsControl) >= 0 {
+		return answerAPIPayload{}, fmt.Errorf("subject is invalid or exceeds its public limit")
+	}
+	normalizedSubject := strings.Join(strings.Fields(subject), " ")
+	if normalizedSubject == "" || len(strings.Fields(normalizedSubject)) > models.MaxAnswerSubjectWords {
+		return answerAPIPayload{}, fmt.Errorf("subject must contain between 1 and %d words", models.MaxAnswerSubjectWords)
+	}
+
+	predicate, present, err := strictSearchString(arguments, "predicate")
+	if err != nil || !present {
+		return answerAPIPayload{}, fmt.Errorf("predicate is required and must be a string")
+	}
+	if len(predicate) == 0 || len(predicate) > models.MaxAnswerPredicateBytes || !utf8.ValidString(predicate) ||
+		strings.IndexFunc(predicate, func(character rune) bool { return unicode.IsSpace(character) || unicode.IsControl(character) }) >= 0 {
+		return answerAPIPayload{}, fmt.Errorf("predicate must be a non-empty whitespace-free UTF-8 string of at most %d bytes", models.MaxAnswerPredicateBytes)
+	}
+
+	query := normalizedSubject + " " + predicate
+	if utf8.RuneCountInString(query) > models.MaxSearchQueryRunes || len(strings.Fields(query)) > models.MaxSearchQueryWords {
+		return answerAPIPayload{}, fmt.Errorf("subject and predicate exceed the combined search query limit")
+	}
+
+	freshness, freshnessPresent, err := strictSearchString(arguments, "freshness")
+	if err != nil {
+		return answerAPIPayload{}, err
+	}
+	if !freshnessPresent {
+		freshness = models.DefaultAnswerFreshness
+	}
+	switch freshness {
+	case "day", "1d", "week", "7d", "month", "year":
+	default:
+		return answerAPIPayload{}, fmt.Errorf("freshness must be day, 1d, week, 7d, month, or year")
+	}
+
+	minimum, err := optionalSearchInteger(arguments, "min_independent_sources", models.DefaultAnswerMinIndependentSources, 1, models.MaxAnswerMinIndependentSources)
+	if err != nil {
+		return answerAPIPayload{}, err
+	}
+	onConflict, conflictPresent, err := strictSearchString(arguments, "on_conflict")
+	if err != nil {
+		return answerAPIPayload{}, err
+	}
+	if !conflictPresent {
+		onConflict = string(models.FactConflictExpose)
+	}
+	if onConflict != string(models.FactConflictExpose) {
+		return answerAPIPayload{}, fmt.Errorf("on_conflict must be expose")
+	}
+	timeout, err := optionalSearchInteger(arguments, "timeout", models.DefaultAnswerTimeoutSeconds, 1, models.MaxAnswerTimeoutSeconds)
+	if err != nil {
+		return answerAPIPayload{}, err
+	}
+
+	return answerAPIPayload{
+		Spec: models.FactSpec{
+			Subject:               normalizedSubject,
+			Predicate:             predicate,
+			Freshness:             freshness,
+			MinIndependentSources: minimum,
+			OnConflict:            models.FactConflictPolicy(onConflict),
+		},
+		Timeout: timeout,
+	}, nil
 }
 
 func newSearchHTTPClient() *http.Client {
@@ -1957,6 +2229,575 @@ func searchJSONContainsSecret(body []byte, secrets ...string) (bool, error) {
 			}
 		}
 	}
+}
+
+func decodeAnswerFactResponse(body []byte, minimum int) (models.AnswerResponse, error) {
+	if minimum < 1 || minimum > models.MaxAnswerMinIndependentSources {
+		return models.AnswerResponse{}, fmt.Errorf("requested independent-source minimum is invalid")
+	}
+	if !utf8.Valid(body) {
+		return models.AnswerResponse{}, fmt.Errorf("response must be valid UTF-8")
+	}
+	if err := rejectDuplicateJSONFields(body); err != nil {
+		return models.AnswerResponse{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var response *models.AnswerResponse
+	if err := decoder.Decode(&response); err != nil {
+		return models.AnswerResponse{}, err
+	}
+	if response == nil {
+		return models.AnswerResponse{}, fmt.Errorf("response must be a JSON object")
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return models.AnswerResponse{}, err
+	}
+
+	fields, err := answerObjectFields(body, "answer response", "status", "belief", "reason", "needs", "closest", "conflicts", "lease")
+	if err != nil {
+		return models.AnswerResponse{}, err
+	}
+	if err := requirePresentAnswerFields(fields, "answer response", "status"); err != nil {
+		return models.AnswerResponse{}, err
+	}
+	if _, present := fields["belief"]; !present {
+		return models.AnswerResponse{}, fmt.Errorf("answer response is missing required field %q", "belief")
+	}
+	if err := validateAnswerFactRawShape(*response, fields); err != nil {
+		return models.AnswerResponse{}, err
+	}
+	if err := validateAnswerFactResponseForRequest(*response, minimum); err != nil {
+		return models.AnswerResponse{}, err
+	}
+	return *response, nil
+}
+
+func validateAnswerFactRawShape(response models.AnswerResponse, fields map[string]json.RawMessage) error {
+	if err := validateAnswerCandidateRawArray(fields["conflicts"], response.Conflicts, "answer conflicts", false); err != nil {
+		return err
+	}
+	switch response.Status {
+	case models.AnswerStatusKnown:
+		if err := rejectPresentAnswerFields(fields, "known answer", "reason", "needs", "closest"); err != nil {
+			return err
+		}
+		beliefRaw, present := fields["belief"]
+		if !present || answerJSONNull(beliefRaw) || response.Belief == nil {
+			return fmt.Errorf("known answer is missing belief")
+		}
+		leaseRaw, present := fields["lease"]
+		if !present || answerJSONNull(leaseRaw) || response.Lease == nil {
+			return fmt.Errorf("known answer is missing lease")
+		}
+		if err := validateAnswerBeliefRaw(*response.Belief, beliefRaw); err != nil {
+			return err
+		}
+		return validateAnswerLeaseRaw(leaseRaw)
+	case models.AnswerStatusUnknown:
+		if !answerJSONNull(fields["belief"]) || response.Belief != nil {
+			return fmt.Errorf("unknown answer belief must be null")
+		}
+		if err := rejectPresentAnswerFields(fields, "unknown answer", "lease"); err != nil {
+			return err
+		}
+		if err := requirePresentAnswerFields(fields, "unknown answer", "reason", "needs"); err != nil {
+			return err
+		}
+		if err := validateAnswerNeedsRaw(fields["needs"]); err != nil {
+			return err
+		}
+		if rawClosest, present := fields["closest"]; present {
+			if answerJSONNull(rawClosest) || response.Closest == nil {
+				return fmt.Errorf("answer closest must not be null")
+			}
+			if err := validateAnswerClosestRaw(rawClosest); err != nil {
+				return err
+			}
+		} else if response.Closest != nil {
+			return fmt.Errorf("unknown answer is missing closest")
+		}
+		return nil
+	default:
+		return fmt.Errorf("answer response contains an invalid status")
+	}
+}
+
+func validateAnswerBeliefRaw(belief models.AnswerBelief, raw json.RawMessage) error {
+	fields, err := answerObjectFields(raw, "answer belief", "value", "confidence", "agreement", "as_of", "evidence", "receipts")
+	if err != nil {
+		return err
+	}
+	if err := requirePresentAnswerFields(fields, "answer belief", "value", "confidence", "agreement", "as_of", "evidence", "receipts"); err != nil {
+		return err
+	}
+	if err := validateAnswerAgreementRaw(fields["agreement"], "answer belief agreement"); err != nil {
+		return err
+	}
+	var rawEvidence []json.RawMessage
+	if err := json.Unmarshal(fields["evidence"], &rawEvidence); err != nil || rawEvidence == nil || len(rawEvidence) != len(belief.Evidence) {
+		return fmt.Errorf("answer belief evidence must be a matching JSON array")
+	}
+	for index := range rawEvidence {
+		if err := validateAnswerEvidenceRaw(belief.Evidence[index], rawEvidence[index], fmt.Sprintf("answer evidence %d", index)); err != nil {
+			return err
+		}
+	}
+	var rawReceipts map[string]json.RawMessage
+	if err := json.Unmarshal(fields["receipts"], &rawReceipts); err != nil || rawReceipts == nil || len(rawReceipts) != len(belief.Receipts) {
+		return fmt.Errorf("answer belief receipts must be a matching JSON object")
+	}
+	return nil
+}
+
+func validateAnswerEvidenceRaw(item models.AnswerEvidence, raw json.RawMessage, name string) error {
+	fields, err := answerObjectFields(raw, name, "url", "root", "quote", "text_range", "selector", "method", "snapshot_id", "fetched_at")
+	if err != nil {
+		return err
+	}
+	if err := requirePresentAnswerFields(fields, name, "url", "root", "quote", "text_range", "method", "snapshot_id", "fetched_at"); err != nil {
+		return err
+	}
+	_, selectorPresent := fields["selector"]
+	if selectorPresent != (item.Selector != "") {
+		return fmt.Errorf("%s selector presence is invalid", name)
+	}
+	return nil
+}
+
+func validateAnswerLeaseRaw(raw json.RawMessage) error {
+	fields, err := answerObjectFields(raw, "answer lease", "expires_at", "renew_url", "confidence_halflife_s")
+	if err != nil {
+		return err
+	}
+	return requirePresentAnswerFields(fields, "answer lease", "expires_at", "renew_url", "confidence_halflife_s")
+}
+
+func validateAnswerNeedsRaw(raw json.RawMessage) error {
+	fields, err := answerObjectFields(raw, "answer needs", "more_independent_sources")
+	if err != nil {
+		return err
+	}
+	return requirePresentAnswerFields(fields, "answer needs", "more_independent_sources")
+}
+
+func validateAnswerClosestRaw(raw json.RawMessage) error {
+	fields, err := answerObjectFields(raw, "answer closest", "value", "independent_roots", "note")
+	if err != nil {
+		return err
+	}
+	return requirePresentAnswerFields(fields, "answer closest", "value", "independent_roots", "note")
+}
+
+func validateAnswerAgreementRaw(raw json.RawMessage, name string) error {
+	fields, err := answerObjectFields(raw, name, "pages", "independent_roots")
+	if err != nil {
+		return err
+	}
+	return requirePresentAnswerFields(fields, name, "pages", "independent_roots")
+}
+
+func validateAnswerCandidateRawArray(raw json.RawMessage, candidates []models.AnswerCandidate, name string, required bool) error {
+	if len(raw) == 0 {
+		if required || len(candidates) != 0 {
+			return fmt.Errorf("%s is missing", name)
+		}
+		return nil
+	}
+	var rawCandidates []json.RawMessage
+	if err := json.Unmarshal(raw, &rawCandidates); err != nil || rawCandidates == nil || len(rawCandidates) == 0 || len(rawCandidates) != len(candidates) {
+		return fmt.Errorf("%s must be a matching non-empty JSON array", name)
+	}
+	for index, rawCandidate := range rawCandidates {
+		candidateName := fmt.Sprintf("%s candidate %d", name, index)
+		fields, err := answerObjectFields(rawCandidate, candidateName, "value", "agreement")
+		if err != nil {
+			return err
+		}
+		if _, present := fields["value"]; !present {
+			return fmt.Errorf("%s is missing required field %q", candidateName, "value")
+		}
+		if err := requirePresentAnswerFields(fields, candidateName, "agreement"); err != nil {
+			return err
+		}
+		if err := validateAnswerAgreementRaw(fields["agreement"], candidateName+" agreement"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateAnswerFactResponseForRequest(response models.AnswerResponse, minimum int) error {
+	if len(response.Conflicts) > models.MaxExtractSources || !orderedAnswerFactCandidates(response.Conflicts) {
+		return fmt.Errorf("answer conflicts exceed their ordering or count limit")
+	}
+	conflictValues := make(map[string]struct{}, len(response.Conflicts))
+	for _, conflict := range response.Conflicts {
+		if !validAnswerFactAgreement(conflict.Agreement) {
+			return fmt.Errorf("answer contains an invalid conflict agreement")
+		}
+		canonical, ok := canonicalAnswerFactValue(conflict.Value, true)
+		if !ok {
+			return fmt.Errorf("answer contains an invalid conflict value")
+		}
+		if _, duplicate := conflictValues[canonical]; duplicate {
+			return fmt.Errorf("answer repeats a conflict value")
+		}
+		conflictValues[canonical] = struct{}{}
+	}
+
+	switch response.Status {
+	case models.AnswerStatusKnown:
+		if response.Belief == nil || response.Reason != "" || response.Needs != nil || response.Closest != nil || response.Lease == nil {
+			return fmt.Errorf("known answer has an invalid shape")
+		}
+		if err := validateKnownAnswerFact(*response.Belief, *response.Lease, minimum); err != nil {
+			return err
+		}
+		if len(response.Conflicts)+1 > models.MaxExtractSources || !answerFactPageBudgetFits(response.Belief.Agreement.Pages, response.Conflicts) {
+			return fmt.Errorf("known answer exceeds its candidate budget")
+		}
+		winnerValue, _ := canonicalAnswerFactValue(response.Belief.Value, false)
+		for _, conflict := range response.Conflicts {
+			candidateValue, _ := canonicalAnswerFactValue(conflict.Value, true)
+			if candidateValue == winnerValue || conflict.Agreement.IndependentRoots >= response.Belief.Agreement.IndependentRoots {
+				return fmt.Errorf("known answer contains an invalid alternative")
+			}
+		}
+		return nil
+	case models.AnswerStatusUnknown:
+		return validateUnknownAnswerFact(response, minimum)
+	default:
+		return fmt.Errorf("answer response contains an invalid status")
+	}
+}
+
+func validateKnownAnswerFact(belief models.AnswerBelief, lease models.AnswerLease, minimum int) error {
+	if _, ok := canonicalAnswerFactValue(belief.Value, false); !ok || !validAnswerFactAgreement(belief.Agreement) ||
+		belief.Agreement.IndependentRoots < minimum || !validAnswerFactTime(belief.AsOf) ||
+		len(belief.Evidence) != belief.Agreement.Pages || len(belief.Receipts) != len(belief.Evidence) {
+		return fmt.Errorf("known answer belief is invalid")
+	}
+	if belief.Confidence != answerFactConfidence(belief.Agreement.IndependentRoots) {
+		return fmt.Errorf("known answer confidence is inconsistent")
+	}
+	seenURLs := make(map[string]struct{}, len(belief.Evidence))
+	distinctRoots := make(map[string]struct{}, len(belief.Evidence))
+	for _, item := range belief.Evidence {
+		if !validAnswerFactEvidence(item, belief.AsOf) {
+			return fmt.Errorf("known answer evidence is invalid")
+		}
+		if _, duplicate := seenURLs[item.URL]; duplicate {
+			return fmt.Errorf("known answer repeats an evidence URL")
+		}
+		seenURLs[item.URL] = struct{}{}
+		distinctRoots[item.Root] = struct{}{}
+		receipt, present := belief.Receipts[item.URL]
+		if !present || !validAnswerFactReceipt(receipt) {
+			return fmt.Errorf("known answer receipt set is invalid")
+		}
+	}
+	if belief.Agreement.IndependentRoots > len(distinctRoots) {
+		return fmt.Errorf("known answer overstates independent roots")
+	}
+	for rawURL := range belief.Receipts {
+		if _, present := seenURLs[rawURL]; !present {
+			return fmt.Errorf("known answer contains an unmatched receipt")
+		}
+	}
+	if !validAnswerFactTime(lease.ExpiresAt) ||
+		!lease.ExpiresAt.Equal(belief.AsOf.Add(time.Duration(models.DefaultAnswerLeaseSeconds)*time.Second)) ||
+		lease.RenewURL != models.DefaultAnswerRenewURL ||
+		lease.ConfidenceHalflife != models.DefaultAnswerConfidenceHalflifeSeconds {
+		return fmt.Errorf("known answer lease is invalid")
+	}
+	return nil
+}
+
+func validateUnknownAnswerFact(response models.AnswerResponse, minimum int) error {
+	if response.Belief != nil || response.Lease != nil || !validAnswerFactUnknownReason(response.Reason) ||
+		response.Needs == nil || response.Needs.MoreIndependentSources < 1 ||
+		response.Needs.MoreIndependentSources > models.MaxAnswerMinIndependentSources {
+		return fmt.Errorf("unknown answer has an invalid shape")
+	}
+	closestRoots := 0
+	var closestValue string
+	if response.Closest != nil {
+		var ok bool
+		closestValue, ok = canonicalAnswerFactValue(response.Closest.Value, false)
+		if !ok || response.Closest.IndependentRoots < 1 || response.Closest.IndependentRoots > models.MaxExtractSources {
+			return fmt.Errorf("unknown answer closest candidate is invalid")
+		}
+		closestRoots = response.Closest.IndependentRoots
+	}
+	expectedNeed := minimum - closestRoots
+	if expectedNeed < 1 {
+		expectedNeed = 1
+	}
+	if response.Needs.MoreIndependentSources != expectedNeed {
+		return fmt.Errorf("unknown answer need is inconsistent")
+	}
+
+	switch response.Reason {
+	case models.AnswerUnknownNoSearchResults, models.AnswerUnknownNoValidSources, models.AnswerUnknownMissingValue:
+		if response.Closest != nil || len(response.Conflicts) != 0 || response.Needs.MoreIndependentSources != minimum {
+			return fmt.Errorf("source-empty unknown answer contains stray candidates")
+		}
+	case models.AnswerUnknownInsufficient:
+		if response.Closest == nil || response.Closest.Note != "insufficient independent roots" ||
+			response.Closest.IndependentRoots >= minimum || len(response.Conflicts)+1 > models.MaxExtractSources ||
+			!answerFactPageBudgetFits(response.Closest.IndependentRoots, response.Conflicts) {
+			return fmt.Errorf("insufficient answer is invalid")
+		}
+		for _, conflict := range response.Conflicts {
+			candidateValue, _ := canonicalAnswerFactValue(conflict.Value, true)
+			if candidateValue == closestValue || conflict.Agreement.IndependentRoots >= response.Closest.IndependentRoots {
+				return fmt.Errorf("insufficient answer contains an invalid alternative")
+			}
+		}
+	case models.AnswerUnknownConflict:
+		if response.Closest == nil || response.Closest.Note != "independent-root tie" ||
+			len(response.Conflicts) < 1 || len(response.Conflicts)+1 > models.MaxExtractSources ||
+			response.Conflicts[0].Agreement.IndependentRoots != response.Closest.IndependentRoots ||
+			!answerFactPageBudgetFits(response.Closest.IndependentRoots, response.Conflicts) {
+			return fmt.Errorf("conflicting answer is invalid")
+		}
+		for _, conflict := range response.Conflicts {
+			candidateValue, _ := canonicalAnswerFactValue(conflict.Value, true)
+			if candidateValue == closestValue {
+				return fmt.Errorf("conflicting answer repeats its closest value")
+			}
+		}
+	}
+	return nil
+}
+
+func validAnswerFactEvidence(item models.AnswerEvidence, asOf time.Time) bool {
+	if len(item.URL) == 0 || len(item.URL) > models.MaxExtractSourceURLBytes {
+		return false
+	}
+	canonicalURL, parsed, err := publicnet.NormalizeHTTPURL(item.URL, nil, false)
+	if err != nil || parsed == nil || parsed.User != nil || canonicalURL != item.URL {
+		return false
+	}
+	root, err := authoritativeAnswerFactRoot(parsed.Hostname())
+	if err != nil || item.Root != root || len(item.Root) > maxAnswerRootBytes ||
+		item.Quote == "" || len(item.Quote) > maxAnswerQuoteBytes || !utf8.ValidString(item.Quote) ||
+		strings.IndexFunc(item.Quote, unicode.IsControl) >= 0 || len(item.Selector) > maxAnswerSelectorBytes ||
+		!utf8.ValidString(item.Selector) || strings.IndexFunc(item.Selector, unicode.IsControl) >= 0 ||
+		!validSearchResponseSnapshotID(item.SnapshotID) || !validAnswerFactTime(item.FetchedAt) || item.FetchedAt.After(asOf) {
+		return false
+	}
+	if item.TextRange[0] < 0 || item.TextRange[1] <= item.TextRange[0] || item.TextRange[1]-item.TextRange[0] != len(item.Quote) {
+		return false
+	}
+	switch item.Method {
+	case evidence.MethodExact, evidence.MethodNormalized, evidence.MethodFuzzy, evidence.MethodCompiled:
+		return true
+	default:
+		return false
+	}
+}
+
+func authoritativeAnswerFactRoot(hostname string) (string, error) {
+	hostname = strings.ToLower(hostname)
+	if address, err := netip.ParseAddr(hostname); err == nil {
+		return address.Unmap().String(), nil
+	}
+	root, err := publicsuffix.EffectiveTLDPlusOne(hostname)
+	if err != nil {
+		return "", err
+	}
+	return strings.ToLower(root), nil
+}
+
+func canonicalAnswerFactValue(raw json.RawMessage, allowNull bool) (string, bool) {
+	if len(raw) == 0 || len(raw) > maxAnswerValueBytes || !utf8.Valid(raw) {
+		return "", false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	var value any
+	if err := decoder.Decode(&value); err != nil || requireJSONEOF(decoder) != nil {
+		return "", false
+	}
+	switch value.(type) {
+	case string:
+		encoded, err := json.Marshal(value)
+		if err != nil || len(encoded) > maxAnswerValueBytes {
+			return "", false
+		}
+		return string(encoded), true
+	case nil:
+		return "null", allowNull
+	default:
+		return "", false
+	}
+}
+
+func validAnswerFactAgreement(agreement models.MultiExtractAgreement) bool {
+	return agreement.Pages >= 1 && agreement.Pages <= models.MaxExtractSources &&
+		agreement.IndependentRoots >= 1 && agreement.IndependentRoots <= agreement.Pages
+}
+
+func orderedAnswerFactCandidates(candidates []models.AnswerCandidate) bool {
+	previousRoots := models.MaxExtractSources + 1
+	previousPages := models.MaxExtractSources + 1
+	for _, candidate := range candidates {
+		if candidate.Agreement.IndependentRoots > previousRoots ||
+			candidate.Agreement.IndependentRoots == previousRoots && candidate.Agreement.Pages > previousPages {
+			return false
+		}
+		previousRoots = candidate.Agreement.IndependentRoots
+		previousPages = candidate.Agreement.Pages
+	}
+	return true
+}
+
+func answerFactPageBudgetFits(initial int, candidates []models.AnswerCandidate) bool {
+	if initial < 0 || initial > models.MaxExtractSources {
+		return false
+	}
+	used := initial
+	for _, candidate := range candidates {
+		if candidate.Agreement.Pages < 0 || candidate.Agreement.Pages > models.MaxExtractSources-used {
+			return false
+		}
+		used += candidate.Agreement.Pages
+	}
+	return true
+}
+
+func answerFactConfidence(roots int) models.AnswerConfidence {
+	switch {
+	case roots >= 3:
+		return models.AnswerConfidenceHigh
+	case roots == 2:
+		return models.AnswerConfidenceMedium
+	default:
+		return models.AnswerConfidenceLow
+	}
+}
+
+func validAnswerFactReceipt(receipt string) bool {
+	if receipt == "" || len(receipt) > maxAnswerReceiptBytes || !utf8.ValidString(receipt) {
+		return false
+	}
+	for index := range len(receipt) {
+		character := receipt[index]
+		if character == '.' || character == '-' || character == '_' ||
+			character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validAnswerFactTime(value time.Time) bool {
+	if value.IsZero() || value.Location() != time.UTC {
+		return false
+	}
+	_, err := value.MarshalJSON()
+	return err == nil
+}
+
+func validAnswerFactUnknownReason(reason models.AnswerUnknownReason) bool {
+	switch reason {
+	case models.AnswerUnknownNoSearchResults, models.AnswerUnknownNoValidSources, models.AnswerUnknownMissingValue,
+		models.AnswerUnknownInsufficient, models.AnswerUnknownConflict:
+		return true
+	default:
+		return false
+	}
+}
+
+func answerObjectFields(raw []byte, name string, allowed ...string) (map[string]json.RawMessage, error) {
+	fields, err := decodeExtractJSONObject(raw, name)
+	if err != nil {
+		return nil, err
+	}
+	allowlist := make(map[string]struct{}, len(allowed))
+	for _, field := range allowed {
+		allowlist[field] = struct{}{}
+	}
+	for field := range fields {
+		if _, ok := allowlist[field]; !ok {
+			return nil, fmt.Errorf("%s contains unsupported field %q", name, field)
+		}
+	}
+	return fields, nil
+}
+
+func requirePresentAnswerFields(fields map[string]json.RawMessage, name string, required ...string) error {
+	for _, field := range required {
+		raw, present := fields[field]
+		if !present || answerJSONNull(raw) {
+			return fmt.Errorf("%s is missing required field %q", name, field)
+		}
+	}
+	return nil
+}
+
+func rejectPresentAnswerFields(fields map[string]json.RawMessage, name string, rejected ...string) error {
+	for _, field := range rejected {
+		if _, present := fields[field]; present {
+			return fmt.Errorf("%s must not contain field %q", name, field)
+		}
+	}
+	return nil
+}
+
+func answerJSONNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+func answerAPIError(statusCode int, body []byte) string {
+	detail, err := decodeAnswerError(body)
+	if err != nil {
+		return fmt.Sprintf("answer failed (HTTP %d)", statusCode)
+	}
+	return fmt.Sprintf("[%s] %s", strings.TrimSpace(detail.Code), strings.TrimSpace(detail.Message))
+}
+
+func decodeAnswerError(body []byte) (*models.ErrorDetail, error) {
+	if !utf8.Valid(body) {
+		return nil, fmt.Errorf("error response must be valid UTF-8")
+	}
+	if err := rejectDuplicateJSONFields(body); err != nil {
+		return nil, err
+	}
+	var envelope *models.AnswerErrorResponse
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&envelope); err != nil || envelope == nil {
+		return nil, fmt.Errorf("error response must be a JSON object")
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return nil, err
+	}
+	fields, err := answerObjectFields(body, "answer error response", "error")
+	if err != nil {
+		return nil, err
+	}
+	if err := requirePresentAnswerFields(fields, "answer error response", "error"); err != nil {
+		return nil, err
+	}
+	detailFields, err := answerObjectFields(fields["error"], "answer error", "code", "message")
+	if err != nil {
+		return nil, err
+	}
+	if err := requirePresentAnswerFields(detailFields, "answer error", "code", "message"); err != nil {
+		return nil, err
+	}
+	if envelope.Error == nil || strings.TrimSpace(envelope.Error.Code) == "" || strings.TrimSpace(envelope.Error.Message) == "" {
+		return nil, fmt.Errorf("answer error is incomplete")
+	}
+	return envelope.Error, nil
+}
+
+func redactAnswerSecrets(message string, secrets ...string) string {
+	return redactSearchSecrets(message, secrets...)
 }
 
 func newExtractHTTPClient() *http.Client {
