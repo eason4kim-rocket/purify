@@ -1667,6 +1667,7 @@ func TestVerifyPageGoneResponseOmitsSimilarityAndCarriesObservation(t *testing.T
 	service := testService(t, fixture(t, "old.html"), RevisitResult{
 		StatusCode: 404,
 		FinalURL:   testFinalURL,
+		SnapshotID: newSnapshotID,
 		FetchedAt:  newFetchedAt,
 	}, testSigner(t), recorder, nil)
 	response, err := service.Verify(context.Background(), models.VerifyRequest{
@@ -1676,11 +1677,11 @@ func TestVerifyPageGoneResponseOmitsSimilarityAndCarriesObservation(t *testing.T
 	if err != nil {
 		t.Fatalf("Verify() error = %v", err)
 	}
-	if response.URL != testURL || response.FinalURL != testFinalURL || response.StatusCode != 404 || response.PageSimilarity != nil || response.SnapshotID != "" {
+	if response.URL != testURL || response.FinalURL != testFinalURL || response.StatusCode != 404 || response.PageSimilarity != nil || response.SnapshotID != newSnapshotID {
 		t.Fatalf("page-gone response = %#v", response)
 	}
 	row := recorder.committedBatches()[0][0]
-	if row.Outcome != ledger.OutcomeGone || row.GoneScope != ledger.GoneScopePage || row.PageSimilarity != nil || row.NewSnapshotID != "" {
+	if row.Outcome != ledger.OutcomeGone || row.GoneScope != ledger.GoneScopePage || row.PageSimilarity != nil || row.NewSnapshotID != newSnapshotID {
 		t.Fatalf("page-gone ledger row = %#v", row)
 	}
 	encoded, err := json.Marshal(response)
@@ -1694,13 +1695,32 @@ func TestVerifyPageGoneResponseOmitsSimilarityAndCarriesObservation(t *testing.T
 	if _, exists := document["page_similarity"]; exists {
 		t.Fatalf("page_similarity unexpectedly present: %s", encoded)
 	}
-	if _, exists := document["snapshot_id"]; exists {
-		t.Fatalf("snapshot_id unexpectedly present: %s", encoded)
+	if _, exists := document["snapshot_id"]; !exists {
+		t.Fatalf("snapshot_id missing from definitive page-gone observation: %s", encoded)
 	}
 	for _, key := range []string{"verification_id", "url", "final_url", "status_code", "results", "verified_at"} {
 		if _, exists := document[key]; !exists {
 			t.Fatalf("response missing %q: %s", key, encoded)
 		}
+	}
+}
+
+func TestVerifyRejectsPageGoneWithoutSnapshotProvenance(t *testing.T) {
+	recorder := &fakeRecorder{}
+	service := testService(t, fixture(t, "old.html"), RevisitResult{
+		StatusCode: 404,
+		FinalURL:   testFinalURL,
+		FetchedAt:  newFetchedAt,
+	}, testSigner(t), recorder, nil)
+	response, err := service.Verify(context.Background(), models.VerifyRequest{
+		URL:    testURL,
+		Claims: []models.Claim{testClaim("plan", `"Pro Plan"`, "Pro Plan", "#plan .title")},
+	})
+	if response != nil || !errors.Is(err, ErrRevisit) {
+		t.Fatalf("Verify(page gone without snapshot) = (%#v, %v), want nil + ErrRevisit", response, err)
+	}
+	if recorder.callCount() != 0 {
+		t.Fatal("page-gone observation without snapshot reached ledger")
 	}
 }
 

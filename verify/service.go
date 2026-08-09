@@ -215,8 +215,8 @@ func (s *Service) Verify(ctx context.Context, request models.VerifyRequest) (*mo
 		return nil, fmt.Errorf("%w: revisit fetched_at is required", ErrRevisit)
 	}
 	observation.SnapshotID = strings.TrimSpace(observation.SnapshotID)
-	if !pageGone && observation.SnapshotID == "" {
-		return nil, fmt.Errorf("%w: successful revisit snapshot_id is required", ErrRevisit)
+	if observation.SnapshotID == "" {
+		return nil, fmt.Errorf("%w: definitive revisit snapshot_id is required", ErrRevisit)
 	}
 	if strings.TrimSpace(observation.FinalURL) == "" {
 		observation.FinalURL = targetURL
@@ -231,13 +231,11 @@ func (s *Service) Verify(ctx context.Context, request models.VerifyRequest) (*mo
 	if len(observation.RawHTML) > maximumPageBytes {
 		return nil, fmt.Errorf("%w: revisit raw HTML exceeds %d bytes", ErrRevisit, maximumPageBytes)
 	}
-	if observation.SnapshotID != "" {
-		if err := validateSnapshotID(observation.SnapshotID); err != nil {
-			return nil, fmt.Errorf("%w: invalid revisit snapshot_id: %v", ErrRevisit, err)
-		}
-		if err := s.validateCurrentSnapshot(observation); err != nil {
-			return nil, err
-		}
+	if err := validateSnapshotID(observation.SnapshotID); err != nil {
+		return nil, fmt.Errorf("%w: invalid revisit snapshot_id: %v", ErrRevisit, err)
+	}
+	if err := s.validateCurrentSnapshot(observation); err != nil {
+		return nil, err
 	}
 
 	var pageSimilarity *float64
