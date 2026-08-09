@@ -54,7 +54,7 @@ Two commands. Clean Markdown back in under a second.
 |---|---|---|---|---|
 | Language | **Go** | TypeScript | Python | N/A (cloud) |
 | Self-host | **Single binary** | 5+ containers (Redis, PG, Playwright…) | pip + Playwright | No self-host docs |
-| MCP server | **Built-in (5 tools)** | Community-maintained | No | No |
+| MCP server | **Built-in (6 tools)** | Community-maintained | No | No |
 | Token savings | **52–99%** | ~70–80% | ~75–85% | ~60–70% |
 | Recursive crawling | Yes | Yes | Yes | No |
 | Batch scrape | Yes | Yes | No | No |
@@ -116,11 +116,12 @@ Measured with [tiktoken](https://github.com/openai/tiktoken) (GPT-4 tokenizer). 
 
 ## MCP server
 
-Purify includes a built-in MCP server with **5 tools**:
+Purify includes a built-in MCP server with **6 tools**:
 
 | Tool | Description |
 |---|---|
 | `scrape_url` | Scrape a single page, return clean content |
+| `verify_fact` | Revisit evidence-backed claims and return `confirmed`, `changed`, or `gone` |
 | `batch_scrape` | Scrape multiple URLs in parallel |
 | `crawl_site` | Recursively crawl a website (BFS) |
 | `map_site` | Discover all URLs on a site |
@@ -363,6 +364,239 @@ schema, the endpoint returns the best data with `partial: true` and a
 requires `PURIFY_SNAPSHOT_ENABLED=true`; otherwise the endpoint returns
 `EVIDENCE_UNAVAILABLE`.
 
+### POST /api/v1/verify
+
+Revisit a source page and re-verify facts against their original, immutable
+snapshot. This route is protected by the same API-key authentication and rate
+limit as `/scrape` and `/extract`, and requires snapshot storage to be enabled.
+
+The request accepts exactly one claim input form:
+
+- `url` plus a non-empty `claims` array; or
+- one signed `receipt`. In receipt mode the URL is restored from the receipt,
+  although `url` may be supplied as a consistency check.
+
+`claims` and `receipt` are a strict XOR: sending both, or neither, returns
+`INVALID_INPUT`. Each explicit claim's `value` must be a JSON string, number,
+or boolean, with an evidence anchor copied from an earlier evidence-enabled
+extraction.
+All claims in one request must reference the same old snapshot. Explicit mode
+accepts at most 100 unique claim paths and 512 KiB of aggregate path, value,
+quote, and selector data. Anchors must use `exact`, `normalized`, `fuzzy`, or
+`compiled`; `unlocated` evidence cannot be re-verified. Receipt tokens are
+limited to 2 MiB.
+
+Claims mode:
+
+```bash
+curl -X POST https://purify.verifly.pro/api/v1/verify \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com/product",
+    "claims": [
+      {
+        "path": "price",
+        "value": 29.99,
+        "anchor": {
+          "quote": "$29.99",
+          "text_range": [1204, 1210],
+          "selector": ".pricing-card .amount",
+          "method": "exact",
+          "snapshot_id": "sha256:9f2c7150b5d6c4834a8b73c39ad2b678d08e234951d0990b0c59f30c41ec33e1",
+          "fetched_at": "2026-08-09T08:00:00Z"
+        }
+      }
+    ]
+  }'
+```
+
+Receipt mode restores one authenticated claim without making the caller
+reconstruct its anchor:
+
+```bash
+curl -X POST https://purify.verifly.pro/api/v1/verify \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"receipt":"eyJhbGciOiJFZERTQSIsImtpZCI6Ii4uLiJ9..."}'
+```
+
+A changed claim returns its current scalar value, refreshed evidence, and a
+new signed receipt:
+
+```json
+{
+  "verification_id": "ab7d7e33e0af4e378f5351226adfb8e2",
+  "url": "https://example.com/product",
+  "final_url": "https://example.com/product",
+  "status_code": 200,
+  "results": [
+    {
+      "path": "price",
+      "status": "changed",
+      "new_value": 31.99,
+      "evidence": {
+        "quote": "$31.99",
+        "text_range": [1220, 1226],
+        "selector": ".pricing-card .amount",
+        "method": "exact",
+        "snapshot_id": "sha256:e4a9c531ae63b63a35f62783064387da778d19f34d0671781d70a5ec3bb051a2",
+        "fetched_at": "2026-08-09T08:05:00Z"
+      },
+      "receipt": "eyJhbGciOiJFZERTQSIsImtpZCI6Ii4uLiJ9..."
+    }
+  ],
+  "page_similarity": 0.96875,
+  "snapshot_id": "sha256:e4a9c531ae63b63a35f62783064387da778d19f34d0671781d70a5ec3bb051a2",
+  "verified_at": "2026-08-09T08:05:00Z"
+}
+```
+
+The verdict set is deliberately limited to three states:
+
+| Status | Meaning | Result fields |
+|---|---|---|
+| `confirmed` | The selector still yields the same normalized scalar, or the selector moved but the old quote still aligns | Refreshed `evidence` and `receipt`; no `new_value` |
+| `changed` | The selector yields a different scalar | `new_value`, refreshed `evidence`, and `receipt` |
+| `gone` | The field cannot be located, or the source page definitely returned 404/410 | `gone_scope` is `field` or `page`; no evidence or receipt |
+
+`page_similarity` is `1 - DOM SimHash distance / 64`. It is a page-change
+signal, not a fourth verdict, and is present only when the revisit produced a
+successful page body.
+
+A source HTTP 404 or 410 is a successful verification observation, not an API
+transport error. The `/verify` request itself returns HTTP 200, every claim is
+`gone` with `gone_scope: "page"`, and `page_similarity` is omitted:
+
+```json
+{
+  "verification_id": "ab7d7e33e0af4e378f5351226adfb8e2",
+  "url": "https://example.com/product",
+  "final_url": "https://example.com/product",
+  "status_code": 404,
+  "results": [
+    {
+      "path": "price",
+      "status": "gone",
+      "gone_scope": "page"
+    }
+  ],
+  "snapshot_id": "sha256:e4a9c531ae63b63a35f62783064387da778d19f34d0671781d70a5ec3bb051a2",
+  "verified_at": "2026-08-09T08:05:00Z"
+}
+```
+
+Every result is written to the SQLite verification ledger before the response
+is returned.
+
+#### Durable `fact.changed` webhook
+
+Either request mode may include `webhook_url` and an optional
+`webhook_secret`. A secret without a URL is invalid. When at least one claim is
+`changed`, Purify commits one aggregate `fact.changed` event to the durable
+outbox in the same transaction as the verification rows:
+
+```json
+{
+  "receipt": "eyJhbGciOiJFZERTQSIsImtpZCI6Ii4uLiJ9...",
+  "webhook_url": "https://hooks.example.com/purify",
+  "webhook_secret": "your-hmac-secret"
+}
+```
+
+The delivered event body has this shape:
+
+```json
+{
+  "type": "fact.changed",
+  "job_id": "ab7d7e33e0af4e378f5351226adfb8e2",
+  "timestamp": 1786262700,
+  "data": {
+    "verification_id": "ab7d7e33e0af4e378f5351226adfb8e2",
+    "url": "https://example.com/product",
+    "final_url": "https://example.com/product",
+    "verified_at": "2026-08-09T08:05:00Z",
+    "changes": [
+      {
+        "path": "price",
+        "old_value": 29.99,
+        "new_value": 31.99,
+        "evidence": {
+          "quote": "$31.99",
+          "text_range": [1220, 1226],
+          "selector": ".pricing-card .amount",
+          "method": "exact",
+          "snapshot_id": "sha256:e4a9c531ae63b63a35f62783064387da778d19f34d0671781d70a5ec3bb051a2",
+          "fetched_at": "2026-08-09T08:05:00Z"
+        },
+        "receipt": "eyJhbGciOiJFZERTQSIsImtpZCI6Ii4uLiJ9..."
+      }
+    ]
+  }
+}
+```
+
+Delivery includes `Content-Type: application/json` and an
+`X-Purify-Event-ID` equal to `verification_id`. When a secret is supplied,
+`X-Purify-Signature` is `sha256=<hex>` for
+`HMAC-SHA256(webhook_secret, exact_request_body)`.
+
+The response confirms the durable commit, not downstream delivery. A worker
+resumes pending events after restart and makes at most four delivery attempts,
+with 1s, 5s, and 30s backoffs after retryable failures. Transport failures and
+HTTP 408, 425, 429, and 5xx are retryable; other non-2xx responses are
+permanent. Redirects are not followed, and webhook destinations must resolve
+only to public IP addresses.
+
+#### Authentication and errors
+
+When `PURIFY_AUTH_ENABLED=true`, use either `Authorization: Bearer <key>` or
+`X-API-Key: <key>`. Receipt signature verification at
+`/api/v1/receipts/verify` remains public; fact re-verification at
+`/api/v1/verify` is protected.
+
+The verify handler rejects unknown JSON fields and request bodies larger than
+4 MiB. Handler-level failures use the stable envelope
+`{"error":{"code":"...","message":"..."}}`; authentication and rate-limit
+failures use the existing common API middleware response.
+
+| HTTP | Code | Meaning |
+|---:|---|---|
+| 400 | `INVALID_INPUT` | Malformed JSON, invalid claim, or a `claims`/`receipt` XOR violation |
+| 400 | `INVALID_RECEIPT` | Receipt signature, payload, or optional URL consistency check is invalid |
+| 401 | `UNAUTHORIZED` | Missing or invalid API key |
+| 413 | `INVALID_INPUT` | Request body exceeds 4 MiB |
+| 429 | `RATE_LIMITED` | Per-key or per-IP rate limit exceeded |
+| 500/503 | `INTERNAL_ERROR` | Signing, ledger recording, or an unexpected internal failure |
+| 502 | `NAVIGATION_FAILED` | The source could not be revisited or returned an unusable status other than 404/410 |
+| 503 | `EVIDENCE_UNAVAILABLE` | Verification is disabled or a required durable snapshot is unavailable |
+| 504 | `SCRAPE_TIMEOUT` | Verification was canceled or exceeded its deadline |
+
+#### MCP `verify_fact`
+
+The MCP server exposes claims mode through `verify_fact`. Both arguments are
+required: `url` is the source URL and `claims` is a JSON-encoded **string**
+containing the same non-empty claim array accepted by the HTTP API. The tool
+accepts up to 16 KiB for `url` and 512 KiB for the claims string.
+
+```json
+{
+  "name": "verify_fact",
+  "arguments": {
+    "url": "https://example.com/product",
+    "claims": "[{\"path\":\"price\",\"value\":29.99,\"anchor\":{\"quote\":\"$29.99\",\"text_range\":[1204,1210],\"selector\":\".pricing-card .amount\",\"method\":\"exact\",\"snapshot_id\":\"sha256:9f2c7150b5d6c4834a8b73c39ad2b678d08e234951d0990b0c59f30c41ec33e1\",\"fetched_at\":\"2026-08-09T08:00:00Z\"}}]"
+  }
+}
+```
+
+Configure `PURIFY_API_URL` and `PURIFY_API_KEY` as shown in
+[MCP server setup](#setup). The tool calls the authenticated HTTP endpoint and
+returns the complete `VerifyResponse` as structured content, with pretty JSON
+as its text fallback. Non-2xx API responses become MCP tool errors in
+`[CODE] message` form when the API supplied a structured error. Receipt mode
+and webhook options are available through the HTTP endpoint, not this MCP
+tool.
+
 ### Public receipt verification
 
 Receipt verification and the active public key are free public endpoints; they
@@ -402,9 +636,12 @@ bodies return HTTP 400.
 
 ### Webhook callbacks
 
-Batch and Crawl endpoints support webhook notifications. When a job completes, Purify sends a POST request to your `webhook_url` with HMAC-SHA256 signature in the `X-Purify-Signature` header.
+Batch and Crawl endpoints support job webhook notifications. `/verify` uses
+the durable `fact.changed` outbox described above. Purify signs the exact POST
+body with HMAC-SHA256 in the `X-Purify-Signature` header when a secret is set.
 
-Events: `batch.completed`, `crawl.page`, `crawl.completed`, `crawl.failed`
+Events: `batch.completed`, `crawl.page`, `crawl.completed`, `crawl.failed`,
+`fact.changed`
 
 Verify the signature:
 ```
@@ -430,15 +667,16 @@ All configuration via environment variables:
 | `PURIFY_RATE_RPS` | `5` | Rate limit (requests/sec/key) |
 | `PURIFY_RATE_BURST` | `10` | Rate limit burst |
 | `PURIFY_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `PURIFY_DATA_DIR` | `./data` | Durable snapshots, signing key, and future ledger |
+| `PURIFY_DATA_DIR` | `./data` | Durable snapshots, signing key, SQLite verification ledger, and webhook outbox |
 | `PURIFY_SNAPSHOT_ENABLED` | `true` | Persist content-addressed HTML snapshots |
 | `PURIFY_SIGNING_KEY` | generated | Optional 32-byte Ed25519 seed encoded as hex |
 
 ## Self-hosting
 
 Purify is a single Go binary. No Docker, Redis, or external database is
-required. The data directory stores compressed snapshots and the stable
-receipt-signing identity; persist it across restarts.
+required. The data directory stores compressed snapshots, the stable
+receipt-signing identity, the verification ledger, and pending webhook outbox
+events; persist it across restarts.
 
 ```bash
 # Local development (no auth)
