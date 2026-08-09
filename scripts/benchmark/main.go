@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"math"
@@ -10,10 +12,18 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"text/tabwriter"
 	"time"
 
+	"github.com/use-agent/purify/compiler"
 	"github.com/use-agent/purify/evidence"
+	"github.com/use-agent/purify/extract"
+	"github.com/use-agent/purify/ledger"
+	"github.com/use-agent/purify/llm"
+	"github.com/use-agent/purify/models"
+	"github.com/use-agent/purify/scrape"
+	"github.com/use-agent/purify/scraper"
 )
 
 // CLI flags
@@ -133,6 +143,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "compiled" {
+		if err := runCompiledBenchmark(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "compiled benchmark failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	flag.Parse()
 
@@ -184,6 +201,212 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("\nDetailed results written to %s\n", *output)
+}
+
+const compiledP95ThresholdMilliseconds = 50.0
+
+type compiledBenchmarkReport struct {
+	Runs            int     `json:"runs"`
+	WarmupRuns      int     `json:"warmup_runs"`
+	P50Ms           float64 `json:"p50_ms"`
+	P95Ms           float64 `json:"p95_ms"`
+	P99Ms           float64 `json:"p99_ms"`
+	LLMCalls        int64   `json:"llm_calls"`
+	ThresholdMs     float64 `json:"threshold_ms"`
+	ThresholdPassed bool    `json:"threshold_passed"`
+}
+
+func runCompiledBenchmark(args []string) error {
+	flags := flag.NewFlagSet("compiled", flag.ContinueOnError)
+	runCount := flags.Int("runs", 1000, "number of measured full compiled extraction runs")
+	warmupCount := flags.Int("warmup", 100, "number of full compiled extraction warmup runs")
+	outputPath := flags.String("output", "", "optional JSON report path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected positional arguments: %s", strings.Join(flags.Args(), " "))
+	}
+
+	dataDir, err := os.MkdirTemp("", "purify-compiled-benchmark-")
+	if err != nil {
+		return fmt.Errorf("create benchmark data directory: %w", err)
+	}
+	defer os.RemoveAll(dataDir)
+
+	report, err := measureCompiledBenchmark(context.Background(), dataDir, *runCount, *warmupCount)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode report: %w", err)
+	}
+	fmt.Println(string(encoded))
+	if *outputPath != "" {
+		if err := os.WriteFile(*outputPath, append(encoded, '\n'), 0644); err != nil {
+			return fmt.Errorf("write report: %w", err)
+		}
+	}
+	if !report.ThresholdPassed {
+		return fmt.Errorf("P95 %.3fms is not below %.0fms", report.P95Ms, compiledP95ThresholdMilliseconds)
+	}
+	return nil
+}
+
+func measureCompiledBenchmark(
+	ctx context.Context,
+	dataDir string,
+	runCount, warmupCount int,
+) (compiledBenchmarkReport, error) {
+	if ctx == nil {
+		return compiledBenchmarkReport{}, errors.New("compiled benchmark context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return compiledBenchmarkReport{}, err
+	}
+	if strings.TrimSpace(dataDir) == "" {
+		return compiledBenchmarkReport{}, errors.New("compiled benchmark data directory is required")
+	}
+	if runCount < 1 {
+		return compiledBenchmarkReport{}, errors.New("runs must be at least 1")
+	}
+	if warmupCount < 0 {
+		return compiledBenchmarkReport{}, errors.New("warmup must be non-negative")
+	}
+
+	durable, err := ledger.Open(dataDir)
+	if err != nil {
+		return compiledBenchmarkReport{}, fmt.Errorf("open benchmark ledger: %w", err)
+	}
+	defer durable.Close()
+	repository, err := compiler.NewStore(durable)
+	if err != nil {
+		return compiledBenchmarkReport{}, fmt.Errorf("open compiled extractor store: %w", err)
+	}
+
+	const sourceURL = "https://shop.example.com/products/purify-pro"
+	const rawHTML = `<html><body><main class="product"><h1 class="product-title">Purify Pro</h1><span class="price" data-value="1299.50">$1,299.50</span><span class="stock"> TRUE </span></main></body></html>`
+	schema := json.RawMessage(`{"type":"object","properties":{"title":{"type":"string"},"price":{"type":"number"},"available":{"type":"boolean"}},"required":["title","price","available"],"additionalProperties":false}`)
+	ir := compiler.IR{Version: compiler.CurrentIRVersion, Fields: []compiler.FieldRule{
+		{Name: "title", Selector: ".product-title", Transforms: []string{"trim"}, Type: compiler.TypeString, Required: true},
+		{Name: "price", Selector: ".price", Attr: "data-value", Type: compiler.TypeNumber, Required: true},
+		{Name: "available", Selector: ".stock", Transforms: []string{"trim", "lower"}, Type: compiler.TypeBoolean, Required: true},
+	}}
+	validation := compiler.ValidationReport{
+		PerField: []compiler.FieldValidation{
+			{Name: "title", Matches: 3, Samples: 3, Score: 1},
+			{Name: "price", Matches: 3, Samples: 3, Score: 1},
+			{Name: "available", Matches: 3, Samples: 3, Score: 1},
+		},
+		Overall: 1, Samples: 3, ValidSamples: 3,
+		Threshold: compiler.ValidationThreshold, CanEnable: true,
+	}
+	key, err := compiler.BuildPageKey(sourceURL, schema, rawHTML)
+	if err != nil {
+		return compiledBenchmarkReport{}, fmt.Errorf("build benchmark page key: %w", err)
+	}
+	revision, err := repository.Save(ctx, key, ir, validation)
+	if err != nil {
+		return compiledBenchmarkReport{}, fmt.Errorf("seed active compiled extractor: %w", err)
+	}
+
+	llmGuard := &countingBenchmarkExtractor{}
+	service, err := extract.NewService(unusedBenchmarkRunner{}, llmGuard, nil, extract.Config{
+		CompiledRepository: repository,
+	})
+	if err != nil {
+		return compiledBenchmarkReport{}, fmt.Errorf("create extraction service: %w", err)
+	}
+	artifact := &extract.Artifact{
+		Public: &models.ScrapeResponse{
+			Success: true, StatusCode: http.StatusOK, FinalURL: sourceURL,
+			Content: "Purify Pro $1,299.50 TRUE",
+		},
+		Source: &scraper.ScrapeResult{
+			RawHTML: rawHTML, StatusCode: http.StatusOK, FinalURL: sourceURL,
+			FetchedAt: time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC),
+		},
+	}
+	request := &models.ExtractRequest{
+		URL: sourceURL, Schema: append(json.RawMessage(nil), schema...), Engine: "auto",
+		LLMAPIKey:    "compiled-benchmark-must-not-call-llm",
+		OutputFormat: "markdown", ExtractMode: "readability",
+	}
+	wantData := json.RawMessage(`{"available":true,"price":1299.50,"title":"Purify Pro"}`)
+	runOnce := func() error {
+		response, err := service.ExtractArtifact(ctx, artifact, request)
+		if err != nil {
+			return err
+		}
+		if response == nil || !response.Success || response.Extractor == nil ||
+			response.Extractor.Mode != "compiled" || response.Extractor.ID != revision.ID ||
+			response.Extractor.Version != revision.Version || !bytes.Equal(response.Data, wantData) {
+			return fmt.Errorf("unexpected compiled response: %#v", response)
+		}
+		if calls := llmGuard.calls.Load(); calls != 0 {
+			return fmt.Errorf("compiled path invoked structured extractor %d times", calls)
+		}
+		return nil
+	}
+
+	for index := 0; index < warmupCount; index++ {
+		if err := runOnce(); err != nil {
+			return compiledBenchmarkReport{}, fmt.Errorf("warmup %d: %w", index+1, err)
+		}
+	}
+	durations := make([]time.Duration, runCount)
+	for index := range durations {
+		started := time.Now()
+		if err := runOnce(); err != nil {
+			return compiledBenchmarkReport{}, fmt.Errorf("measured run %d: %w", index+1, err)
+		}
+		durations[index] = time.Since(started)
+	}
+	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	report := compiledBenchmarkReport{
+		Runs:        runCount,
+		WarmupRuns:  warmupCount,
+		P50Ms:       durationMilliseconds(percentileDuration(durations, 0.50)),
+		P95Ms:       durationMilliseconds(percentileDuration(durations, 0.95)),
+		P99Ms:       durationMilliseconds(percentileDuration(durations, 0.99)),
+		LLMCalls:    llmGuard.calls.Load(),
+		ThresholdMs: compiledP95ThresholdMilliseconds,
+	}
+	report.ThresholdPassed = report.P95Ms < report.ThresholdMs
+	return report, nil
+}
+
+type unusedBenchmarkRunner struct{}
+
+func (unusedBenchmarkRunner) Run(context.Context, *models.ScrapeRequest, scrape.Observer) (*scrape.Result, error) {
+	return nil, errors.New("compiled benchmark unexpectedly invoked the scrape runner")
+}
+
+type countingBenchmarkExtractor struct {
+	calls atomic.Int64
+}
+
+func (extractor *countingBenchmarkExtractor) Extract(
+	context.Context,
+	string,
+	json.RawMessage,
+	llm.ExtractParams,
+) (*llm.ExtractResult, error) {
+	extractor.calls.Add(1)
+	return nil, errors.New("compiled benchmark unexpectedly invoked the LLM extractor")
+}
+
+func (extractor *countingBenchmarkExtractor) ExtractWithRepair(
+	context.Context,
+	string,
+	json.RawMessage,
+	json.RawMessage,
+	[]llm.Violation,
+	llm.ExtractParams,
+) (*llm.ExtractResult, error) {
+	extractor.calls.Add(1)
+	return nil, errors.New("compiled benchmark unexpectedly invoked the LLM repair extractor")
 }
 
 type evidenceBenchmarkReport struct {
