@@ -1,11 +1,21 @@
 package config
 
 import (
+	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
+
+const maximumCompilerModelBytes = 256
+const maximumCompilerCredentialBytes = 16 << 10
+const maximumCompilerBaseURLBytes = 16 << 10
+
+var ErrInvalidCompilerConfig = errors.New("config: invalid managed compiler configuration")
 
 // Config holds all application configuration.
 type Config struct {
@@ -19,6 +29,17 @@ type Config struct {
 	Engine       EngineConfig
 	AdaptivePool AdaptivePoolConfig
 	Storage      StorageConfig
+	Compiler     CompilerConfig
+}
+
+// CompilerConfig controls process-owned background extractor synthesis. The
+// credential is used only by the managed compiler and is never a fallback for
+// request-scoped extraction.
+type CompilerConfig struct {
+	Enabled bool
+	APIKey  string
+	Model   string
+	BaseURL string
 }
 
 // StorageConfig controls durable snapshots, the ledger, and receipt signing.
@@ -180,7 +201,63 @@ func Load() *Config {
 			SnapshotEnabled: envBoolOr("PURIFY_SNAPSHOT_ENABLED", true),
 			SigningKey:      os.Getenv("PURIFY_SIGNING_KEY"),
 		},
+		Compiler: CompilerConfig{
+			Enabled: envBoolOr("PURIFY_COMPILER_ENABLED", false),
+			APIKey:  os.Getenv("PURIFY_COMPILER_API_KEY"),
+			Model:   envOr("PURIFY_COMPILER_MODEL", "gpt-4o-mini"),
+			BaseURL: envOr("PURIFY_COMPILER_BASE_URL", "https://api.openai.com/v1"),
+		},
 	}
+}
+
+// ValidateCompilerConfig rejects an enabled managed compiler that cannot
+// safely synthesize from durable snapshots. Disabled configuration is inert,
+// including any stale provider variables left in the environment.
+func ValidateCompilerConfig(value CompilerConfig, snapshotEnabled bool) error {
+	if !value.Enabled {
+		return nil
+	}
+	if len(value.APIKey) > maximumCompilerCredentialBytes || strings.TrimSpace(value.APIKey) == "" {
+		return fmt.Errorf("%w: API key is invalid", ErrInvalidCompilerConfig)
+	}
+	if !snapshotEnabled {
+		return fmt.Errorf("%w: snapshots must be enabled", ErrInvalidCompilerConfig)
+	}
+
+	if len(value.Model) > maximumCompilerModelBytes {
+		return fmt.Errorf("%w: model is invalid", ErrInvalidCompilerConfig)
+	}
+	model := strings.TrimSpace(value.Model)
+	if model == "" || len(model) > maximumCompilerModelBytes {
+		return fmt.Errorf("%w: model is invalid", ErrInvalidCompilerConfig)
+	}
+	for _, character := range model {
+		if unicode.IsControl(character) || unicode.IsSpace(character) {
+			return fmt.Errorf("%w: model is invalid", ErrInvalidCompilerConfig)
+		}
+	}
+
+	if len(value.BaseURL) > maximumCompilerBaseURLBytes {
+		return fmt.Errorf("%w: base URL is invalid", ErrInvalidCompilerConfig)
+	}
+	baseURL := strings.TrimSpace(value.BaseURL)
+	parsed, err := url.Parse(baseURL)
+	validScheme := err == nil && (strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https"))
+	if err != nil || !parsed.IsAbs() || parsed.Opaque != "" || parsed.Host == "" || parsed.Hostname() == "" ||
+		!validScheme || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return fmt.Errorf("%w: base URL is invalid", ErrInvalidCompilerConfig)
+	}
+	if strings.HasSuffix(parsed.Host, ":") {
+		return fmt.Errorf("%w: base URL is invalid", ErrInvalidCompilerConfig)
+	}
+	if port := parsed.Port(); port != "" {
+		numericPort, err := strconv.Atoi(port)
+		if err != nil || numericPort < 1 || numericPort > 65535 {
+			return fmt.Errorf("%w: base URL is invalid", ErrInvalidCompilerConfig)
+		}
+	}
+	return nil
 }
 
 func envDurationSliceOr(key string, fallback []time.Duration) []time.Duration {

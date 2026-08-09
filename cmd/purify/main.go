@@ -17,6 +17,7 @@ import (
 	"github.com/use-agent/purify/batch"
 	"github.com/use-agent/purify/cache"
 	"github.com/use-agent/purify/cleaner"
+	compilerdomain "github.com/use-agent/purify/compiler"
 	"github.com/use-agent/purify/config"
 	crawldomain "github.com/use-agent/purify/crawl"
 	"github.com/use-agent/purify/discovery"
@@ -53,6 +54,9 @@ func main() {
 func run() error {
 	// ── 1. Load configuration ───────────────────────────────────────
 	cfg := config.Load()
+	if err := config.ValidateCompilerConfig(cfg.Compiler, cfg.Storage.SnapshotEnabled); err != nil {
+		return fmt.Errorf("validate managed compiler configuration: %w", err)
+	}
 
 	// ── 2. Initialise structured logging ────────────────────────────
 	initLogger(cfg.Log)
@@ -80,6 +84,10 @@ func run() error {
 		return fmt.Errorf("initialise verification ledger: %w", err)
 	}
 	defer ledgerStore.Close()
+	compiledStore, err := compilerdomain.NewStore(ledgerStore)
+	if err != nil {
+		return fmt.Errorf("initialise compiled extractor store: %w", err)
+	}
 
 	// ── 3. Initialise scraper (launches browser) ────────────────────
 	sc, err := scraper.NewScraper(cfg.Browser, cfg.Scraper)
@@ -101,13 +109,28 @@ func run() error {
 		slog.Info("snapshot store disabled")
 	}
 
-	// ── 3b. Enforce one public-only outbound policy ─────────────────
+	// ── 3b. Initialise optional process-owned compiler synthesis ─────
+	managedCompiler, err := newManagedCompilerRuntime(cfg.Compiler, ledgerStore, compiledStore, snapshotStore)
+	if err != nil {
+		return fmt.Errorf("initialise managed compiler: %w", err)
+	}
+	if managedCompiler != nil {
+		// Registered after snapshot and ledger cleanup so LIFO shutdown is:
+		// coordinator -> managed HTTP idles -> snapshot -> ledger.
+		defer managedCompiler.Close()
+		slog.Info("managed compiler enabled")
+	} else {
+		slog.Info("managed compiler disabled")
+	}
+	compilerBindings := bindCompilerServices(compiledStore, managedCompiler)
+
+	// ── 3c. Enforce one public-only outbound policy ─────────────────
 	outboundPolicy, err := newOutboundPolicy(cfg.Browser.DefaultProxy)
 	if err != nil {
 		return fmt.Errorf("initialise outbound network policy: %w", err)
 	}
 
-	// ── 3c. Deliver transactionally queued verification webhooks ───
+	// ── 3d. Deliver transactionally queued verification webhooks ───
 	webhookClient, err := webhook.NewPublicHTTPClient(outboundPolicy, webhook.DefaultOutboxHTTPTimeout)
 	if err != nil {
 		return fmt.Errorf("initialise webhook HTTP client: %w", err)
@@ -123,7 +146,7 @@ func run() error {
 	}
 	defer outboxWorker.Close()
 
-	// ── 3d. Build a provenance-preserving verification service ──────
+	// ── 3e. Build a provenance-preserving verification service ──────
 	var verifyService handler.VerifyService
 	if snapshotStore != nil {
 		safeRelay, relayErr := proxy.StartDirectRelay(outboundPolicy.DialContext)
@@ -149,10 +172,11 @@ func run() error {
 			return fmt.Errorf("initialise page revisit service: %w", revisitErr)
 		}
 		verifyService, err = verifydomain.NewService(verifydomain.Config{
-			Revisitor: revisitService,
-			Snapshots: snapshotStore,
-			Receipts:  receiptSigner,
-			Recorder:  ledgerStore,
+			Revisitor:          revisitService,
+			Snapshots:          snapshotStore,
+			Receipts:           receiptSigner,
+			Recorder:           ledgerStore,
+			ExtractorRevisions: compilerBindings.extractorRevisions,
 		})
 		if err != nil {
 			return fmt.Errorf("initialise fact verification service: %w", err)
@@ -205,7 +229,10 @@ func run() error {
 
 	// ── 4e. Initialise LLM client ───────────────────────────────────
 	llmClient := llm.NewClient(nil)
-	extractService, err := extractdomain.NewService(scrapeService, llmClient, receiptSigner, extractdomain.Config{})
+	extractService, err := extractdomain.NewService(scrapeService, llmClient, receiptSigner, extractdomain.Config{
+		CompiledRepository: compilerBindings.compiledRepository,
+		CompileObserver:    compilerBindings.compileObserver,
+	})
 	if err != nil {
 		return fmt.Errorf("initialise extract service: %w", err)
 	}

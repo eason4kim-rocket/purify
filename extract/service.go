@@ -50,6 +50,13 @@ type CompiledRepository interface {
 	RecordUse(context.Context, compiler.PageKey, string, compiler.UseOutcome) (compiler.Extractor, error)
 }
 
+// CompileObserver admits only bounded provenance references into the managed
+// compiler. Request credentials, provider settings, cleaned content, and LLM
+// truth output are intentionally absent from this boundary.
+type CompileObserver interface {
+	Observe(context.Context, compiler.PageKey, string, time.Time, json.RawMessage) error
+}
+
 // Artifact keeps the public cleaned page and its selected raw source together.
 // Source may be nil only when an external caller deliberately supplies a
 // response-only artifact; evidence and deterministic compilation require it.
@@ -62,6 +69,7 @@ type Artifact struct {
 type Config struct {
 	Now                func() time.Time
 	CompiledRepository CompiledRepository
+	CompileObserver    CompileObserver
 }
 
 // OperationError preserves phase timing while retaining the domain cause for
@@ -110,6 +118,7 @@ type Service struct {
 	extractor        StructuredExtractor
 	signer           ReceiptSigner
 	compiled         CompiledRepository
+	compileObserver  CompileObserver
 	validateCompiled func(json.RawMessage, json.RawMessage) ([]llm.Violation, error)
 	now              func() time.Time
 }
@@ -131,11 +140,16 @@ func NewService(runner Runner, extractor StructuredExtractor, signer ReceiptSign
 	if isNilCompiledRepository(compiledRepository) {
 		compiledRepository = nil
 	}
+	compileObserver := cfg.CompileObserver
+	if isNilCompileObserver(compileObserver) {
+		compileObserver = nil
+	}
 	return &Service{
 		runner:           runner,
 		extractor:        extractor,
 		signer:           signer,
 		compiled:         compiledRepository,
+		compileObserver:  compileObserver,
 		validateCompiled: llm.ValidateAgainstSchema,
 		now:              now,
 	}, nil
@@ -339,6 +353,9 @@ func (s *Service) extractLLMArtifact(
 
 	baseTiming.TotalMs = elapsedMilliseconds(startedAt, s.now())
 	response.Timing = baseTiming
+	if len(violations) == 0 {
+		s.observeCompilation(ctx, artifact, request)
+	}
 	return response, nil
 }
 
@@ -532,6 +549,54 @@ func isNilCompiledRepository(repository CompiledRepository) bool {
 	default:
 		return false
 	}
+}
+
+func isNilCompileObserver(observer CompileObserver) bool {
+	if observer == nil {
+		return true
+	}
+	value := reflect.ValueOf(observer)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+// observeCompilation runs after the response and its timing have been fully
+// assembled. Catalog admission is best-effort: neither an observer error nor a
+// panic may turn a successful customer extraction into a failure.
+func (s *Service) observeCompilation(ctx context.Context, artifact *Artifact, request *models.ExtractRequest) {
+	if s == nil || s.compileObserver == nil || artifact == nil || artifact.Source == nil || request == nil {
+		return
+	}
+	defer func() {
+		_ = recover()
+	}()
+
+	source := artifact.Source
+	if request.CSSSelector != "" || request.OutputFormat != "markdown" || request.ExtractMode != "readability" ||
+		strings.TrimSpace(source.RawHTML) == "" || strings.TrimSpace(string(source.SnapshotID)) == "" ||
+		source.FetchedAt.IsZero() || source.StatusCode < 200 || source.StatusCode >= 300 ||
+		compiler.ValidateCompileSchema(request.Schema) != nil {
+		return
+	}
+	sourceURL := source.FinalURL
+	if strings.TrimSpace(sourceURL) == "" {
+		sourceURL = request.URL
+	}
+	page, err := compiler.BuildPageKey(sourceURL, request.Schema, source.RawHTML)
+	if err != nil {
+		return
+	}
+	_ = s.compileObserver.Observe(
+		ctx,
+		page,
+		string(source.SnapshotID),
+		source.FetchedAt,
+		append(json.RawMessage(nil), page.Schema...),
+	)
 }
 
 var errCompiledAttemptInternal = errors.New("extract: compiled attempt internal failure")
