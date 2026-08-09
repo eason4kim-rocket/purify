@@ -28,6 +28,11 @@ type HTTPEngine struct {
 	clientErr       error
 }
 
+const (
+	defaultMaximumResponseBodyBytes int64 = 10 << 20
+	hardMaximumResponseBodyBytes    int64 = 64 << 20
+)
+
 // chromeH1Spec is a Chrome-like TLS ClientHello with ALPN forced to http/1.1
 // only. Computed once at init time and reused for every connection.
 var chromeH1Spec utls.ClientHelloSpec
@@ -304,7 +309,15 @@ func (e *HTTPEngine) Fetch(ctx context.Context, req *FetchRequest) (*FetchResult
 	fetchCtx, cancel := requestContext(ctx, req.Timeout)
 	defer cancel()
 
-	client, cleanup, err := e.clientForRequest(req.ProxyURL)
+	maximumBodyBytes, err := responseBodyLimit(req.MaximumBodyBytes)
+	if err != nil {
+		return nil, err
+	}
+	if req.Mode != FetchModeDefault && req.Mode != FetchModeObservation {
+		return nil, fmt.Errorf("http_engine: invalid fetch mode %d", req.Mode)
+	}
+
+	client, cleanup, err := e.clientForRequest(req.ProxyURL, req.CheckRedirect)
 	if err != nil {
 		return nil, err
 	}
@@ -337,11 +350,9 @@ func (e *HTTPEngine) Fetch(ctx context.Context, req *FetchRequest) (*FetchResult
 	}
 	defer resp.Body.Close()
 
-	// Read body with a 10 MB limit to prevent unbounded memory use.
-	const maxBody = 10 << 20
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	body, err := readResponseBody(resp.Body, maximumBodyBytes)
 	if err != nil {
-		return nil, fmt.Errorf("http_engine: read body: %w", err)
+		return nil, err
 	}
 
 	bodyStr := string(body)
@@ -349,7 +360,7 @@ func (e *HTTPEngine) Fetch(ctx context.Context, req *FetchRequest) (*FetchResult
 	// If the response isn't successful HTML, treat it as a failure so the
 	// dispatcher can escalate to a browser engine.
 	ct := resp.Header.Get("Content-Type")
-	if resp.StatusCode >= 400 || !isHTMLContentType(ct) {
+	if req.Mode == FetchModeDefault && (resp.StatusCode >= 400 || !isHTMLContentType(ct)) {
 		return nil, fmt.Errorf("http_engine: non-html or error status %d (content-type: %s)", resp.StatusCode, ct)
 	}
 
@@ -370,10 +381,15 @@ func (e *HTTPEngine) Fetch(ctx context.Context, req *FetchRequest) (*FetchResult
 // shared default client is reused only when no override is requested; override
 // clients and transports are request-local, making concurrent proxy selection
 // race-free.
-func (e *HTTPEngine) clientForRequest(proxyOverride string) (*http.Client, func(), error) {
+func (e *HTTPEngine) clientForRequest(proxyOverride string, checkRedirect func(*http.Request, []*http.Request) error) (*http.Client, func(), error) {
 	if proxyOverride == "" || proxyOverride == e.defaultProxyURL {
 		if e.clientErr != nil {
 			return nil, func() {}, e.clientErr
+		}
+		if checkRedirect != nil {
+			client := *e.client
+			client.CheckRedirect = checkRedirect
+			return &client, func() {}, nil
 		}
 		return e.client, func() {}, nil
 	}
@@ -381,7 +397,31 @@ func (e *HTTPEngine) clientForRequest(proxyOverride string) (*http.Client, func(
 	if err != nil {
 		return nil, func() {}, err
 	}
+	if checkRedirect != nil {
+		client.CheckRedirect = checkRedirect
+	}
 	return client, client.CloseIdleConnections, nil
+}
+
+func responseBodyLimit(requested int64) (int64, error) {
+	if requested < 0 || requested > hardMaximumResponseBodyBytes {
+		return 0, fmt.Errorf("http_engine: maximum body bytes must be zero or between 1 and %d", hardMaximumResponseBodyBytes)
+	}
+	if requested == 0 {
+		return defaultMaximumResponseBodyBytes, nil
+	}
+	return requested, nil
+}
+
+func readResponseBody(body io.Reader, maximumBytes int64) ([]byte, error) {
+	contents, err := io.ReadAll(io.LimitReader(body, maximumBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("http_engine: read body: %w", err)
+	}
+	if int64(len(contents)) > maximumBytes {
+		return nil, fmt.Errorf("%w: maximum is %d bytes", ErrResponseBodyTooLarge, maximumBytes)
+	}
+	return contents, nil
 }
 
 // isHTMLContentType returns true if the content-type header looks like HTML.

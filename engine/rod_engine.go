@@ -41,7 +41,7 @@ func (e *RodEngine) Name() string { return e.name }
 // is truthfully attributed to rod-stealth; both Rod tiers remain eligible for
 // ordinary staged escalation.
 func (e *RodEngine) Supports(req *FetchRequest) bool {
-	return req != nil && (!req.Stealth || e.forceStealth)
+	return req != nil && req.CheckRedirect == nil && (!req.Stealth || e.forceStealth)
 }
 
 func (e *RodEngine) Fetch(ctx context.Context, req *FetchRequest) (*FetchResult, error) {
@@ -50,6 +50,12 @@ func (e *RodEngine) Fetch(ctx context.Context, req *FetchRequest) (*FetchResult,
 	}
 	if req == nil {
 		return nil, fmt.Errorf("%s: nil fetch request", e.name)
+	}
+	if req.MaximumBodyBytes < 0 || req.MaximumBodyBytes > hardMaximumResponseBodyBytes {
+		return nil, fmt.Errorf("%s: maximum body bytes must be zero or between 1 and %d", e.name, hardMaximumResponseBodyBytes)
+	}
+	if req.CheckRedirect != nil {
+		return nil, fmt.Errorf("%w: %s cannot honor an HTTP redirect callback", ErrUnsupportedRequest, e.name)
 	}
 
 	// Deep-clone reference fields so concurrent engine attempts never share
@@ -65,6 +71,12 @@ func (e *RodEngine) Fetch(ctx context.Context, req *FetchRequest) (*FetchResult,
 	result, err := e.fetchFunc(fetchCtx, r)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", e.name, err)
+	}
+	if result == nil {
+		return nil, fmt.Errorf("%s: fetchFunc returned no result", e.name)
+	}
+	if r.MaximumBodyBytes > 0 && int64(len(result.HTML)) > r.MaximumBodyBytes {
+		return nil, fmt.Errorf("%s: %w: maximum is %d bytes", e.name, ErrResponseBodyTooLarge, r.MaximumBodyBytes)
 	}
 
 	result.EngineName = e.name

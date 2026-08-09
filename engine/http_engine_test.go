@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -73,6 +74,95 @@ func TestHTTPEngineRequestTimeout(t *testing.T) {
 	})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Fetch() error = %v, want context deadline exceeded", err)
+	}
+}
+
+func TestHTTPEngineObservationPreservesDefinitiveStatuses(t *testing.T) {
+	for _, statusCode := range []int{http.StatusNotFound, http.StatusGone} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "text/plain")
+				writer.WriteHeader(statusCode)
+				_, _ = writer.Write([]byte("definitive observation"))
+			}))
+			t.Cleanup(server.Close)
+
+			engine := NewHTTPEngine("")
+			result, err := engine.Fetch(context.Background(), &FetchRequest{
+				URL:              server.URL,
+				Mode:             FetchModeObservation,
+				MaximumBodyBytes: 1 << 10,
+			})
+			if err != nil {
+				t.Fatalf("observation Fetch() error = %v", err)
+			}
+			if result.StatusCode != statusCode || result.HTML != "definitive observation" || result.ContentType != "text/plain" {
+				t.Fatalf("observation result = %#v", result)
+			}
+
+			if _, err := engine.Fetch(context.Background(), &FetchRequest{URL: server.URL}); err == nil {
+				t.Fatal("default Fetch() accepted an error status")
+			}
+		})
+	}
+}
+
+func TestHTTPEngineRejectsOversizedBodyWithoutTruncation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/html")
+		_, _ = writer.Write([]byte("12345"))
+	}))
+	t.Cleanup(server.Close)
+
+	engine := NewHTTPEngine("")
+	if _, err := engine.Fetch(context.Background(), &FetchRequest{
+		URL: server.URL, MaximumBodyBytes: 4,
+	}); !errors.Is(err, ErrResponseBodyTooLarge) {
+		t.Fatalf("Fetch(oversized) error = %v, want ErrResponseBodyTooLarge", err)
+	}
+	result, err := engine.Fetch(context.Background(), &FetchRequest{
+		URL: server.URL, MaximumBodyBytes: 5,
+	})
+	if err != nil {
+		t.Fatalf("Fetch(exact limit) error = %v", err)
+	}
+	if result.HTML != "12345" {
+		t.Fatalf("Fetch(exact limit) HTML = %q", result.HTML)
+	}
+}
+
+func TestHTTPEngineUsesRequestLocalRedirectPolicy(t *testing.T) {
+	var destinationCalls atomic.Int32
+	destination := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		destinationCalls.Add(1)
+		writer.Header().Set("Content-Type", "text/html")
+		_, _ = writer.Write([]byte("destination"))
+	}))
+	t.Cleanup(destination.Close)
+	redirect := httptest.NewServer(http.RedirectHandler(destination.URL, http.StatusFound))
+	t.Cleanup(redirect.Close)
+
+	engine := NewHTTPEngine("")
+	rejected := errors.New("redirect rejected")
+	_, err := engine.Fetch(context.Background(), &FetchRequest{
+		URL: redirect.URL,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return rejected
+		},
+	})
+	if !errors.Is(err, rejected) {
+		t.Fatalf("Fetch(rejected redirect) error = %v", err)
+	}
+	if destinationCalls.Load() != 0 {
+		t.Fatalf("destination calls after rejected redirect = %d", destinationCalls.Load())
+	}
+
+	result, err := engine.Fetch(context.Background(), &FetchRequest{URL: redirect.URL})
+	if err != nil {
+		t.Fatalf("Fetch(default redirect) error = %v", err)
+	}
+	if result.HTML != "destination" || destinationCalls.Load() != 1 {
+		t.Fatalf("default redirect result = %#v, calls = %d", result, destinationCalls.Load())
 	}
 }
 

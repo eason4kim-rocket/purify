@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"reflect"
 	"sync/atomic"
@@ -100,5 +101,29 @@ func TestExplicitStealthSkipsOrdinaryRodAndUsesRodStealth(t *testing.T) {
 	}
 	if ordinaryCalls.Load() != 0 || stealthCalls.Load() != 1 {
 		t.Fatalf("ordinary calls=%d stealth calls=%d", ordinaryCalls.Load(), stealthCalls.Load())
+	}
+}
+
+func TestRodEngineEnforcesRequestedBodyLimit(t *testing.T) {
+	rod := NewRodEngine(func(context.Context, *FetchRequest) (*FetchResult, error) {
+		return &FetchResult{HTML: "12345"}, nil
+	}, false)
+	_, err := rod.Fetch(context.Background(), &FetchRequest{MaximumBodyBytes: 4})
+	if !errors.Is(err, ErrResponseBodyTooLarge) {
+		t.Fatalf("Fetch() error = %v, want ErrResponseBodyTooLarge", err)
+	}
+}
+
+func TestRodEngineRejectsHTTPOnlyRedirectPolicy(t *testing.T) {
+	rod := NewRodEngine(func(context.Context, *FetchRequest) (*FetchResult, error) {
+		t.Fatal("fetch callback must not run for an unsupported redirect policy")
+		return nil, nil
+	}, false)
+	request := &FetchRequest{CheckRedirect: func(*http.Request, []*http.Request) error { return nil }}
+	if rod.Supports(request) {
+		t.Fatal("Supports() accepted an HTTP-only redirect callback")
+	}
+	if _, err := rod.Fetch(context.Background(), request); !errors.Is(err, ErrUnsupportedRequest) {
+		t.Fatalf("Fetch() error = %v, want ErrUnsupportedRequest", err)
 	}
 }
