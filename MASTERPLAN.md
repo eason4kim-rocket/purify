@@ -464,14 +464,19 @@ docs(scrape): verify endpoint guide
 
 **目标一句话**：LLM 合成一次、确定性执行 N 次；与 Firecrawl deterministicJson 同路，但**透明**——版本、验证分、漂移全部亮牌。热路径纯 Go，毫秒级，边际成本≈0。
 
+> **实况对齐 · 2026-08-09（HEAD `f5a32ba`）** —— 本节已按磁盘实况回写。图例：✅ 已提交 · 🚧 进行中（未提交 WIP）· ⬜ 未开始 · ⟳ 与早期规划不同（以实际接口/DDL 为准）。
+> 进度：P2-1 ✅　P2-2 ✅　P2-3 ✅　P2-4 ⬜；auto/compiled 接线与 compiled extraction 文档待补。
+
 ### 任务卡 P2-1 · IR 定义与确定性执行
 
 **交付什么**：`compiler/ir.go` + `execute.go` + `transforms.go` + 测试。
 
+**状态**：✅ 已提交 `5ce96a4 feat(compiler): execute deterministic extraction IR`。⟳ 实际另落地整套资源上限（`MaxHTMLBytes` 4 MiB、`MaxFields` 100、`MaxSelectorBytes`、`MaxTransformsPerField` 16、`MaxOutputBytes` 等，见 `ir.go`），`CurrentIRVersion=1`；畸形 selector 经 `compileRules` 编译失败即字段级报错、不 panic。
+
 **验收标准**：
-- [ ] `Execute` 单次 goquery 解析全字段；selector 命中即产出 Anchor（Method="compiled"）
-- [ ] transforms 注册表内置：trim / collapse_ws / lower / parse_number / parse_date（用已有 dateparse）/ currency_amount
-- [ ] 恶意/畸形 selector 不 panic（cascadia 解析失败即字段报错）
+- [x] `Execute` 单次 goquery 解析全字段；selector 命中即产出 Anchor（Method="compiled"）
+- [x] transforms 注册表内置：trim / collapse_ws / lower / parse_number / parse_date（用已有 dateparse）/ currency_amount
+- [x] 恶意/畸形 selector 不 panic（cascadia 解析失败即字段报错）
 
 **实现参考**：
 
@@ -494,46 +499,119 @@ func Execute(ir IR, html string) (json.RawMessage, map[string]evidence.Anchor, e
 
 **交付什么**：`compiler/compile.go` + 测试（fixtures：同站 3 页）。
 
+**状态**：✅ 已提交 `60ce9f3 feat(compiler): synthesize validated extraction rules`。
+
 **实现参考**（编号伪码）：
 
 ```text
-Compile(samples ≥3, schema, llmClient):
-1 每样本 LLM 直提 → 真值集
-2 每字段×样本 evidence.AlignValue 定位 → 候选 selector 集
+Compile(ctx, samples 3..20, schema, TruthExtractor):
+1 每样本经 TruthExtractor 直提 → 真值集（valid samples 计数）
+2 每字段×样本 对齐定位 → 候选集（含 attr/regex/transforms 流水线）
 3 跨样本泛化: 一致处剥 nth-of-type、偏好稳定 class/#id; cascadia 验合法
-4 每字段选跨样本命中率最高的 selector
+4 每字段选跨样本命中率最高的候选（betterCandidate 排序）
 5 按 schema type 推断 transforms
-6 Report: Execute(IR) vs 真值 逐字段一致率（规范化比较）
-返回 (IR, Report{PerField, Overall, Samples})
+6 ValidationReport: Execute(IR) vs 真值 逐字段一致率（规范化比较）
+返回 (IR, ValidationReport{..., CanEnable})
+```
+
+⟳ 实际签名与类型（`compile.go`）——编译期 LLM client 抽象为**传输中立接口** `TruthExtractor`，密钥/provider/修复/HTTP 全在调用方 adapter；`compiler` 不依赖 LLM client/transport，但仍复用 `llm` 包内纯函数式 schema 规范化与校验工具：
+
+```go
+type TruthExtractor interface {
+    ExtractTruth(context.Context, string, json.RawMessage) (json.RawMessage, error)
+}
+type Sample struct{ Content, HTML string } // Content 喂真值提取；HTML 学 selector + 验证
+func Compile(ctx context.Context, samples []Sample, schema json.RawMessage,
+    extractor TruthExtractor) (IR, ValidationReport, error)
+
+type ValidationReport struct { // 可随提取器一同公示
+    PerField     []FieldValidation // {Name, Matches, Samples, Score}
+    Overall      float64
+    Samples      int
+    ValidSamples int
+    Threshold    float64 // ValidationThreshold = 0.9
+    CanEnable    bool    // 每样本 schema-valid 且 Overall≥Threshold 才 true —— 启用门闩
+}
+// MinCompileSamples=3 · MaxCompileSamples=20
 ```
 
 ### 任务卡 P2-3 · 提取器仓库：缓存键、模板簇、漂移信号
 
-**交付什么**：`compiler/store.go` + migration 002。
+**交付什么** ⟳：实况拆两层——(a) **持久层**落在 `ledger/`：`migrations.go` 的 **migration 003**（建 `extractors` + `extractor_page_bindings`）与 `transactions.go` 的窄事务原语 `View`/`Update`；(b) 提取器 **repository**（`BuildPageKey / TemplateMedoid / Lookup / Save / Get / Touch / RecordEmpty / Retire`），建在 `ledger.Store` 之上。样本目录与 `MaybeCompile` coordinator 依赖 managed compiler credential，归 P2-4。
+
+**状态**：✅ 持久层已提交 `fd1de32 feat(ledger): add extractor registry foundation`；repository 已提交 `f5a32ba feat(compiler): persist template-clustered extractors`。全仓测试、ledger/compiler race、vet 与两路独立 P0/P1 审查均通过。
 
 **验收标准**：
-- [ ] 缓存键 `(host=eTLD+1, schema_hash=sha256(规范化 schema), 模板簇)` 命中正确；同站不同模板（列表页/详情页）各自成器
-- [ ] 漂移双信号可触发 state=stale：模板 simhash 距离 > 6；required 字段近 20 次空值率 > 30%
+- [x] 缓存键 `(host, schema_hash, template_cluster_id)` 命中正确；同站不同模板（列表页/详情页）各自成器；`extractor_page_bindings(page_hash→extractor_id)` 在一次成功执行后建立
+- [x] 每个 `(host, schema_hash, cluster)` 至多一个 active —— 由**部分唯一索引** `WHERE state='active'` 从 SQL 层强制
+- [x] state 仅允许 `active→stale/retired`、`stale→retired`；版本化字段不可原地覆写，且只有 retired 行可物理删除
+- [x] 漂移双信号触发 state=stale：已绑定页模板距离 > 6；required 近 20 次空值率 > 30%（6/20 保持 active，7/20 stale）
 
-**实现参考**（migration 002）：
+**migration 003 结构摘要**（完整实况与全部约束/触发器以 `ledger/migrations.go` 为准）：
 
 ```sql
-CREATE TABLE extractors(
-  id INTEGER PRIMARY KEY,
-  host TEXT, schema_hash TEXT, template_simhash INTEGER,
-  ir TEXT, version INTEGER, validation REAL,
-  state TEXT CHECK(state IN('active','stale','retired')),
-  empty_window TEXT DEFAULT '[]',   -- 长 20 环形 JSON
-  created_at TEXT, last_used_at TEXT
-);
-CREATE UNIQUE INDEX idx_extractors_key ON extractors(host, schema_hash, version);
+CREATE TABLE extractors (
+  id TEXT NOT NULL PRIMARY KEY,                 -- lowercase UUID
+  host TEXT NOT NULL,                           -- canonical lowercase host/eTLD+1
+  schema_json TEXT NOT NULL CHECK (json_valid(schema_json)),
+  schema_hash TEXT NOT NULL CHECK (length(schema_hash) = 64),
+  template_cluster_id TEXT NOT NULL,
+  template_simhash BLOB NOT NULL CHECK (
+    typeof(template_simhash) = 'blob' AND length(template_simhash) = 8
+    AND template_simhash <> zeroblob(8)),
+  ir TEXT NOT NULL CHECK (json_valid(ir)),
+  ir_hash TEXT NOT NULL CHECK (length(ir_hash) = 64),
+  ir_format_version INTEGER NOT NULL CHECK (ir_format_version > 0),
+  version INTEGER NOT NULL CHECK (version > 0),
+  validation_report TEXT NOT NULL CHECK (json_valid(validation_report)),
+  validation REAL NOT NULL CHECK (validation >= 0.0 AND validation <= 1.0),
+  state TEXT NOT NULL CHECK (state IN ('active','stale','retired')),
+  empty_window TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(empty_window)),
+  stale_reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, last_used_at TEXT, updated_at TEXT NOT NULL,
+  CHECK (state <> 'active' OR (
+    validation >= 0.9 AND json_extract(validation_report, '$.can_enable') IS 1)),
+  UNIQUE (id, schema_hash),
+  UNIQUE (host, schema_hash, template_cluster_id, version)
+) STRICT;
+-- 每个模板簇至多一个 active
+CREATE UNIQUE INDEX idx_extractors_active_cluster
+  ON extractors(host, schema_hash, template_cluster_id) WHERE state = 'active';
+CREATE INDEX idx_extractors_lookup
+  ON extractors(host, schema_hash, state, template_cluster_id, version DESC);
+CREATE INDEX idx_extractors_ir_hash ON extractors(ir_hash);
+-- 真实 migration 另含：state+reason 单调、revision immutable、retired-only delete、
+-- empty_window vocabulary/长度等 BEFORE triggers。
+-- 页→器绑定缓存：重复页直取，跳过聚类
+CREATE TABLE extractor_page_bindings (
+  page_hash TEXT NOT NULL CHECK (length(page_hash) = 64),
+  schema_hash TEXT NOT NULL CHECK (length(schema_hash) = 64),
+  extractor_id TEXT NOT NULL,
+  bound_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+  PRIMARY KEY (page_hash, schema_hash),
+  FOREIGN KEY (extractor_id, schema_hash)
+    REFERENCES extractors(id, schema_hash) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX idx_extractor_page_bindings_extractor
+  ON extractor_page_bindings(extractor_id);
 ```
 
-模板匹配：当前页 `FingerprintDOM` 与库内 `template_simhash` 取最近且距离 ≤ 6。
+⟳ **与早期规划的差异**：`id` INTEGER→**TEXT（UUID）**；`template_simhash` INTEGER→**BLOB(8)** 且新增固定 `template_cluster_id`；两张新表使用 `STRICT`；新增 schema/IR/report 哈希与 active 0.9 门闩、部分唯一索引、复合外键、版本不可变/状态原因/retired-only delete/window 触发器。migration 编号 002→**003**（Phase 1 实产两个：001 `verifications`、002 `outbox_events`）。
+
+repository 已建在 ledger 的窄事务原语之上（调用方拿不到 commit/rollback）：
+
+```go
+func (s *Store) View(ctx context.Context, view func(ReadTx) error) error     // 只读事务（PRAGMA query_only=ON）
+func (s *Store) Update(ctx context.Context, update func(WriteTx) error) error // 序列化单写 + 原子提交
+```
+
+模板匹配：当前页 `FingerprintDOM` 与库内固定 canonical representative 取最近且距离 ≤ 6；generic miss 不降级任何簇，只有已有页绑定且事务内重查仍无其他 active 命中时才标记 `template_drift`。`Lookup` 只读选器，实际执行后由 `Touch/RecordEmpty` 原子绑定并更新健康窗口；`not_executed` 严格零写。新版本晋级在同一 `Update` 内先 demote 旧 active、再插新 active 并重绑同簇页面；清理 retired 行前必须先解绑。
 
 ### 任务卡 P2-4 · extract 接线：auto 引擎与降级链
 
 **完成什么**：`engine: "auto"|"compiled"|"llm"`（默认 auto）；compiled 优先、llm 兜底、编译异步进行；响应亮牌 extractor 元数据。
+
+**状态**：⬜ 未开始——`api/handler/extract.go` 现无任何 `engine` / compiled 接线（grep 零命中）；`engine:"llm"` 即当前唯一路径。
 
 **验收标准**：
 - [ ] compiled 命中路径 P95 < 50ms、**零 LLM 调用**（日志佐证）
@@ -546,24 +624,26 @@ CREATE UNIQUE INDEX idx_extractors_key ON extractors(host, schema_hash, version)
 if engine != "llm" and 有 active extractor(键命中):
     data, basis, err := compiler.Execute(ex.IR, rawHTML)
     if err == nil and required 字段齐:
-        respond(mode="compiled", extractor 元数据); store.Touch; return
-    store.RecordEmpty(ex)          // 喂漂移窗口
+        store.Touch(key, ex.ID); respond(mode="compiled", extractor 元数据); return
+    store.RecordEmpty(key, ex.ID)  // 仅 required-empty 喂漂移窗口
 # LLM 路径照旧（P0 的校验+修复+证据）
-成功后: go store.MaybeCompile(host, schemaHash)
-        # 门槛: 该键快照 ≥3 且无进行中编译 (singleflight)
+成功后: catalog.Observe(snapshotRef)
+        coordinator.MaybeSchedule(compileKey)
+        # 门槛: ≥3 个 distinct 页/快照、managed compiler credential、singleflight
 ```
 
 **提交序列**：
 
 ```text
-feat(compiler): extractor IR and deterministic execution
-feat(compiler): llm-guided compilation with validation report
-feat(compiler): sqlite store, template clustering and drift signals
-feat(extract): compiled engine with auto fallback
-docs(scrape): compiled extraction guide
+✅ 5ce96a4  feat(compiler): execute deterministic extraction IR       # 规划名: extractor IR and deterministic execution
+✅ 60ce9f3  feat(compiler): synthesize validated extraction rules      # 规划名: llm-guided compilation with validation report
+✅ fd1de32  feat(ledger): add extractor registry foundation             # migration 003 + View/Update
+✅ f5a32ba  feat(compiler): persist template-clustered extractors        # repository + clustering + drift
+⬜ (P2-4)   feat(extract): compiled engine with auto fallback
+⬜ (docs)    docs(scrape): compiled extraction guide
 ```
 
-> **EN —** The compiler synthesizes a deterministic extractor IR from ≥3 snapshots with an LLM-graded validation report (enabled only at ≥0.9), executes it via goquery in pure Go (<50ms P95, zero LLM on the hot path), keys the cache by (eTLD+1, schema hash, DOM-simhash template cluster), and exposes extractor id/version/validation/mode in every response — the transparency Firecrawl's deterministicJson lacks.
+> **EN — (status 2026-08-09, HEAD `f5a32ba`)** P2-1 deterministic execution (`5ce96a4`), P2-2 validated synthesis (`60ce9f3`), and P2-3's strict SQLite registry plus template-clustered repository (`fd1de32`, `f5a32ba`) are committed. `TruthExtractor` isolates compiler synthesis from LLM clients, transport, providers, and credentials while reusing pure schema utilities. The registry makes revision identity immutable, enforces one active revision per fixed template cluster, and records attributable template/required-field drift without degrading healthy clusters on generic misses. P2-4 auto→compiled→llm dispatch, its bounded sample catalog/coordinator, MCP wiring, and documentation remain open.
 
 ---
 
