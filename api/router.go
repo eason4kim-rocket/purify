@@ -7,7 +7,6 @@ import (
 	"github.com/use-agent/purify/api/handler"
 	"github.com/use-agent/purify/api/middleware"
 	"github.com/use-agent/purify/cache"
-	"github.com/use-agent/purify/cleaner"
 	"github.com/use-agent/purify/config"
 	"github.com/use-agent/purify/receipts"
 	"github.com/use-agent/purify/scraper"
@@ -21,7 +20,7 @@ import (
 //	API:     Auth (if enabled) → RateLimit
 //
 // Health and receipt verification endpoints are intentionally outside auth.
-func NewRouter(sc *scraper.Scraper, cl *cleaner.Cleaner, extractService handler.ExtractService, receiptSigner *receipts.Signer, cfg *config.Config, cc *cache.Cache, startTime time.Time, scrapeRunner handler.ScrapeRunner, batchService handler.BatchService, crawlService handler.CrawlService) *gin.Engine {
+func NewRouter(sc *scraper.Scraper, extractService handler.ExtractService, receiptSigner *receipts.Signer, cfg *config.Config, cc *cache.Cache, startTime time.Time, scrapeRunner handler.ScrapeRunner, batchService handler.BatchService, crawlService handler.CrawlService, mapService handler.MapService) *gin.Engine {
 	gin.SetMode(cfg.Server.Mode)
 
 	r := gin.New()
@@ -59,7 +58,7 @@ func NewRouter(sc *scraper.Scraper, cl *cleaner.Cleaner, extractService handler.
 	protected.GET("/crawl/:id", handler.GetCrawl(crawlService))
 
 	// Map
-	protected.POST("/map", handler.PostMap(sc, cl))
+	protected.POST("/map", handler.PostMap(mapService))
 
 	return r
 }

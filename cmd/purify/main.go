@@ -16,6 +16,7 @@ import (
 	"github.com/use-agent/purify/cleaner"
 	"github.com/use-agent/purify/config"
 	crawldomain "github.com/use-agent/purify/crawl"
+	"github.com/use-agent/purify/discovery"
 	"github.com/use-agent/purify/engine"
 	extractdomain "github.com/use-agent/purify/extract"
 	"github.com/use-agent/purify/jobs"
@@ -118,6 +119,15 @@ func main() {
 	}
 	defer crawlService.Close()
 
+	mapService, err := discovery.NewService(discovery.Config{})
+	if err != nil {
+		slog.Error("failed to initialise map service", "error", err)
+		crawlService.Close()
+		batchService.Close()
+		jobExecutor.Close()
+		os.Exit(1)
+	}
+
 	// ── 4e. Initialise LLM client ───────────────────────────────────
 	llmClient := llm.NewClient(nil)
 	extractService, err := extractdomain.NewService(scrapeService, llmClient, receiptSigner, extractdomain.Config{})
@@ -128,7 +138,7 @@ func main() {
 
 	// ── 5. Setup router ─────────────────────────────────────────────
 	startTime := time.Now()
-	router := api.NewRouter(sc, cl, extractService, receiptSigner, cfg, cc, startTime, scrapeService, batchService, crawlService)
+	router := api.NewRouter(sc, extractService, receiptSigner, cfg, cc, startTime, scrapeService, batchService, crawlService, mapService)
 
 	// ── 6. Start HTTP server ────────────────────────────────────────
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -193,16 +203,6 @@ func newCanonicalScrapeService(sc *scraper.Scraper, cl *cleaner.Cleaner, cc *cac
 	if cfg.Engine.EnableMultiEngine {
 		httpEngine := engine.NewHTTPEngine(cfg.Browser.DefaultProxy)
 		backends = []engine.Engine{httpEngine, rodEngine, stealthEngine}
-
-		// Crawl and Map still call Scraper.DoScrape during their staged
-		// migration. Keep their dispatcher configured until those adapters move
-		// to the canonical service as well.
-		memory := engine.NewDomainMemory(24 * time.Hour)
-		sc.SetDispatcher(engine.NewDispatcher(backends, cfg.Engine.EscalationDelays, memory))
-		slog.Info("legacy multi-engine dispatcher enabled during service migration",
-			"engines", len(backends),
-			"delays", cfg.Engine.EscalationDelays,
-		)
 	}
 
 	fetchers := make([]scrape.Fetcher, 0, len(backends))
