@@ -46,6 +46,7 @@ func FetchRequestFromScrapeRequest(req *models.ScrapeRequest, timeout time.Durat
 		BlockAds:           req.BlockAds,
 		Actions:            actions,
 		CDPURL:             req.CDPURL,
+		MaximumBodyBytes:   req.MaximumBodyBytes,
 	}
 }
 
@@ -88,6 +89,7 @@ func ScrapeRequestFromFetchRequest(req *engine.FetchRequest) *models.ScrapeReque
 		RemoveOverlays:     req.RemoveOverlays,
 		BlockAds:           req.BlockAds,
 		CDPURL:             req.CDPURL,
+		MaximumBodyBytes:   req.MaximumBodyBytes,
 	}
 }
 

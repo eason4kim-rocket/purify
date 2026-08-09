@@ -22,14 +22,18 @@ func TestFetchRequestAdapterRoundTrip(t *testing.T) {
 			Type: "execute_js", Selector: "#target", Milliseconds: 50,
 			Direction: "down", Amount: 3, Code: "() => document.title",
 		}},
-		RemoveOverlays: true,
-		BlockAds:       true,
-		CDPURL:         "ws://browser.test/devtools/browser/id",
+		RemoveOverlays:   true,
+		BlockAds:         true,
+		CDPURL:           "ws://browser.test/devtools/browser/id",
+		MaximumBodyBytes: 4 << 20,
 	}
 
 	fetchRequest := FetchRequestFromScrapeRequest(request, 17500*time.Millisecond)
 	if fetchRequest.Timeout != 17500*time.Millisecond {
 		t.Fatalf("fetch timeout = %v", fetchRequest.Timeout)
+	}
+	if fetchRequest.MaximumBodyBytes != 4<<20 {
+		t.Fatalf("fetch maximum body bytes = %d", fetchRequest.MaximumBodyBytes)
 	}
 	got := ScrapeRequestFromFetchRequest(fetchRequest)
 	want := *request

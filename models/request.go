@@ -77,6 +77,10 @@ type ScrapeRequest struct {
 	// may be served from cache if a cached entry exists within this age.
 	// Default: 0 (no caching).
 	MaxAge int `json:"max_age,omitempty" binding:"omitempty,min=0"`
+
+	// MaximumBodyBytes is an internal fetch-layer safety boundary. It is never
+	// accepted from or exposed to JSON callers.
+	MaximumBodyBytes int64 `json:"-"`
 }
 
 // ScrapeOptions is the URL-independent option set shared by single-page,
@@ -105,6 +109,7 @@ type ScrapeOptions struct {
 	BlockAds           bool              `json:"block_ads,omitempty"`
 	CDPURL             string            `json:"cdp_url,omitempty"`
 	MaxAge             int               `json:"max_age,omitempty" binding:"omitempty,min=0"`
+	MaximumBodyBytes   int64             `json:"-"`
 }
 
 // ScrapeOptionsFromRequest returns a detached copy of every URL-independent
@@ -131,6 +136,7 @@ func ScrapeOptionsFromRequest(request *ScrapeRequest) ScrapeOptions {
 		BlockAds:           request.BlockAds,
 		CDPURL:             request.CDPURL,
 		MaxAge:             request.MaxAge,
+		MaximumBodyBytes:   request.MaximumBodyBytes,
 	})
 }
 
@@ -158,6 +164,7 @@ func ApplyScrapeOptions(request *ScrapeRequest, options ScrapeOptions) {
 	request.BlockAds = options.BlockAds
 	request.CDPURL = options.CDPURL
 	request.MaxAge = options.MaxAge
+	request.MaximumBodyBytes = options.MaximumBodyBytes
 }
 
 // CloneScrapeOptions returns a deep copy suitable for crossing asynchronous

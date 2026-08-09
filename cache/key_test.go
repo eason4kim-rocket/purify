@@ -160,6 +160,7 @@ func TestKeyForRequestCoversEveryOutputAffectingField(t *testing.T) {
 		{name: "RemoveOverlays", mutate: func(r *models.ScrapeRequest) { r.RemoveOverlays = true }},
 		{name: "BlockAds", mutate: func(r *models.ScrapeRequest) { r.BlockAds = true }},
 		{name: "CDPURL", mutate: func(r *models.ScrapeRequest) { r.CDPURL = "ws://browser.example/devtools" }},
+		{name: "MaximumBodyBytes", mutate: func(r *models.ScrapeRequest) { r.MaximumBodyBytes = 4 << 20 }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -177,7 +178,7 @@ func TestRequestKeyFieldClassificationStaysCurrent(t *testing.T) {
 		"URL", "WaitForNetworkIdle", "Timeout", "Stealth", "ProxyURL",
 		"OutputFormat", "ExtractMode", "CSSSelector", "Headers", "Cookies",
 		"Actions", "IncludeTags", "ExcludeTags", "OnlyMainContent",
-		"RemoveOverlays", "BlockAds", "CDPURL", "MaxAge",
+		"RemoveOverlays", "BlockAds", "CDPURL", "MaxAge", "MaximumBodyBytes",
 	})
 	assertFields(t, reflect.TypeOf(models.Cookie{}), []string{"Name", "Value", "Domain", "Path"})
 	assertFields(t, reflect.TypeOf(models.Action{}), []string{"Type", "Selector", "Milliseconds", "Direction", "Amount", "Code"})

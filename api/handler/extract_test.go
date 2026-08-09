@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/use-agent/purify/models"
@@ -348,11 +350,502 @@ func TestMapExtractErrorToStatus(t *testing.T) {
 	}
 }
 
+func TestExtractEnforcesStrictURLSourcesXORAndSourceBudgets(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &recordingMultiExtractService{
+		multiResponse: &models.MultiExtractResponse{
+			Success:       true,
+			Status:        models.MultiExtractStatusComplete,
+			Sources:       []models.MultiExtractSource{},
+			UsageComplete: true,
+		},
+	}
+	router := gin.New()
+	router.POST("/extract", Extract(service))
+	tooMany, err := json.Marshal(map[string]any{
+		"sources": []string{
+			"https://a.example.com", "https://b.example.com", "https://c.example.com",
+			"https://d.example.com", "https://e.example.com", "https://f.example.com",
+			"https://g.example.com", "https://h.example.com", "https://i.example.com",
+		},
+		"schema": map[string]any{"type": "object"},
+	})
+	if err != nil {
+		t.Fatalf("marshal too-many fixture: %v", err)
+	}
+	tooLongURL := "https://a.example.com/" + strings.Repeat("x", models.MaxExtractSourceURLBytes)
+	tooLong, err := json.Marshal(map[string]any{
+		"sources": []string{tooLongURL},
+		"schema":  map[string]any{"type": "object"},
+	})
+	if err != nil {
+		t.Fatalf("marshal too-long fixture: %v", err)
+	}
+	tests := []string{
+		`{"schema":{"type":"object"}}`,
+		`{"url":"https://a.example.com","sources":["https://b.example.com"],"schema":{"type":"object"}}`,
+		`{"sources":[],"schema":{"type":"object"}}`,
+		string(tooMany),
+		string(tooLong),
+	}
+	for _, body := range tests {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/extract", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("body prefix %.80q status = %d; response=%s", body, recorder.Code, recorder.Body)
+		}
+	}
+	if service.calls != 0 || service.multiCalls != 0 {
+		t.Fatalf("single/multi calls = %d/%d, want zero", service.calls, service.multiCalls)
+	}
+
+	exactSources := make([]string, models.MaxExtractSources)
+	for index := range exactSources {
+		prefix := fmt.Sprintf("https://s%d.example.com/", index)
+		exactSources[index] = prefix + strings.Repeat("x", models.MaxExtractSourceURLBytes-len(prefix))
+	}
+	exactBody, err := json.Marshal(map[string]any{
+		"sources": exactSources,
+		"schema":  map[string]any{"type": "object"},
+	})
+	if err != nil {
+		t.Fatalf("marshal exact-budget fixture: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/extract", bytes.NewReader(exactBody))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || service.multiCalls != 1 || service.multiRequest == nil || len(service.multiRequest.Sources) != models.MaxExtractSources {
+		t.Fatalf("exact budget status/calls/request = %d/%d/%#v; body=%s", recorder.Code, service.multiCalls, service.multiRequest, recorder.Body)
+	}
+}
+
+func TestExtractMultiDelegatesWithoutCallingLegacySingleService(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	want := &models.MultiExtractResponse{
+		Success: true,
+		Status:  models.MultiExtractStatusComplete,
+		Data:    json.RawMessage(`{"name":"Ada"}`),
+		Consensus: &models.MultiExtractConsensus{Fields: map[string]models.MultiExtractFieldConsensus{
+			"name": {Value: json.RawMessage(`"Ada"`), Agreement: models.MultiExtractAgreement{Pages: 1, IndependentRoots: 1}},
+		}},
+		Sources: []models.MultiExtractSource{
+			{URL: "https://a.example.com/", FinalURL: "https://a.example.com/", Success: true, Status: models.MultiExtractSourceStatusValid},
+		},
+		UsageComplete: true,
+	}
+	service := &recordingMultiExtractService{multiResponse: want}
+	router := gin.New()
+	router.POST("/extract", Extract(service))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/extract", strings.NewReader(
+		`{"sources":["https://a.example.com"],"schema":{"type":"object"},"engine":"compiled"}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || service.multiCalls != 1 || service.calls != 0 || service.multiRequest == nil ||
+		!reflect.DeepEqual(service.multiRequest.Sources, []string{"https://a.example.com"}) {
+		t.Fatalf("status/single/multi/request = %d/%d/%d/%#v; body=%s", recorder.Code, service.calls, service.multiCalls, service.multiRequest, recorder.Body)
+	}
+	var response models.MultiExtractResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !reflect.DeepEqual(response, *want) {
+		t.Fatalf("response = %#v, want %#v", response, *want)
+	}
+}
+
+func TestExtractMultiMapsCapabilityNoValidAndTimeoutErrors(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	requestBody := `{"sources":["https://a.example.com"],"schema":{"type":"object"},"engine":"compiled"}`
+	tests := []struct {
+		name        string
+		service     ExtractService
+		wantStatus  int
+		wantCode    string
+		wantSources int
+	}{
+		{
+			name:        "service lacks multi capability",
+			service:     &recordingExtractService{},
+			wantStatus:  http.StatusServiceUnavailable,
+			wantCode:    models.ErrCodeMultiSourceUnavailable,
+			wantSources: 0,
+		},
+		{
+			name: "all timeout",
+			service: &recordingMultiExtractService{
+				multiResponse: aggregateFailureResponse(models.MultiExtractSourceStatusTimeout),
+				multiErr:      models.NewScrapeError(models.ErrCodeTimeout, "private timeout detail", nil),
+			},
+			wantStatus:  http.StatusGatewayTimeout,
+			wantCode:    models.ErrCodeTimeout,
+			wantSources: 1,
+		},
+		{
+			name: "non-timeout no valid source",
+			service: &recordingMultiExtractService{
+				multiResponse: aggregateFailureResponse(models.MultiExtractSourceStatusFetchFailed),
+				multiErr:      models.NewScrapeError(models.ErrCodeNoValidSource, "private upstream credential", nil),
+			},
+			wantStatus:  http.StatusBadGateway,
+			wantCode:    models.ErrCodeNoValidSource,
+			wantSources: 1,
+		},
+		{
+			name: "snapshot capability unavailable",
+			service: &recordingMultiExtractService{
+				multiResponse: aggregateFailureResponse(models.MultiExtractSourceStatusEvidenceUnavailable),
+				multiErr:      models.NewScrapeError(models.ErrCodeMultiSourceUnavailable, "private signer path", nil),
+			},
+			wantStatus:  http.StatusServiceUnavailable,
+			wantCode:    models.ErrCodeMultiSourceUnavailable,
+			wantSources: 1,
+		},
+		{
+			name: "LLM authentication failure",
+			service: &recordingMultiExtractService{
+				multiResponse: aggregateFailureResponse(models.MultiExtractSourceStatusExtractionFailed),
+				multiErr:      models.NewScrapeError(models.ErrCodeLLMAuthFailure, "private provider credential", nil),
+			},
+			wantStatus:  http.StatusUnauthorized,
+			wantCode:    models.ErrCodeLLMAuthFailure,
+			wantSources: 1,
+		},
+		{
+			name: "LLM rate limit",
+			service: &recordingMultiExtractService{
+				multiResponse: aggregateFailureResponse(models.MultiExtractSourceStatusExtractionFailed),
+				multiErr:      models.NewScrapeError(models.ErrCodeLLMRateLimited, "private provider response", nil),
+			},
+			wantStatus:  http.StatusTooManyRequests,
+			wantCode:    models.ErrCodeLLMRateLimited,
+			wantSources: 1,
+		},
+		{
+			name: "compiled extractor unavailable",
+			service: &recordingMultiExtractService{
+				multiResponse: aggregateFailureResponse(models.MultiExtractSourceStatusExtractionFailed),
+				multiErr:      models.NewScrapeError(models.ErrCodeExtractorUnavailable, "private repository path", nil),
+			},
+			wantStatus:  http.StatusConflict,
+			wantCode:    models.ErrCodeExtractorUnavailable,
+			wantSources: 1,
+		},
+		{
+			name: "internal failure",
+			service: &recordingMultiExtractService{
+				multiResponse: aggregateFailureResponse(models.MultiExtractSourceStatusExtractionFailed),
+				multiErr:      models.NewScrapeError(models.ErrCodeInternal, "private filesystem path", nil),
+			},
+			wantStatus:  http.StatusInternalServerError,
+			wantCode:    models.ErrCodeInternal,
+			wantSources: 1,
+		},
+		{
+			name: "deadline after valid source",
+			service: &recordingMultiExtractService{
+				multiResponse: &models.MultiExtractResponse{
+					Sources: []models.MultiExtractSource{
+						{URL: "https://a.example.com/", Success: true, Status: models.MultiExtractSourceStatusValid},
+					},
+					Tokens: models.TokenInfo{OriginalEstimate: 10, CleanedEstimate: 5, SavingsPercent: 50},
+				},
+				multiErr: models.NewScrapeError(models.ErrCodeTimeout, "private merge detail", nil),
+			},
+			wantStatus:  http.StatusGatewayTimeout,
+			wantCode:    models.ErrCodeTimeout,
+			wantSources: 1,
+		},
+		{
+			name: "no valid without response",
+			service: &recordingMultiExtractService{
+				multiErr: models.NewScrapeError(models.ErrCodeNoValidSource, "private detail", nil),
+			},
+			wantStatus:  http.StatusBadGateway,
+			wantCode:    models.ErrCodeNoValidSource,
+			wantSources: 0,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			router := gin.New()
+			router.POST("/extract", Extract(test.service))
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/extract", strings.NewReader(requestBody))
+			request.Header.Set("Content-Type", "application/json")
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.wantStatus, recorder.Body)
+			}
+			var response models.MultiExtractResponse
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response.Success || response.Error == nil || response.Error.Code != test.wantCode || len(response.Sources) != test.wantSources {
+				t.Fatalf("response = %#v", response)
+			}
+			for _, private := range []string{"private", "credential", "signer path", "merge detail"} {
+				if strings.Contains(recorder.Body.String(), private) {
+					t.Fatalf("response leaked %q: %s", private, recorder.Body)
+				}
+			}
+		})
+	}
+}
+
+func TestExtractMultiResponseBudgetFailsClosedBeforeHandlerMarshal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	response := &models.MultiExtractResponse{
+		Success:       true,
+		Sources:       []models.MultiExtractSource{},
+		UsageComplete: true,
+		Error: &models.ErrorDetail{
+			Code:    models.ErrCodeInternal,
+			Message: strings.Repeat("x", models.MaxMultiExtractResponseBytes),
+		},
+	}
+	if preflightMultiExtractResponseSize(response) {
+		t.Fatal("oversized response passed preflight")
+	}
+	service := &recordingMultiExtractService{multiResponse: response}
+	router := gin.New()
+	router.POST("/extract", Extract(service))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/extract", strings.NewReader(
+		`{"sources":["https://a.example.com"],"schema":{"type":"object"},"engine":"compiled"}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusInternalServerError || strings.Contains(recorder.Body.String(), strings.Repeat("x", 64)) {
+		t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body)
+	}
+}
+
+func TestFallbackMultiResponseEncoderExactWholeResponseBudget(t *testing.T) {
+	service := &recordingMultiExtractService{}
+
+	t.Run("exact limit succeeds", func(t *testing.T) {
+		response := exactSizedHandlerMultiResponse(t, models.MaxMultiExtractResponseBytes)
+		encoded, err := encodeMultiExtractResponse(context.Background(), service, response)
+		if err != nil || len(encoded) != models.MaxMultiExtractResponseBytes {
+			t.Fatalf("encodeMultiExtractResponse() bytes/error = %d/%v", len(encoded), err)
+		}
+	})
+
+	t.Run("one byte over fails without partial HTTP output", func(t *testing.T) {
+		response := exactSizedHandlerMultiResponse(t, models.MaxMultiExtractResponseBytes+1)
+		encoded, err := encodeMultiExtractResponse(context.Background(), service, response)
+		if encoded != nil || err == nil || err.Error() != "multi-source response exceeds its output budget" {
+			t.Fatalf("encodeMultiExtractResponse() bytes/error = %d/%v", len(encoded), err)
+		}
+
+		gin.SetMode(gin.TestMode)
+		service := &recordingMultiExtractService{multiResponse: response}
+		router := gin.New()
+		router.POST("/extract", Extract(service))
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/extract", strings.NewReader(
+			`{"sources":["https://a.example.com"],"schema":{"type":"object"},"engine":"compiled"}`,
+		))
+		request.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusInternalServerError || recorder.Body.Len() >= models.MaxMultiExtractResponseBytes ||
+			strings.Contains(recorder.Body.String(), strings.Repeat("x", 64)) {
+			t.Fatalf("status/body bytes = %d/%d; body=%s", recorder.Code, recorder.Body.Len(), recorder.Body)
+		}
+		var got models.MultiExtractResponse
+		if decodeErr := json.Unmarshal(recorder.Body.Bytes(), &got); decodeErr != nil || got.Success ||
+			got.Error == nil || got.Error.Code != models.ErrCodeInternal || len(got.Sources) != 0 {
+			t.Fatalf("HTTP response/decode error = %#v/%v", got, decodeErr)
+		}
+	})
+}
+
+func TestExtractMultiUsesServiceEncoderAndFallbackEncodingSlots(t *testing.T) {
+	t.Run("service encoder", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		response := &models.MultiExtractResponse{Success: true, Sources: []models.MultiExtractSource{}, UsageComplete: true}
+		service := &recordingEncodedMultiExtractService{
+			recordingMultiExtractService: &recordingMultiExtractService{multiResponse: response},
+			encoded:                      []byte(`{"encoded_by_service":true}`),
+		}
+		router := gin.New()
+		router.POST("/extract", Extract(service))
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/extract", strings.NewReader(
+			`{"sources":["https://a.example.com"],"schema":{"type":"object"},"engine":"compiled"}`,
+		))
+		request.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK || recorder.Body.String() != string(service.encoded) ||
+			service.encodeCalls != 1 || service.encodedResponse != response {
+			t.Fatalf("status/body/encode calls/response = %d/%s/%d/%p", recorder.Code, recorder.Body, service.encodeCalls, service.encodedResponse)
+		}
+	})
+
+	t.Run("fallback is globally capped and cancelable", func(t *testing.T) {
+		for range cap(fallbackMultiExtractEncodingSlots) {
+			fallbackMultiExtractEncodingSlots <- struct{}{}
+		}
+		defer func() {
+			for range cap(fallbackMultiExtractEncodingSlots) {
+				<-fallbackMultiExtractEncodingSlots
+			}
+		}()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := encodeMultiExtractResponse(ctx, &recordingMultiExtractService{}, &models.MultiExtractResponse{})
+		var scrapeError *models.ScrapeError
+		if !errors.As(err, &scrapeError) || scrapeError.Code != models.ErrCodeTimeout {
+			t.Fatalf("encodeMultiExtractResponse() error = %v", err)
+		}
+	})
+}
+
+func TestExtractMultiOuterDeadlinePreservesSummariesWhenEncodingTimesOut(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	usage := &models.LLMUsage{PromptTokens: 2, CompletionTokens: 3, TotalTokens: 5}
+	response := &models.MultiExtractResponse{
+		Success: true,
+		Status:  models.MultiExtractStatusComplete,
+		Data:    json.RawMessage(`{"name":"Ada"}`),
+		Consensus: &models.MultiExtractConsensus{Fields: map[string]models.MultiExtractFieldConsensus{
+			"name": {Value: json.RawMessage(`"Ada"`)},
+		}},
+		Sources: []models.MultiExtractSource{
+			{
+				URL:        "https://a.example.com/",
+				FinalURL:   "https://a.example.com/",
+				Success:    true,
+				Status:     models.MultiExtractSourceStatusValid,
+				SnapshotID: "sha256:test",
+			},
+		},
+		Violations:    []models.SchemaViolation{{Path: "$.private", Message: "private schema detail"}},
+		Tokens:        models.TokenInfo{OriginalEstimate: 10, CleanedEstimate: 5, SavingsPercent: 50},
+		Timing:        models.ExtractTimingInfo{TotalMs: 11, NavigationMs: 4, CleaningMs: 2, ExtractionMs: 5},
+		LLMUsage:      usage,
+		UsageComplete: true,
+	}
+	service := &recordingEncodedMultiExtractService{
+		recordingMultiExtractService: &recordingMultiExtractService{multiResponse: response},
+		encode: func(ctx context.Context, _ *models.MultiExtractResponse) ([]byte, error) {
+			<-ctx.Done()
+			return nil, models.NewScrapeError(models.ErrCodeTimeout, "private encoder timeout", ctx.Err())
+		},
+	}
+	router := gin.New()
+	router.POST("/extract", Extract(service))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/extract", strings.NewReader(
+		`{"sources":["https://a.example.com"],"schema":{"type":"object"},"engine":"compiled","timeout":1}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+	startedAt := time.Now()
+	router.ServeHTTP(recorder, request)
+	if elapsed := time.Since(startedAt); elapsed < 750*time.Millisecond || elapsed > 3*time.Second {
+		t.Fatalf("outer deadline elapsed = %v", elapsed)
+	}
+	if recorder.Code != http.StatusGatewayTimeout || service.encodeCalls != 1 {
+		t.Fatalf("status/encode calls = %d/%d; body=%s", recorder.Code, service.encodeCalls, recorder.Body)
+	}
+	var got models.MultiExtractResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.Success || got.Status != "" || len(got.Data) != 0 || got.Consensus != nil || len(got.Violations) != 0 ||
+		got.Error == nil || got.Error.Code != models.ErrCodeTimeout || len(got.Sources) != 1 ||
+		got.Sources[0].Status != models.MultiExtractSourceStatusValid || !reflect.DeepEqual(got.Tokens, response.Tokens) ||
+		!reflect.DeepEqual(got.Timing, response.Timing) || !reflect.DeepEqual(got.LLMUsage, response.LLMUsage) ||
+		got.UsageComplete != response.UsageComplete || strings.Contains(recorder.Body.String(), "private") {
+		t.Fatalf("timeout response = %#v", got)
+	}
+}
+
+func aggregateFailureResponse(status models.MultiExtractSourceStatus) *models.MultiExtractResponse {
+	return &models.MultiExtractResponse{
+		Sources: []models.MultiExtractSource{
+			{
+				URL:    "https://a.example.com/",
+				Status: status,
+				Error:  &models.ErrorDetail{Code: models.ErrCodeNavigation, Message: "stable source failure"},
+			},
+		},
+		UsageComplete: false,
+	}
+}
+
+func exactSizedHandlerMultiResponse(t *testing.T, size int) *models.MultiExtractResponse {
+	t.Helper()
+	response := &models.MultiExtractResponse{
+		Success:       false,
+		Sources:       []models.MultiExtractSource{},
+		UsageComplete: true,
+		Error: &models.ErrorDetail{
+			Code: models.ErrCodeInternal,
+		},
+	}
+	baseline, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal multi response baseline: %v", err)
+	}
+	fillerBytes := size - len(baseline)
+	if fillerBytes < 0 {
+		t.Fatalf("response size %d is below baseline %d", size, len(baseline))
+	}
+	response.Error.Message = strings.Repeat("x", fillerBytes)
+	return response
+}
+
 type recordingExtractService struct {
 	response *models.ExtractResponse
 	err      error
 	calls    int
 	request  *models.ExtractRequest
+}
+
+type recordingMultiExtractService struct {
+	recordingExtractService
+	multiResponse *models.MultiExtractResponse
+	multiErr      error
+	multiCalls    int
+	multiRequest  *models.ExtractRequest
+}
+
+type recordingEncodedMultiExtractService struct {
+	*recordingMultiExtractService
+	encoded         []byte
+	encodeErr       error
+	encode          func(context.Context, *models.MultiExtractResponse) ([]byte, error)
+	encodeCalls     int
+	encodedResponse *models.MultiExtractResponse
+}
+
+func (service *recordingEncodedMultiExtractService) EncodeMultiResponse(
+	ctx context.Context,
+	response *models.MultiExtractResponse,
+) ([]byte, error) {
+	service.encodeCalls++
+	service.encodedResponse = response
+	if service.encode != nil {
+		return service.encode(ctx, response)
+	}
+	return append([]byte(nil), service.encoded...), service.encodeErr
+}
+
+func (service *recordingMultiExtractService) ExtractMulti(_ context.Context, request *models.ExtractRequest) (*models.MultiExtractResponse, error) {
+	service.multiCalls++
+	if request != nil {
+		copy := *request
+		copy.Schema = append(json.RawMessage(nil), request.Schema...)
+		copy.Sources = append([]string(nil), request.Sources...)
+		service.multiRequest = &copy
+	}
+	return service.multiResponse, service.multiErr
 }
 
 func (service *recordingExtractService) Extract(_ context.Context, request *models.ExtractRequest) (*models.ExtractResponse, error) {

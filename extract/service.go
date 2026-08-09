@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/use-agent/purify/compiler"
+	"github.com/use-agent/purify/consensus"
 	"github.com/use-agent/purify/evidence"
 	"github.com/use-agent/purify/llm"
 	"github.com/use-agent/purify/models"
@@ -33,6 +34,8 @@ const (
 	maximumExtractCredentialBytes = 16 << 10
 	maximumExtractBaseURLBytes    = 16 << 10
 	maximumExtractModelBytes      = 256
+	maximumExtractArtifactBytes   = consensus.MaxSourceDataBytes
+	extractDataPreflightURL       = "https://preflight.example.com/"
 )
 
 // Runner is the canonical scrape boundary used by extraction.
@@ -81,6 +84,12 @@ type Config struct {
 	Now                func() time.Time
 	CompiledRepository CompiledRepository
 	CompileObserver    CompileObserver
+	// SafeProxyURL is the process-owned loopback SOCKS5 boundary required by
+	// multi-source extraction. It is never accepted from a request.
+	SafeProxyURL string
+	// SourceSlots bounds source work across all concurrent multi requests made
+	// through this Service. Zero selects the default of four.
+	SourceSlots int
 }
 
 // OperationError preserves phase timing while retaining the domain cause for
@@ -131,7 +140,12 @@ type Service struct {
 	compiled         CompiledRepository
 	compileObserver  CompileObserver
 	validateCompiled func(json.RawMessage, json.RawMessage) ([]llm.Violation, error)
+	mergeMulti       func([]consensus.SourceResult) (consensus.Result, consensus.Materialization, error)
+	encodeMulti      func(any) ([]byte, error)
+	beforeMultiMerge func()
 	now              func() time.Time
+	safeProxyURL     string
+	sourceSlots      chan struct{}
 }
 
 // NewService constructs an extraction service. signer may be nil when evidence
@@ -155,6 +169,14 @@ func NewService(runner Runner, extractor StructuredExtractor, signer ReceiptSign
 	if isNilCompileObserver(compileObserver) {
 		compileObserver = nil
 	}
+	safeProxyURL, err := normalizeMultiSafeProxyURL(cfg.SafeProxyURL)
+	if err != nil {
+		return nil, err
+	}
+	sourceSlotCount, err := normalizeMultiSourceSlots(cfg.SourceSlots)
+	if err != nil {
+		return nil, err
+	}
 	return &Service{
 		runner:           runner,
 		extractor:        extractor,
@@ -162,7 +184,11 @@ func NewService(runner Runner, extractor StructuredExtractor, signer ReceiptSign
 		compiled:         compiledRepository,
 		compileObserver:  compileObserver,
 		validateCompiled: llm.ValidateAgainstSchema,
+		mergeMulti:       consensus.MergeWithMaterialization,
+		encodeMulti:      json.Marshal,
 		now:              now,
+		safeProxyURL:     safeProxyURL,
+		sourceSlots:      make(chan struct{}, sourceSlotCount),
 	}, nil
 }
 
@@ -439,6 +465,10 @@ func (s *Service) extractCompiledArtifact(
 		finishExtraction()
 		return nil, s.compiledInternalOperationError(ctx, err, startedAt, baseTiming)
 	}
+	if err := validateStructuredExtractData(data); err != nil {
+		finishExtraction()
+		return nil, s.operationError(extractorUnavailable("compiled extractor output exceeds structural limits", nil), startedAt, baseTiming)
+	}
 	violations, err := s.validateCompiled(request.Schema, data)
 	if err != nil {
 		finishExtraction()
@@ -698,6 +728,9 @@ func prepareRequest(request *models.ExtractRequest) (*models.ExtractRequest, err
 	if request == nil {
 		return nil, models.NewScrapeError(models.ErrCodeInvalidInput, "extract request is required", nil)
 	}
+	if request.URL == "" || request.Sources != nil {
+		return nil, invalidExtractRequest("single-source extraction requires url and forbids sources")
+	}
 	if err := validateRawExtractRequest(request); err != nil {
 		return nil, err
 	}
@@ -799,6 +832,10 @@ func validateArtifact(artifact *Artifact) (models.ExtractTimingInfo, error) {
 	if !artifact.Public.Success {
 		return timing, models.NewScrapeError(models.ErrCodeNavigation, "extract artifact is unsuccessful", nil)
 	}
+	if len(artifact.Public.Content) > maximumExtractArtifactBytes ||
+		artifact.Source != nil && len(artifact.Source.RawHTML) > maximumExtractArtifactBytes {
+		return timing, models.NewScrapeError(models.ErrCodeNavigation, "extract artifact exceeds maximum size", nil)
+	}
 	return timing, nil
 }
 
@@ -816,8 +853,8 @@ func extractWithValidation(
 	if result == nil || len(result.Data) == 0 {
 		return nil, nil, models.NewScrapeError(models.ErrCodeLLMFailure, "structured extractor returned an empty result", nil)
 	}
-	if !json.Valid(result.Data) {
-		return nil, nil, models.NewScrapeError(models.ErrCodeLLMFailure, "structured extractor returned invalid JSON", nil)
+	if err := validateStructuredExtractData(result.Data); err != nil {
+		return nil, nil, models.NewScrapeError(models.ErrCodeLLMFailure, "structured extractor returned invalid or oversized JSON", nil)
 	}
 
 	violations, err := llm.ValidateAgainstSchema(schema, result.Data)
@@ -835,8 +872,8 @@ func extractWithValidation(
 	if repaired == nil || len(repaired.Data) == 0 {
 		return nil, nil, models.NewScrapeError(models.ErrCodeLLMFailure, "structured extractor returned an empty repair", nil)
 	}
-	if !json.Valid(repaired.Data) {
-		return nil, nil, models.NewScrapeError(models.ErrCodeLLMFailure, "structured extractor returned invalid repair JSON", nil)
+	if err := validateStructuredExtractData(repaired.Data); err != nil {
+		return nil, nil, models.NewScrapeError(models.ErrCodeLLMFailure, "structured extractor returned invalid or oversized repair JSON", nil)
 	}
 	repaired.Usage = addLLMUsage(result.Usage, repaired.Usage)
 
@@ -845,6 +882,17 @@ func extractWithValidation(
 		return nil, nil, models.NewScrapeError(models.ErrCodeInvalidInput, "invalid JSON schema", err)
 	}
 	return repaired, remaining, nil
+}
+
+func validateStructuredExtractData(data json.RawMessage) error {
+	if len(data) == 0 || len(data) > maximumExtractArtifactBytes {
+		return errors.New("structured data is empty or exceeds maximum size")
+	}
+	_, err := consensus.Merge([]consensus.SourceResult{{
+		URL:  extractDataPreflightURL,
+		Data: data,
+	}})
+	return err
 }
 
 func signFieldReceipts(
@@ -862,6 +910,9 @@ func signFieldReceipts(
 	if err != nil {
 		return nil, fmt.Errorf("decode leaf values: %w", err)
 	}
+	if len(values) > consensus.MaxLeavesPerSource {
+		return nil, fmt.Errorf("evidence leaves exceed %d", consensus.MaxLeavesPerSource)
+	}
 	if len(values) != len(basis) {
 		return nil, fmt.Errorf("evidence/value path count mismatch: %d != %d", len(basis), len(values))
 	}
@@ -870,6 +921,28 @@ func signFieldReceipts(
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
+	metadataRemaining := consensus.MaxTotalMetadataBytes
+	reserveMetadata := func(requested int) bool {
+		if requested < 0 || requested > metadataRemaining {
+			return false
+		}
+		metadataRemaining -= requested
+		return true
+	}
+	for _, path := range paths {
+		if len(path) == 0 || len(path) > consensus.MaxPathBytes || !utf8.ValidString(path) {
+			return nil, fmt.Errorf("evidence path is invalid or exceeds %d bytes", consensus.MaxPathBytes)
+		}
+		anchor, ok := basis[path]
+		if !ok {
+			return nil, fmt.Errorf("evidence anchor missing for %q", path)
+		}
+		for _, size := range []int{len(path), len(anchor.Quote), len(anchor.Selector), len(anchor.Method), len(anchor.SnapshotID), 64} {
+			if !reserveMetadata(size) {
+				return nil, fmt.Errorf("evidence metadata exceeds %d bytes", consensus.MaxTotalMetadataBytes)
+			}
+		}
+	}
 
 	tokens := make(map[string]string, len(paths))
 	version := ""
@@ -891,6 +964,14 @@ func signFieldReceipts(
 		})
 		if err != nil {
 			return nil, fmt.Errorf("sign %q: %w", path, err)
+		}
+		if !utf8.ValidString(token) || len(token) > consensus.MaxReceiptBytes {
+			return nil, fmt.Errorf("receipt for %q is invalid or exceeds %d bytes", path, consensus.MaxReceiptBytes)
+		}
+		for _, size := range []int{len(path), len(token), 16} {
+			if !reserveMetadata(size) {
+				return nil, fmt.Errorf("evidence metadata exceeds %d bytes", consensus.MaxTotalMetadataBytes)
+			}
 		}
 		tokens[path] = token
 	}

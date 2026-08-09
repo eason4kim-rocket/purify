@@ -155,3 +155,83 @@ func TestExtractRequestDefaultsEngineToAuto(t *testing.T) {
 		t.Fatalf("Engine = %q, want auto", request.Engine)
 	}
 }
+
+func TestExtractRequestSingleTargetJSONRemainsCompatible(t *testing.T) {
+	request := ExtractRequest{
+		URL:       "https://example.com/page",
+		Schema:    json.RawMessage(`{"type":"object"}`),
+		Engine:    "llm",
+		LLMAPIKey: "secret",
+		Timeout:   30,
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	legacy, err := json.Marshal(struct {
+		URL                string          `json:"url"`
+		Schema             json.RawMessage `json:"schema"`
+		Engine             string          `json:"engine,omitempty"`
+		LLMAPIKey          string          `json:"llm_api_key,omitempty"`
+		LLMModel           string          `json:"llm_model,omitempty"`
+		LLMBaseURL         string          `json:"llm_base_url,omitempty"`
+		CSSSelector        string          `json:"css_selector,omitempty"`
+		OutputFormat       string          `json:"output_format,omitempty"`
+		ExtractMode        string          `json:"extract_mode,omitempty"`
+		WaitForNetworkIdle *bool           `json:"wait_for_network_idle,omitempty"`
+		Timeout            int             `json:"timeout,omitempty"`
+		Stealth            bool            `json:"stealth,omitempty"`
+		ProxyURL           string          `json:"proxy_url,omitempty"`
+		Evidence           bool            `json:"evidence,omitempty"`
+	}{
+		URL:       request.URL,
+		Schema:    request.Schema,
+		Engine:    request.Engine,
+		LLMAPIKey: request.LLMAPIKey,
+		Timeout:   request.Timeout,
+	})
+	if err != nil {
+		t.Fatalf("legacy Marshal() error = %v", err)
+	}
+	if !bytes.Equal(encoded, legacy) || bytes.Contains(encoded, []byte(`"sources"`)) {
+		t.Fatalf("single request changed:\nnew:    %s\nlegacy: %s", encoded, legacy)
+	}
+}
+
+func TestMultiExtractResponseKeepsConsensusProjectionIndependent(t *testing.T) {
+	response := MultiExtractResponse{
+		Success: true,
+		Status:  MultiExtractStatusAmbiguous,
+		Consensus: &MultiExtractConsensus{Fields: map[string]MultiExtractFieldConsensus{
+			"name": {
+				Agreement: MultiExtractAgreement{Pages: 2, IndependentRoots: 2},
+				Conflicts: []MultiExtractConflict{
+					{Value: json.RawMessage(`"Ada"`), Agreement: MultiExtractAgreement{Pages: 1, IndependentRoots: 1}},
+					{Value: json.RawMessage(`"Bob"`), Agreement: MultiExtractAgreement{Pages: 1, IndependentRoots: 1}},
+				},
+				Ambiguous: true,
+			},
+		}},
+		Sources: []MultiExtractSource{
+			{URL: "https://a.example/", FinalURL: "https://a.example/", Success: true, Status: MultiExtractSourceStatusValid},
+		},
+		UsageComplete: true,
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	for _, fragment := range []string{
+		`"status":"ambiguous"`,
+		`"independent_roots":2`,
+		`"conflicts":[`,
+		`"usage_complete":true`,
+	} {
+		if !bytes.Contains(encoded, []byte(fragment)) {
+			t.Fatalf("response %s missing %s", encoded, fragment)
+		}
+	}
+	if bytes.Contains(encoded, []byte(`"data"`)) {
+		t.Fatalf("ambiguous response unexpectedly contains data: %s", encoded)
+	}
+}

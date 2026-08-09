@@ -10,8 +10,13 @@ import (
 // ExtractRequest is the payload for POST /api/v1/extract.
 // It wraps a scrape operation with LLM-based structured data extraction.
 type ExtractRequest struct {
-	// URL is the target page to scrape. Required.
-	URL string `json:"url" binding:"required,url"`
+	// URL is the single target page to scrape. Exactly one of URL and Sources
+	// must be supplied.
+	URL string `json:"url" binding:"omitempty,url"`
+
+	// Sources selects multi-source consensus extraction. It is mutually
+	// exclusive with URL and is bounded to eight source pages.
+	Sources []string `json:"sources,omitempty" binding:"omitempty,max=8,dive,url"`
 
 	// Schema is the JSON schema describing the desired output structure. Required.
 	Schema json.RawMessage `json:"schema" binding:"required"`
@@ -187,4 +192,109 @@ type LLMUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+}
+
+const (
+	// MaxExtractSources bounds fan-out and matches consensus' source bound.
+	MaxExtractSources = 8
+	// MaxExtractSourceURLBytes bounds one canonical source URL.
+	MaxExtractSourceURLBytes = 16 << 10
+	// MaxExtractSourcesURLBytes bounds all raw source URLs in one request.
+	MaxExtractSourcesURLBytes = 128 << 10
+	// MaxMultiExtractResponseBytes bounds the complete encoded multi response.
+	MaxMultiExtractResponseBytes = 32 << 20
+
+	// ErrCodeNoValidSource is returned only after every canonical source failed
+	// or was excluded from consensus.
+	ErrCodeNoValidSource          = "NO_VALID_SOURCE"
+	ErrCodeMultiSourceUnavailable = "MULTI_SOURCE_UNAVAILABLE"
+)
+
+// MultiExtractStatus describes the aggregate materialization outcome.
+type MultiExtractStatus string
+
+const (
+	MultiExtractStatusComplete      MultiExtractStatus = "complete"
+	MultiExtractStatusAmbiguous     MultiExtractStatus = "ambiguous"
+	MultiExtractStatusSchemaInvalid MultiExtractStatus = "schema_invalid"
+)
+
+// MultiExtractSourceStatus describes whether one canonical source was admitted
+// to consensus or why it was excluded. Messages remain stable and sanitized.
+type MultiExtractSourceStatus string
+
+const (
+	MultiExtractSourceStatusValid               MultiExtractSourceStatus = "valid"
+	MultiExtractSourceStatusTimeout             MultiExtractSourceStatus = "timeout"
+	MultiExtractSourceStatusFetchFailed         MultiExtractSourceStatus = "fetch_failed"
+	MultiExtractSourceStatusExtractionFailed    MultiExtractSourceStatus = "extraction_failed"
+	MultiExtractSourceStatusPartial             MultiExtractSourceStatus = "partial"
+	MultiExtractSourceStatusSchemaInvalid       MultiExtractSourceStatus = "schema_invalid"
+	MultiExtractSourceStatusEvidenceUnavailable MultiExtractSourceStatus = "evidence_unavailable"
+	MultiExtractSourceStatusDuplicate           MultiExtractSourceStatus = "duplicate"
+)
+
+// MultiExtractSource is the bounded public summary for one deduplicated,
+// canonical request source. It never includes provider errors or credentials.
+type MultiExtractSource struct {
+	URL         string                   `json:"url"`
+	FinalURL    string                   `json:"final_url,omitempty"`
+	Success     bool                     `json:"success"`
+	Status      MultiExtractSourceStatus `json:"status"`
+	SnapshotID  string                   `json:"snapshot_id,omitempty"`
+	DuplicateOf string                   `json:"duplicate_of,omitempty"`
+	Tokens      TokenInfo                `json:"tokens"`
+	Timing      ExtractTimingInfo        `json:"timing"`
+	LLMUsage    *LLMUsage                `json:"llm_usage,omitempty"`
+	Error       *ErrorDetail             `json:"error,omitempty"`
+}
+
+// MultiExtractConsensus is a transport-stable projection of field consensus.
+// The models package deliberately owns this shape instead of depending on the
+// consensus implementation package.
+type MultiExtractConsensus struct {
+	Fields map[string]MultiExtractFieldConsensus `json:"fields"`
+}
+
+type MultiExtractAgreement struct {
+	Pages            int `json:"pages"`
+	IndependentRoots int `json:"independent_roots"`
+}
+
+type MultiExtractSupport struct {
+	URL      string           `json:"url"`
+	Root     string           `json:"root"`
+	Evidence *evidence.Anchor `json:"evidence,omitempty"`
+	Receipt  string           `json:"receipt,omitempty"`
+}
+
+type MultiExtractConflict struct {
+	Value     json.RawMessage       `json:"value"`
+	Agreement MultiExtractAgreement `json:"agreement"`
+	Supports  []MultiExtractSupport `json:"supports"`
+}
+
+type MultiExtractFieldConsensus struct {
+	Value     json.RawMessage        `json:"value,omitempty"`
+	Agreement MultiExtractAgreement  `json:"agreement"`
+	Supports  []MultiExtractSupport  `json:"supports,omitempty"`
+	Conflicts []MultiExtractConflict `json:"conflicts,omitempty"`
+	Ambiguous bool                   `json:"ambiguous,omitempty"`
+}
+
+// MultiExtractResponse is independent from the legacy single-page response.
+// Data is present only for a complete materialization that also satisfies the
+// caller's schema.
+type MultiExtractResponse struct {
+	Success       bool                   `json:"success"`
+	Status        MultiExtractStatus     `json:"status,omitempty"`
+	Data          json.RawMessage        `json:"data,omitempty"`
+	Consensus     *MultiExtractConsensus `json:"consensus,omitempty"`
+	Sources       []MultiExtractSource   `json:"sources"`
+	Violations    []SchemaViolation      `json:"violations,omitempty"`
+	Tokens        TokenInfo              `json:"tokens"`
+	Timing        ExtractTimingInfo      `json:"timing"`
+	LLMUsage      *LLMUsage              `json:"llm_usage,omitempty"`
+	UsageComplete bool                   `json:"usage_complete"`
+	Error         *ErrorDetail           `json:"error,omitempty"`
 }

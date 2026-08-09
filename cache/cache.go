@@ -14,7 +14,7 @@ import (
 const (
 	DefaultTTL             = time.Hour
 	DefaultCleanupInterval = 5 * time.Minute
-	requestKeyVersion      = "purify-scrape-cache/v2"
+	requestKeyVersion      = "purify-scrape-cache/v3"
 )
 
 // Options configures cache retention and its cleanup lifecycle. TTL is the
@@ -123,6 +123,7 @@ type canonicalRequest struct {
 	RemoveOverlays     bool              `json:"remove_overlays"`
 	BlockAds           bool              `json:"block_ads"`
 	CDPURL             string            `json:"cdp_url"`
+	MaximumBodyBytes   int64             `json:"maximum_body_bytes"`
 }
 
 // KeyForRequest returns a stable SHA-256 key for every ScrapeRequest option
@@ -179,6 +180,7 @@ func KeyForRequest(req *models.ScrapeRequest) string {
 		RemoveOverlays:     normalized.RemoveOverlays,
 		BlockAds:           normalized.BlockAds,
 		CDPURL:             normalized.CDPURL,
+		MaximumBodyBytes:   normalized.MaximumBodyBytes,
 	}
 	encoded, err := json.Marshal(canonical)
 	if err != nil {

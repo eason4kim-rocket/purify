@@ -1,6 +1,7 @@
 package models
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -121,6 +122,9 @@ func TestScrapeOptionsKeepSingleFlatAndBatchCrawlNestedJSON(t *testing.T) {
 						t.Fatalf("nested options missing %q: %s", field, encoded)
 					}
 				}
+				if _, exposed := nested["MaximumBodyBytes"]; exposed {
+					t.Fatalf("nested options exposed internal maximum body bytes: %s", encoded)
+				}
 				return
 			}
 			if !hasTopLevelTimeout {
@@ -128,6 +132,9 @@ func TestScrapeOptionsKeepSingleFlatAndBatchCrawlNestedJSON(t *testing.T) {
 			}
 			if _, hasOptions := document["options"]; hasOptions {
 				t.Fatalf("single API unexpectedly gained nested options: %s", encoded)
+			}
+			if bytes.Contains(encoded, []byte("MaximumBodyBytes")) || bytes.Contains(encoded, []byte("maximum_body_bytes")) {
+				t.Fatalf("single request exposed internal maximum body bytes: %s", encoded)
 			}
 		})
 	}
@@ -290,12 +297,13 @@ func populatedScrapeOptions() ScrapeOptions {
 			{Type: "click", Selector: "#load-more"},
 			{Type: "execute_js", Code: "() => document.title"},
 		},
-		IncludeTags:     []string{"main", "article"},
-		ExcludeTags:     []string{"nav", ".ad"},
-		OnlyMainContent: &onlyMainContent,
-		RemoveOverlays:  true,
-		BlockAds:        true,
-		CDPURL:          "wss://browser.example/devtools/browser/id",
-		MaxAge:          12_345,
+		IncludeTags:      []string{"main", "article"},
+		ExcludeTags:      []string{"nav", ".ad"},
+		OnlyMainContent:  &onlyMainContent,
+		RemoveOverlays:   true,
+		BlockAds:         true,
+		CDPURL:           "wss://browser.example/devtools/browser/id",
+		MaxAge:           12_345,
+		MaximumBodyBytes: 4 << 20,
 	}
 }
