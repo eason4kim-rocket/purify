@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"reflect"
 	"strings"
@@ -116,6 +117,817 @@ func TestExtractDataToolContract(t *testing.T) {
 	assertHint(t, "destructiveHint", tool.Annotations.DestructiveHint, false)
 	assertHint(t, "idempotentHint", tool.Annotations.IdempotentHint, false)
 	assertHint(t, "openWorldHint", tool.Annotations.OpenWorldHint, true)
+}
+
+func TestSearchWebToolContract(t *testing.T) {
+	t.Parallel()
+
+	tool := newSearchWebTool()
+	if tool.Name != "search_web" {
+		t.Fatalf("tool name = %q, want search_web", tool.Name)
+	}
+	if !reflect.DeepEqual(tool.InputSchema.Required, []string{"query"}) {
+		t.Fatalf("required = %#v, want query", tool.InputSchema.Required)
+	}
+	if got, ok := tool.InputSchema.AdditionalProperties.(bool); !ok || got {
+		t.Fatalf("additionalProperties = %#v, want false", tool.InputSchema.AdditionalProperties)
+	}
+	wantTypes := map[string]string{
+		"query": "string", "limit": "integer", "domains": "array", "freshness": "string",
+		"include_content": "boolean", "verify": "boolean", "deduplicate": "boolean", "schema": "string",
+		"engine": "string", "llm_api_key": "string", "llm_model": "string", "llm_base_url": "string",
+		"timeout": "integer",
+	}
+	for name, want := range wantTypes {
+		property, ok := tool.InputSchema.Properties[name].(map[string]any)
+		if !ok || property["type"] != want {
+			t.Fatalf("property %q = %#v, want type %q", name, tool.InputSchema.Properties[name], want)
+		}
+	}
+	if got := tool.InputSchema.Properties["limit"].(map[string]any)["default"]; got != float64(models.DefaultSearchLimit) {
+		t.Fatalf("limit default = %#v", got)
+	}
+	if got := tool.InputSchema.Properties["timeout"].(map[string]any)["default"]; got != float64(models.DefaultSearchTimeoutSeconds) {
+		t.Fatalf("timeout default = %#v", got)
+	}
+	if got := tool.InputSchema.Properties["deduplicate"].(map[string]any)["default"]; got != true {
+		t.Fatalf("deduplicate default = %#v", got)
+	}
+	if got := tool.InputSchema.Properties["freshness"].(map[string]any)["enum"]; !reflect.DeepEqual(got, []string{"day", "1d", "week", "7d", "month", "year"}) {
+		t.Fatalf("freshness enum = %#v", got)
+	}
+	if got := tool.InputSchema.Properties["schema"].(map[string]any)["maxLength"]; got != models.MaxSearchSchemaBytes {
+		t.Fatalf("schema maxLength = %#v", got)
+	}
+	assertHint(t, "readOnlyHint", tool.Annotations.ReadOnlyHint, true)
+	assertHint(t, "destructiveHint", tool.Annotations.DestructiveHint, false)
+	assertHint(t, "idempotentHint", tool.Annotations.IdempotentHint, false)
+	assertHint(t, "openWorldHint", tool.Annotations.OpenWorldHint, true)
+}
+
+func TestHandleSearchWebRequestShapeAndCredentialSeparation(t *testing.T) {
+	tests := []struct {
+		name          string
+		arguments     map[string]any
+		wantFields    []string
+		absentFields  []string
+		wantLLMAPIKey string
+	}{
+		{
+			name: "baseline omits all extraction settings",
+			arguments: map[string]any{
+				"query": "purify search", "limit": float64(7), "domains": []any{"example.com"},
+				"freshness": "7d", "include_content": true, "verify": true, "deduplicate": false, "timeout": 44,
+			},
+			wantFields:   []string{"query", "limit", "domains", "freshness", "include_content", "verify", "deduplicate", "timeout"},
+			absentFields: []string{"schema", "engine", "llm_api_key", "llm_model", "llm_base_url"},
+		},
+		{
+			name: "compiled physically strips LLM settings",
+			arguments: map[string]any{
+				"query": "purify search", "schema": validExtractSchemaJSON, "engine": "compiled",
+				"llm_api_key": "caller-llm-secret", "llm_model": "ignored-model", "llm_base_url": "https://ignored.example/v1",
+			},
+			wantFields:   []string{"query", "schema", "engine", "deduplicate", "limit", "timeout"},
+			absentFields: []string{"llm_api_key", "llm_model", "llm_base_url"},
+		},
+		{
+			name: "auto without key physically strips fallback options",
+			arguments: map[string]any{
+				"query": "purify search", "schema": validExtractSchemaJSON,
+				"llm_model": "ignored-model", "llm_base_url": "https://ignored.example/v1",
+			},
+			wantFields:   []string{"query", "schema", "engine", "deduplicate", "limit", "timeout"},
+			absentFields: []string{"llm_api_key", "llm_model", "llm_base_url"},
+		},
+		{
+			name: "llm keeps caller credential separate from API auth",
+			arguments: map[string]any{
+				"query": "purify search", "schema": validExtractSchemaJSON, "engine": "llm",
+				"llm_api_key": "caller-llm-secret", "llm_model": "caller-model", "llm_base_url": "https://llm.example/v1",
+			},
+			wantFields:    []string{"query", "schema", "engine", "llm_api_key", "llm_model", "llm_base_url"},
+			wantLLMAPIKey: "caller-llm-secret",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := validSearchResponseBody(t)
+			client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				if request.Method != http.MethodPost || request.URL.String() != "http://purify.test/api/v1/search" {
+					t.Errorf("request = %s %s", request.Method, request.URL)
+				}
+				if got := request.Header.Get("X-API-Key"); got != "purify-api-secret" {
+					t.Errorf("X-API-Key = %q", got)
+				}
+				rawBody, err := io.ReadAll(request.Body)
+				if err != nil {
+					t.Errorf("read body: %v", err)
+				}
+				if bytes.Contains(rawBody, []byte("purify-api-secret")) {
+					t.Errorf("Purify API credential leaked into body: %s", rawBody)
+				}
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal(rawBody, &fields); err != nil {
+					t.Errorf("decode request: %v", err)
+				}
+				for _, name := range test.wantFields {
+					if _, present := fields[name]; !present {
+						t.Errorf("request omitted %q: %s", name, rawBody)
+					}
+				}
+				for _, name := range test.absentFields {
+					if _, present := fields[name]; present {
+						t.Errorf("request physically contains %q: %s", name, rawBody)
+					}
+				}
+				var payload models.SearchRequest
+				decoder := json.NewDecoder(bytes.NewReader(rawBody))
+				decoder.DisallowUnknownFields()
+				if err := decoder.Decode(&payload); err != nil {
+					t.Errorf("decode typed request: %v", err)
+				}
+				if payload.Query != "purify search" || payload.LLMAPIKey != test.wantLLMAPIKey {
+					t.Errorf("payload = %#v", payload)
+				}
+				return httpResponse(http.StatusOK, body), nil
+			})}
+			handler := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")
+
+			result, protocolErr := handler(context.Background(), searchRequest(test.arguments))
+			if protocolErr != nil || result.IsError {
+				t.Fatalf("result = %#v, protocol error = %v, text = %s", result, protocolErr, toolResultText(t, result))
+			}
+			got, ok := result.StructuredContent.(models.SearchResponse)
+			if !ok || !reflect.DeepEqual(got, validSearchResponse()) {
+				t.Fatalf("structured response = %#v", result.StructuredContent)
+			}
+			var fallback models.SearchResponse
+			if err := json.Unmarshal([]byte(toolResultText(t, result)), &fallback); err != nil || !reflect.DeepEqual(fallback, got) {
+				t.Fatalf("fallback parity = %#v, error = %v", fallback, err)
+			}
+		})
+	}
+}
+
+func TestHandleSearchWebRejectsInvalidArgumentsBeforeHTTP(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments map[string]any
+	}{
+		{name: "missing query", arguments: map[string]any{}},
+		{name: "non-string query", arguments: map[string]any{"query": 42}},
+		{name: "blank query", arguments: map[string]any{"query": " \t "}},
+		{name: "too many query words", arguments: map[string]any{"query": strings.Repeat("word ", models.MaxSearchQueryWords+1)}},
+		{name: "fractional limit", arguments: map[string]any{"query": "q", "limit": 1.5}},
+		{name: "limit too high", arguments: map[string]any{"query": "q", "limit": models.MaxSearchLimit + 1}},
+		{name: "fractional timeout", arguments: map[string]any{"query": "q", "timeout": 2.5}},
+		{name: "non-array domains", arguments: map[string]any{"query": "q", "domains": "example.com"}},
+		{name: "non-string domain", arguments: map[string]any{"query": "q", "domains": []any{42}}},
+		{name: "domain with URL", arguments: map[string]any{"query": "q", "domains": []any{"https://example.com"}}},
+		{name: "localhost domain", arguments: map[string]any{"query": "q", "domains": []any{"localhost"}}},
+		{name: "IP domain", arguments: map[string]any{"query": "q", "domains": []any{"127.0.0.1"}}},
+		{name: "unknown freshness", arguments: map[string]any{"query": "q", "freshness": "pw"}},
+		{name: "coerced boolean", arguments: map[string]any{"query": "q", "verify": "true"}},
+		{name: "engine without schema", arguments: map[string]any{"query": "q", "engine": "compiled"}},
+		{name: "key without schema", arguments: map[string]any{"query": "q", "llm_api_key": "key"}},
+		{name: "non-string schema", arguments: map[string]any{"query": "q", "schema": map[string]any{"type": "object"}}},
+		{name: "invalid schema", arguments: map[string]any{"query": "q", "schema": "null"}},
+		{name: "trailing schema", arguments: map[string]any{"query": "q", "schema": `{} {}`}},
+		{name: "duplicate schema field", arguments: map[string]any{"query": "q", "schema": `{"type":"object","type":"array"}`}},
+		{name: "invalid engine", arguments: map[string]any{"query": "q", "schema": `{}`, "engine": "hybrid"}},
+		{name: "llm without key", arguments: map[string]any{"query": "q", "schema": `{}`, "engine": "llm"}},
+		{name: "llm blank key", arguments: map[string]any{"query": "q", "schema": `{}`, "engine": "llm", "llm_api_key": "  "}},
+		{name: "model with whitespace", arguments: map[string]any{"query": "q", "schema": `{}`, "llm_model": "bad model"}},
+		{name: "base URL with credential", arguments: map[string]any{"query": "q", "schema": `{}`, "llm_base_url": "https://user:pass@llm.example/v1"}},
+		{name: "unknown argument", arguments: map[string]any{"query": "q", "provider": "brave"}},
+	}
+
+	var calls atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return httpResponse(http.StatusOK, validSearchResponseBody(t)), nil
+	})}
+	handler := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, protocolErr := handler(context.Background(), searchRequest(test.arguments))
+			if protocolErr != nil || !result.IsError {
+				t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
+			}
+		})
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("HTTP calls = %d, want 0", got)
+	}
+}
+
+func TestHandleSearchWebInputLimits(t *testing.T) {
+	tests := []struct {
+		name      string
+		atLimit   map[string]any
+		overLimit map[string]any
+	}{
+		{
+			name:      "query runes",
+			atLimit:   map[string]any{"query": strings.Repeat("界", models.MaxSearchQueryRunes)},
+			overLimit: map[string]any{"query": strings.Repeat("界", models.MaxSearchQueryRunes+1)},
+		},
+		{
+			name: "schema bytes",
+			atLimit: map[string]any{"query": "q", "schema": `{}` +
+				strings.Repeat(" ", models.MaxSearchSchemaBytes-2)},
+			overLimit: map[string]any{"query": "q", "schema": `{}` +
+				strings.Repeat(" ", models.MaxSearchSchemaBytes-1)},
+		},
+		{
+			name: "LLM key bytes",
+			atLimit: map[string]any{"query": "q", "schema": `{}`, "engine": "llm",
+				"llm_api_key": strings.Repeat("k", models.MaxSearchLLMAPIKeyBytes)},
+			overLimit: map[string]any{"query": "q", "schema": `{}`, "engine": "llm",
+				"llm_api_key": strings.Repeat("k", models.MaxSearchLLMAPIKeyBytes+1)},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int32
+			response := validSearchResponse()
+			response.Query = strings.Join(strings.Fields(test.atLimit["query"].(string)), " ")
+			responseBody, err := json.Marshal(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				calls.Add(1)
+				return httpResponse(http.StatusOK, responseBody), nil
+			})}
+			handler := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")
+			result, protocolErr := handler(context.Background(), searchRequest(test.atLimit))
+			if protocolErr != nil || result.IsError || calls.Load() != 1 {
+				t.Fatalf("N input = (%#v, %v), calls=%d", result, protocolErr, calls.Load())
+			}
+			result, protocolErr = handler(context.Background(), searchRequest(test.overLimit))
+			if protocolErr != nil || !result.IsError || calls.Load() != 1 {
+				t.Fatalf("N+1 input = (%#v, %v), calls=%d", result, protocolErr, calls.Load())
+			}
+		})
+	}
+}
+
+func TestDecodeSearchResponseAcceptsCompleteEnrichmentShape(t *testing.T) {
+	t.Parallel()
+
+	response := validSearchResponse()
+	fetchedAt := time.Date(2026, time.August, 10, 1, 2, 3, 0, time.UTC)
+	verified := true
+	unlocatedRate := 0.25
+	basis := models.EvidenceBasis{
+		"/name": {
+			Quote: "Purify", TextRange: [2]int{0, 6}, Method: evidence.MethodExact,
+			SnapshotID: "sha256:" + strings.Repeat("a", 64), FetchedAt: fetchedAt,
+		},
+	}
+	receipts := models.FieldReceipts{"/name": "signed-field-receipt"}
+	response.Results[0].FinalURL = "https://example.com/final"
+	response.Results[0].Content = "Purify content"
+	response.Results[0].Verified = &verified
+	response.Results[0].VerificationStatus = models.SearchVerificationVerified
+	response.Results[0].Evidence = &evidence.Anchor{
+		Quote: "Purify", TextRange: [2]int{0, 6}, Method: evidence.MethodExact,
+		SnapshotID: "sha256:" + strings.Repeat("a", 64), FetchedAt: fetchedAt,
+	}
+	response.Results[0].Receipt = "signed-snippet-receipt"
+	response.Results[0].Data = json.RawMessage(`{"name":"Purify"}`)
+	response.Results[0].Basis = &basis
+	response.Results[0].Receipts = &receipts
+	response.Results[0].UnlocatedRate = &unlocatedRate
+	response.Results[0].Extractor = &models.ExtractorMetadata{
+		ID: "extractor-id", Version: 2, CompiledAt: fetchedAt, Validation: 0.98, Mode: "compiled",
+	}
+	response.Results[0].Violations = []models.SchemaViolation{{Path: "/optional", Message: "optional field missing"}}
+	response.Results[0].Errors = []models.SearchResultError{{
+		Stage: models.SearchResultStageExtract, Code: models.ErrCodeLLMFailure, Message: "result extraction was partial",
+	}}
+	response.Partial = true
+	body, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := decodeSearchResponse(body)
+	if err != nil {
+		t.Fatalf("decode complete response: %v", err)
+	}
+	if !reflect.DeepEqual(got, response) {
+		t.Fatalf("decoded response = %#v, want %#v", got, response)
+	}
+}
+
+func TestDecodeSearchResponseRejectsMalformedDocuments(t *testing.T) {
+	base := validSearchResponse()
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{name: "invalid JSON", body: []byte(`{"success":`)},
+		{name: "null response", body: []byte(`null`)},
+		{name: "trailing value", body: append(validSearchResponseBody(t), []byte(` {}`)...)},
+		{name: "duplicate top-level field", body: bytes.Replace(validSearchResponseBody(t), []byte(`{"success":true`), []byte(`{"success":true,"success":true`), 1)},
+		{name: "unknown top-level field", body: mutateSearchResponseBody(t, base, func(document map[string]any) {
+			document["provider"] = "brave"
+		})},
+		{name: "missing results", body: mutateSearchResponseBody(t, base, func(document map[string]any) {
+			delete(document, "results")
+		})},
+		{name: "null results", body: mutateSearchResponseBody(t, base, func(document map[string]any) {
+			document["results"] = nil
+		})},
+		{name: "unknown result field", body: mutateSearchResponseBody(t, base, func(document map[string]any) {
+			searchResultDocument(t, document, 0)["provider_payload"] = true
+		})},
+		{name: "missing result rank", body: mutateSearchResponseBody(t, base, func(document map[string]any) {
+			delete(searchResultDocument(t, document, 0), "rank")
+		})},
+		{name: "non-sequential result rank", body: mutateSearchResponseBody(t, base, func(document map[string]any) {
+			searchResultDocument(t, document, 0)["rank"] = float64(2)
+		})},
+		{name: "non-canonical URL", body: mutateSearchResponseBody(t, base, func(document map[string]any) {
+			searchResultDocument(t, document, 0)["url"] = "HTTPS://EXAMPLE.COM"
+		})},
+		{name: "unknown verification status", body: mutateSearchResponseBody(t, base, func(document map[string]any) {
+			searchResultDocument(t, document, 0)["verification_status"] = "future"
+		})},
+		{name: "verified without evidence", body: mutateSearchResponseBody(t, base, func(document map[string]any) {
+			result := searchResultDocument(t, document, 0)
+			result["verification_status"] = "verified"
+			result["verified"] = true
+			result["receipt"] = "receipt"
+		})},
+		{name: "null optional score", body: mutateSearchResponseBody(t, base, func(document map[string]any) {
+			searchResultDocument(t, document, 0)["score"] = nil
+		})},
+		{name: "incomplete extraction shape", body: mutateSearchResponseBody(t, base, func(document map[string]any) {
+			searchResultDocument(t, document, 0)["data"] = map[string]any{"name": "Purify"}
+		})},
+		{name: "null errors", body: mutateSearchResponseBody(t, base, func(document map[string]any) {
+			searchResultDocument(t, document, 0)["errors"] = nil
+		})},
+		{name: "negative timing", body: mutateSearchResponseBody(t, base, func(document map[string]any) {
+			document["timing"].(map[string]any)["total_ms"] = float64(-1)
+		})},
+		{name: "successful response with error", body: mutateSearchResponseBody(t, base, func(document map[string]any) {
+			document["error"] = map[string]any{"code": "BAD", "message": "bad"}
+		})},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := decodeSearchResponse(test.body); err == nil {
+				t.Fatalf("decode accepted malformed body: %s", test.body)
+			}
+		})
+	}
+}
+
+func TestHandleSearchWebPreservesStructuredErrorsAndRedactsCredentials(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   []byte
+	}{
+		{
+			name:   "non-2xx structured error",
+			status: http.StatusTooManyRequests,
+			body: validSearchErrorBody(t, models.ErrCodeRateLimited,
+				"purify-api-secret and caller-llm-secret were rejected"),
+		},
+		{
+			name:   "successful response echoes secret",
+			status: http.StatusOK,
+			body: mutateSearchResponseBody(t, validSearchResponse(), func(document map[string]any) {
+				searchResultDocument(t, document, 0)["snippet"] = "caller-llm-secret"
+			}),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return httpResponse(test.status, test.body), nil
+			})}
+			handler := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")
+			result, protocolErr := handler(context.Background(), searchRequest(map[string]any{
+				"query": "q", "schema": `{}`, "engine": "llm", "llm_api_key": "caller-llm-secret",
+			}))
+			if protocolErr != nil || !result.IsError {
+				t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
+			}
+			message := toolResultText(t, result)
+			for _, secret := range []string{"purify-api-secret", "caller-llm-secret"} {
+				if strings.Contains(message, secret) {
+					t.Fatalf("tool output leaked %q: %q", secret, message)
+				}
+			}
+		})
+	}
+}
+
+func TestSearchProductionClientRejectsCrossOriginRedirectWithoutLeakingCredentials(t *testing.T) {
+	t.Parallel()
+
+	var sourceCalls atomic.Int32
+	var redirectCalls atomic.Int32
+	var leakedCredential atomic.Bool
+	client := newSearchHTTPClient()
+	client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Host {
+		case "purify.test":
+			sourceCalls.Add(1)
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Errorf("read source body: %v", err)
+			}
+			if request.Header.Get("X-API-Key") != "purify-api-secret" || bytes.Contains(body, []byte("purify-api-secret")) {
+				t.Errorf("Purify credential boundary violated: header=%q body=%s", request.Header.Get("X-API-Key"), body)
+			}
+			return &http.Response{
+				StatusCode: http.StatusTemporaryRedirect,
+				Header:     http.Header{"Location": []string{"https://redirect.test/capture"}},
+				Body:       io.NopCloser(strings.NewReader("redirecting")),
+				Request:    request,
+			}, nil
+		case "redirect.test":
+			redirectCalls.Add(1)
+			if request.Header.Get("X-API-Key") != "" {
+				leakedCredential.Store(true)
+			}
+			return httpResponse(http.StatusOK, validSearchResponseBody(t)), nil
+		default:
+			t.Fatalf("unexpected host %q", request.URL.Host)
+			return nil, nil
+		}
+	})
+	handler := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")
+	result, protocolErr := handler(context.Background(), searchRequest(map[string]any{
+		"query": "q", "schema": `{}`, "engine": "llm", "llm_api_key": "caller-llm-secret",
+	}))
+	if protocolErr != nil || !result.IsError {
+		t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
+	}
+	if got, want := toolResultText(t, result), "search failed (HTTP 307)"; got != want {
+		t.Fatalf("tool error = %q, want %q", got, want)
+	}
+	if sourceCalls.Load() != 1 || redirectCalls.Load() != 0 || leakedCredential.Load() {
+		t.Fatalf("source/redirect/leak = %d/%d/%t", sourceCalls.Load(), redirectCalls.Load(), leakedCredential.Load())
+	}
+}
+
+func TestHandleSearchWebResponseBodyLimit(t *testing.T) {
+	tests := []struct {
+		name      string
+		bodyBytes int
+		wantError bool
+	}{
+		{name: "N bytes", bodyBytes: int(maxAPIResponseBytes)},
+		{name: "N plus one bytes", bodyBytes: int(maxAPIResponseBytes) + 1, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := searchResponseBodyAtSize(t, test.bodyBytes)
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return httpResponse(http.StatusOK, body), nil
+			})}
+			handler := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")
+			result, protocolErr := handler(context.Background(), searchRequest(map[string]any{
+				"query": "purify search", "include_content": true,
+			}))
+			if protocolErr != nil || result.IsError != test.wantError {
+				t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
+			}
+			if !test.wantError && len(toolResultText(t, result)) != test.bodyBytes {
+				t.Fatalf("fallback bytes = %d, want %d", len(toolResultText(t, result)), test.bodyBytes)
+			}
+		})
+	}
+}
+
+func TestHandleSearchWebLateCancellationIsToolError(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		cancel()
+		return httpResponse(http.StatusOK, validSearchResponseBody(t)), nil
+	})}
+	handler := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")
+	result, protocolErr := handler(ctx, searchRequest(map[string]any{"query": "q"}))
+	if protocolErr != nil || !result.IsError || !strings.Contains(toolResultText(t, result), context.Canceled.Error()) {
+		t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
+	}
+}
+
+func TestSearchJSONContainsSecretAcrossEscapedNestedValuesAndKeys(t *testing.T) {
+	t.Parallel()
+
+	tests := []string{
+		`{"data":{"safe":"caller-llm-\u0073ecret"}}`,
+		`{"data":{"caller-llm-\u0073ecret":"safe"}}`,
+	}
+	for _, body := range tests {
+		contains, err := searchJSONContainsSecret([]byte(body), "caller-llm-secret")
+		if err != nil || !contains {
+			t.Fatalf("scan(%s) = %t, %v", body, contains, err)
+		}
+	}
+}
+
+func TestHandleSearchWebEscapedSecretUsesFixedError(t *testing.T) {
+	t.Parallel()
+
+	body := bytes.Replace(validSearchResponseBody(t), []byte("Provider-neutral verified search"), []byte(`caller-llm-\u0073ecret`), 1)
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return httpResponse(http.StatusOK, body), nil
+	})}
+	handler := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")
+	result, protocolErr := handler(context.Background(), searchRequest(map[string]any{
+		"query": "purify search", "schema": `{}`, "engine": "llm", "llm_api_key": "caller-llm-secret",
+	}))
+	if protocolErr != nil || !result.IsError {
+		t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
+	}
+	if got, want := toolResultText(t, result), "failed to parse search response: response contains sensitive data"; got != want {
+		t.Fatalf("tool error = %q, want %q", got, want)
+	}
+}
+
+func TestHandleSearchWebUsesRequestTimeoutAndParentDeadline(t *testing.T) {
+	tests := []struct {
+		name       string
+		ctx        func() (context.Context, context.CancelFunc)
+		timeout    int
+		maximumRun time.Duration
+	}{
+		{
+			name: "request timeout",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			timeout:    1,
+			maximumRun: 2 * time.Second,
+		},
+		{
+			name: "earlier parent deadline",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), 20*time.Millisecond)
+			},
+			timeout:    models.MaxSearchTimeoutSeconds,
+			maximumRun: time.Second,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				<-request.Context().Done()
+				return nil, request.Context().Err()
+			})}
+			handler := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")
+			ctx, cancel := test.ctx()
+			defer cancel()
+			started := time.Now()
+			result, protocolErr := handler(ctx, searchRequest(map[string]any{"query": "q", "timeout": test.timeout}))
+			elapsed := time.Since(started)
+			if protocolErr != nil || !result.IsError || !strings.Contains(toolResultText(t, result), context.DeadlineExceeded.Error()) {
+				t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
+			}
+			if elapsed > test.maximumRun {
+				t.Fatalf("elapsed = %s, want <= %s", elapsed, test.maximumRun)
+			}
+		})
+	}
+}
+
+func TestHandleSearchWebRejectsResponseOutsideRequestCapabilities(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments map[string]any
+		response  models.SearchResponse
+	}{
+		{
+			name:      "query mismatch",
+			arguments: map[string]any{"query": "different query"},
+			response:  validSearchResponse(),
+		},
+		{
+			name:      "content not requested",
+			arguments: map[string]any{"query": "purify search"},
+			response: searchResponseWith(t, func(response *models.SearchResponse) {
+				response.Results[0].Content = "forged content"
+			}),
+		},
+		{
+			name:      "result count exceeds request limit",
+			arguments: map[string]any{"query": "purify search", "limit": 1},
+			response: searchResponseWith(t, func(response *models.SearchResponse) {
+				second := response.Results[0]
+				second.Rank = 2
+				second.URL = "https://example.net/article"
+				response.Results = append(response.Results, second)
+			}),
+		},
+		{
+			name:      "verification not requested",
+			arguments: map[string]any{"query": "purify search"},
+			response: searchResponseWith(t, func(response *models.SearchResponse) {
+				verified := false
+				response.Results[0].Verified = &verified
+				response.Results[0].VerificationStatus = models.SearchVerificationMismatch
+			}),
+		},
+		{
+			name:      "extraction not requested",
+			arguments: map[string]any{"query": "purify search"},
+			response:  searchResponseWithNullData(t),
+		},
+		{
+			name:      "enrichment beyond top five",
+			arguments: map[string]any{"query": "purify search", "limit": 6, "include_content": true},
+			response: searchResponseWith(t, func(response *models.SearchResponse) {
+				for len(response.Results) < 6 {
+					index := len(response.Results)
+					result := response.Results[0]
+					result.Rank = index + 1
+					result.URL = fmt.Sprintf("https://example%d.com/article", index)
+					result.Score = nil
+					result.PublishedAt = nil
+					response.Results = append(response.Results, result)
+				}
+				response.Results[5].FinalURL = "https://example5.com/final"
+			}),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body, err := json.Marshal(test.response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return httpResponse(http.StatusOK, body), nil
+			})}
+			handler := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")
+			result, protocolErr := handler(context.Background(), searchRequest(test.arguments))
+			if protocolErr != nil || !result.IsError || !strings.Contains(toolResultText(t, result), "failed to parse search response") {
+				t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
+			}
+		})
+	}
+}
+
+func TestHandleSearchWebAcceptsSchemaDataNull(t *testing.T) {
+	t.Parallel()
+
+	response := searchResponseWithNullData(t)
+	response.Query = "q"
+	body, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return httpResponse(http.StatusOK, body), nil
+	})}
+	handler := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")
+	result, protocolErr := handler(context.Background(), searchRequest(map[string]any{
+		"query": "q", "schema": `{}`, "engine": "compiled",
+	}))
+	if protocolErr != nil || result.IsError {
+		t.Fatalf("result = %#v, protocol error = %v, text=%s", result, protocolErr, toolResultText(t, result))
+	}
+	got := result.StructuredContent.(models.SearchResponse)
+	if string(got.Results[0].Data) != "null" {
+		t.Fatalf("data = %s, want null", got.Results[0].Data)
+	}
+}
+
+func TestDecodeSearchResponseAcceptsCompiledQuoteWithoutTextRange(t *testing.T) {
+	t.Parallel()
+
+	response := searchResponseWithNullData(t)
+	fetchedAt := time.Date(2026, time.August, 10, 1, 2, 3, 0, time.UTC)
+	basis := models.EvidenceBasis{"/value": {
+		Quote: "compiled quote", Method: evidence.MethodCompiled,
+		SnapshotID: "sha256:" + strings.Repeat("a", 64), FetchedAt: fetchedAt,
+	}}
+	receipts := models.FieldReceipts{"/value": "signed-receipt"}
+	rate := 1.0
+	response.Results[0].Basis = &basis
+	response.Results[0].Receipts = &receipts
+	response.Results[0].UnlocatedRate = &rate
+	body, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeSearchResponse(body); err != nil {
+		t.Fatalf("compiled zero-range quote rejected: %v", err)
+	}
+}
+
+func TestDecodeSearchResponseRejectsDuplicateEffectiveFinalURL(t *testing.T) {
+	t.Parallel()
+
+	response := validSearchResponse()
+	response.Results[0].FinalURL = "https://canonical.example.com/article"
+	second := response.Results[0]
+	second.Rank = 2
+	second.URL = "https://alias.example.net/article"
+	response.Results = append(response.Results, second)
+	body, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeSearchResponse(body); err == nil {
+		t.Fatal("duplicate effective final URL was accepted")
+	}
+}
+
+func TestDecodeSearchResponseRejectsOrphanExtractionPresence(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		value any
+	}{
+		{name: "null extractor", field: "extractor", value: nil},
+		{name: "null llm usage", field: "llm_usage", value: nil},
+		{name: "empty violations", field: "violations", value: []any{}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := mutateSearchResponseBody(t, validSearchResponse(), func(document map[string]any) {
+				searchResultDocument(t, document, 0)[test.field] = test.value
+			})
+			if _, err := decodeSearchResponse(body); err == nil {
+				t.Fatalf("orphan %s was accepted", test.field)
+			}
+		})
+	}
+}
+
+func TestHandleSearchWebRequiresHTTP200(t *testing.T) {
+	t.Parallel()
+
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return httpResponse(http.StatusCreated, validSearchResponseBody(t)), nil
+	})}
+	handler := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")
+	result, protocolErr := handler(context.Background(), searchRequest(map[string]any{"query": "purify search"}))
+	if protocolErr != nil || !result.IsError || toolResultText(t, result) != "search failed (HTTP 201)" {
+		t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
+	}
+}
+
+func TestDecodeSearchResponseRejectsTimingAndPartialInconsistency(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "timing components exceed total", mutate: func(document map[string]any) {
+			timing := document["timing"].(map[string]any)
+			timing["total_ms"] = float64(3)
+			timing["provider_ms"] = float64(2)
+			timing["enrichment_ms"] = float64(2)
+		}},
+		{name: "partial without errors", mutate: func(document map[string]any) {
+			document["partial"] = true
+		}},
+		{name: "errors without partial", mutate: func(document map[string]any) {
+			searchResultDocument(t, document, 0)["errors"] = []any{map[string]any{
+				"stage": "fetch", "code": models.ErrCodeNavigation, "message": "result fetch failed",
+			}}
+		}},
+		{name: "verification unavailable without error", mutate: func(document map[string]any) {
+			result := searchResultDocument(t, document, 0)
+			result["verification_status"] = "unavailable"
+			result["verified"] = false
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := mutateSearchResponseBody(t, validSearchResponse(), test.mutate)
+			if _, err := decodeSearchResponse(body); err == nil {
+				t.Fatal("inconsistent response was accepted")
+			}
+		})
+	}
+	t.Run("timing addition overflow", func(t *testing.T) {
+		response := validSearchResponse()
+		response.Timing = models.SearchTimingInfo{
+			TotalMs: math.MaxInt64, ProviderMs: math.MaxInt64, EnrichmentMs: 1,
+		}
+		body, err := json.Marshal(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := decodeSearchResponse(body); err == nil {
+			t.Fatal("overflowing timing response was accepted")
+		}
+	})
 }
 
 func TestHandleExtractDataRequestMatrixAndCredentialSeparation(t *testing.T) {
@@ -1415,6 +2227,128 @@ func verifyRequest(url, claims string) mcp.CallToolRequest {
 
 func extractRequest(arguments map[string]any) mcp.CallToolRequest {
 	return mcp.CallToolRequest{Params: mcp.CallToolParams{Arguments: arguments}}
+}
+
+func searchRequest(arguments map[string]any) mcp.CallToolRequest {
+	return mcp.CallToolRequest{Params: mcp.CallToolParams{Arguments: arguments}}
+}
+
+func validSearchResponse() models.SearchResponse {
+	score := 0.91
+	publishedAt := time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
+	return models.SearchResponse{
+		Success: true,
+		Query:   "purify search",
+		Results: []models.SearchResult{{
+			Rank:               1,
+			Score:              &score,
+			Title:              "Purify Search",
+			URL:                "https://example.com/article",
+			Snippet:            "Provider-neutral verified search",
+			PublishedAt:        &publishedAt,
+			VerificationStatus: models.SearchVerificationNotChecked,
+		}},
+		Timing: models.SearchTimingInfo{TotalMs: 12, ProviderMs: 8, EnrichmentMs: 0},
+	}
+}
+
+func validSearchResponseBody(t *testing.T) []byte {
+	t.Helper()
+	body, err := json.Marshal(validSearchResponse())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func searchResponseWith(t *testing.T, mutate func(*models.SearchResponse)) models.SearchResponse {
+	t.Helper()
+	response := validSearchResponse()
+	mutate(&response)
+	return response
+}
+
+func searchResponseWithNullData(t *testing.T) models.SearchResponse {
+	t.Helper()
+	response := validSearchResponse()
+	basis := models.EvidenceBasis{}
+	receipts := models.FieldReceipts{}
+	unlocatedRate := 0.0
+	response.Results[0].Data = json.RawMessage(`null`)
+	response.Results[0].Basis = &basis
+	response.Results[0].Receipts = &receipts
+	response.Results[0].UnlocatedRate = &unlocatedRate
+	return response
+}
+
+func validSearchErrorBody(t *testing.T, code, message string) []byte {
+	t.Helper()
+	body, err := json.Marshal(models.SearchResponse{
+		Success: false,
+		Results: []models.SearchResult{},
+		Error:   &models.ErrorDetail{Code: code, Message: message},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func mutateSearchResponseBody(t *testing.T, response models.SearchResponse, mutate func(map[string]any)) []byte {
+	t.Helper()
+	body, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(body, &document); err != nil {
+		t.Fatal(err)
+	}
+	mutate(document)
+	body, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func searchResultDocument(t *testing.T, document map[string]any, index int) map[string]any {
+	t.Helper()
+	results, ok := document["results"].([]any)
+	if !ok || index < 0 || index >= len(results) {
+		t.Fatalf("invalid results fixture: %#v", document["results"])
+	}
+	result, ok := results[index].(map[string]any)
+	if !ok {
+		t.Fatalf("invalid result fixture: %#v", results[index])
+	}
+	return result
+}
+
+func searchResponseBodyAtSize(t *testing.T, size int) []byte {
+	t.Helper()
+	if size < 1 {
+		t.Fatalf("invalid response size %d", size)
+	}
+	response := validSearchResponse()
+	response.Results[0].Content = "x"
+	body, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	padding := size - len(body)
+	if padding < 0 {
+		t.Fatalf("response size %d is smaller than fixture %d", size, len(body))
+	}
+	response.Results[0].Content += strings.Repeat("x", padding)
+	body, err = json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != size {
+		t.Fatalf("response bytes = %d, want %d", len(body), size)
+	}
+	return body
 }
 
 func extractArguments(schema string) map[string]any {

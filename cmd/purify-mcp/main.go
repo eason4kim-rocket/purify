@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -23,6 +24,7 @@ import (
 	"github.com/use-agent/purify/llm"
 	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/publicnet"
+	"golang.org/x/net/idna"
 	"golang.org/x/net/publicsuffix"
 )
 
@@ -35,6 +37,8 @@ const (
 	maxExtractLLMModelBytes            = 256
 	maxExtractLLMBaseURLBytes          = 16 << 10
 	maxExtractConsensusPathBytes       = 4 << 10
+	maxSearchQueryBytes                = models.MaxSearchQueryRunes * utf8.UTFMax
+	maxSearchRawDomainBytes            = models.MaxSearchDomainBytes*utf8.UTFMax + 1
 )
 
 type apiHTTPResponse struct {
@@ -53,6 +57,25 @@ type extractAPIPayload struct {
 	LLMAPIKey  string          `json:"llm_api_key,omitempty"`
 	LLMModel   string          `json:"llm_model,omitempty"`
 	LLMBaseURL string          `json:"llm_base_url,omitempty"`
+}
+
+// searchAPIPayload keeps process authentication in the header and omits
+// extraction-only settings unless a schema is selected. Deduplicate remains a
+// pointer so an explicit false survives JSON encoding.
+type searchAPIPayload struct {
+	Query          string          `json:"query"`
+	Limit          int             `json:"limit,omitempty"`
+	Domains        []string        `json:"domains,omitempty"`
+	Freshness      string          `json:"freshness,omitempty"`
+	IncludeContent bool            `json:"include_content,omitempty"`
+	Verify         bool            `json:"verify,omitempty"`
+	Deduplicate    *bool           `json:"deduplicate,omitempty"`
+	Schema         json.RawMessage `json:"schema,omitempty"`
+	Engine         string          `json:"engine,omitempty"`
+	LLMAPIKey      string          `json:"llm_api_key,omitempty"`
+	LLMModel       string          `json:"llm_model,omitempty"`
+	LLMBaseURL     string          `json:"llm_base_url,omitempty"`
+	Timeout        int             `json:"timeout,omitempty"`
 }
 
 // scrapeRequest mirrors the Purify API request model.
@@ -189,6 +212,84 @@ func newExtractDataTool() mcp.Tool {
 	)
 }
 
+func newSearchWebTool() mcp.Tool {
+	tool := mcp.NewTool("search_web",
+		mcp.WithDescription("Search the public web and optionally fetch content, verify snippets, deduplicate syndicated copies, or extract schema-shaped data. Provider credentials are process-owned; llm_api_key is only for caller-funded schema extraction."),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("Natural-language query containing one to fifty words"),
+			mcp.MaxLength(models.MaxSearchQueryRunes),
+		),
+		mcp.WithNumber("limit",
+			mcp.Description("Maximum ranked results (default: 10)"),
+			mcp.Min(1),
+			mcp.Max(models.MaxSearchLimit),
+			mcp.DefaultNumber(models.DefaultSearchLimit),
+		),
+		mcp.WithArray("domains",
+			mcp.Description("Optional registrable-domain filters, without schemes or paths"),
+			mcp.MaxItems(models.MaxSearchDomains),
+			mcp.WithStringItems(mcp.MaxLength(maxSearchRawDomainBytes)),
+		),
+		mcp.WithString("freshness",
+			mcp.Description("Provider-neutral recency filter"),
+			mcp.Enum("day", "1d", "week", "7d", "month", "year"),
+		),
+		mcp.WithBoolean("include_content",
+			mcp.Description("Fetch and return cleaned content for at most the first five results"),
+			mcp.DefaultBool(false),
+		),
+		mcp.WithBoolean("verify",
+			mcp.Description("Fetch at most the first five results and verify each snippet against its page"),
+			mcp.DefaultBool(false),
+		),
+		mcp.WithBoolean("deduplicate",
+			mcp.Description("Collapse exact URLs and near-duplicate syndicated results"),
+			mcp.DefaultBool(true),
+		),
+		mcp.WithString("schema",
+			mcp.Description("Optional string containing exactly one JSON Schema value for per-result extraction"),
+			mcp.MaxLength(models.MaxSearchSchemaBytes),
+		),
+		mcp.WithString("engine",
+			mcp.Description("Schema extraction engine: auto, compiled, or llm"),
+			mcp.Enum("auto", "compiled", "llm"),
+		),
+		mcp.WithString("llm_api_key",
+			mcp.Description("Optional caller-owned LLM credential for schema extraction"),
+			mcp.MaxLength(models.MaxSearchLLMAPIKeyBytes),
+		),
+		mcp.WithString("llm_model",
+			mcp.Description("Optional LLM model for schema extraction"),
+			mcp.MaxLength(models.MaxSearchLLMModelBytes),
+		),
+		mcp.WithString("llm_base_url",
+			mcp.Description("Optional absolute OpenAI-compatible base URL without credentials, query, or fragment"),
+			mcp.MaxLength(models.MaxSearchLLMBaseURLBytes),
+		),
+		mcp.WithNumber("timeout",
+			mcp.Description("End-to-end timeout in seconds (default: 30, max: 120)"),
+			mcp.Min(1),
+			mcp.Max(models.MaxSearchTimeoutSeconds),
+			mcp.DefaultNumber(models.DefaultSearchTimeoutSeconds),
+		),
+		mcp.WithSchemaAdditionalProperties(false),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
+	)
+	// mcp-go v0.44 exposes only WithNumber. Search accepts integral counts and
+	// seconds, so advertise the narrower JSON Schema type as well as enforcing
+	// it at runtime.
+	for _, name := range []string{"limit", "timeout"} {
+		if property, ok := tool.InputSchema.Properties[name].(map[string]any); ok {
+			property["type"] = "integer"
+		}
+	}
+	return tool
+}
+
 func main() {
 	apiURL := os.Getenv("PURIFY_API_URL")
 	if apiURL == "" {
@@ -274,6 +375,7 @@ func main() {
 	s.AddTool(mapSiteTool, handleMapSite(apiURL, apiKey))
 
 	s.AddTool(newExtractDataTool(), handleExtractData(apiURL, apiKey))
+	s.AddTool(newSearchWebTool(), handleSearchWeb(apiURL, apiKey))
 
 	if err := server.ServeStdio(s); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
@@ -764,6 +866,1097 @@ func handleMapSite(apiURL, apiKey string) server.ToolHandlerFunc {
 
 func handleExtractData(apiURL, apiKey string) server.ToolHandlerFunc {
 	return handleExtractDataWithClient(newExtractHTTPClient(), apiURL, apiKey)
+}
+
+func handleSearchWeb(apiURL, apiKey string) server.ToolHandlerFunc {
+	return handleSearchWebWithClient(newSearchHTTPClient(), apiURL, apiKey)
+}
+
+func newSearchHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 120 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func handleSearchWebWithClient(client *http.Client, apiURL, apiKey string) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		payload, llmAPIKey, err := searchPayload(request.GetArguments())
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if ctx == nil {
+			return mcp.NewToolResultError("search request failed: context is required"), nil
+		}
+		if err := ctx.Err(); err != nil {
+			return mcp.NewToolResultError(redactSearchSecrets(fmt.Sprintf("search request failed: %v", err), apiKey, llmAPIKey)), nil
+		}
+		taskContext, cancel := context.WithTimeout(ctx, time.Duration(payload.Timeout)*time.Second)
+		defer cancel()
+		if err := taskContext.Err(); err != nil {
+			return searchContextToolError(err, apiKey, llmAPIKey), nil
+		}
+
+		apiResponse, err := apiPostResponse(taskContext, client, apiURL, apiKey, "/api/v1/search", payload)
+		if err != nil {
+			if contextErr := taskContext.Err(); contextErr != nil {
+				return searchContextToolError(contextErr, apiKey, llmAPIKey), nil
+			}
+			message := redactSearchSecrets(fmt.Sprintf("search request failed: %v", err), apiKey, llmAPIKey)
+			return mcp.NewToolResultError(message), nil
+		}
+		if err := taskContext.Err(); err != nil {
+			return searchContextToolError(err, apiKey, llmAPIKey), nil
+		}
+
+		if apiResponse.StatusCode != http.StatusOK {
+			message := searchAPIError(apiResponse.StatusCode, apiResponse.Body)
+			if err := taskContext.Err(); err != nil {
+				return searchContextToolError(err, apiKey, llmAPIKey), nil
+			}
+			return mcp.NewToolResultError(redactSearchSecrets(message, apiKey, llmAPIKey)), nil
+		}
+		containsSecret, scanErr := searchJSONContainsSecret(apiResponse.Body, apiKey, llmAPIKey)
+		if err := taskContext.Err(); err != nil {
+			return searchContextToolError(err, apiKey, llmAPIKey), nil
+		}
+		if scanErr != nil {
+			return mcp.NewToolResultError("failed to parse search response"), nil
+		}
+		if containsSecret {
+			return mcp.NewToolResultError("failed to parse search response: response contains sensitive data"), nil
+		}
+
+		response, err := decodeSearchResponse(apiResponse.Body)
+		if contextErr := taskContext.Err(); contextErr != nil {
+			return searchContextToolError(contextErr, apiKey, llmAPIKey), nil
+		}
+		if err != nil {
+			message := redactSearchSecrets(fmt.Sprintf("failed to parse search response: %v", err), apiKey, llmAPIKey)
+			return mcp.NewToolResultError(message), nil
+		}
+		if !response.Success {
+			message := formatSearchError(response.Error, apiResponse.StatusCode)
+			return mcp.NewToolResultError(redactSearchSecrets(message, apiKey, llmAPIKey)), nil
+		}
+		if err := validateSearchResponseForRequest(response, payload); err != nil {
+			if contextErr := taskContext.Err(); contextErr != nil {
+				return searchContextToolError(contextErr, apiKey, llmAPIKey), nil
+			}
+			return mcp.NewToolResultError(redactSearchSecrets(fmt.Sprintf("failed to parse search response: %v", err), apiKey, llmAPIKey)), nil
+		}
+		if err := taskContext.Err(); err != nil {
+			return searchContextToolError(err, apiKey, llmAPIKey), nil
+		}
+		encoded, err := encodeSearchToolResponse(taskContext, response)
+		if contextErr := taskContext.Err(); contextErr != nil {
+			return searchContextToolError(contextErr, apiKey, llmAPIKey), nil
+		}
+		if err != nil {
+			return mcp.NewToolResultError("failed to format search response"), nil
+		}
+
+		return mcp.NewToolResultStructured(response, string(encoded)), nil
+	}
+}
+
+func searchContextToolError(err error, secrets ...string) *mcp.CallToolResult {
+	message := redactSearchSecrets(fmt.Sprintf("search request failed: %v", err), secrets...)
+	return mcp.NewToolResultError(message)
+}
+
+func encodeSearchToolResponse(ctx context.Context, response models.SearchResponse) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(response)
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) == 0 || len(encoded) > models.MaxSearchResponseBytes || !json.Valid(encoded) {
+		return nil, fmt.Errorf("encoded search response exceeds its output budget")
+	}
+	return encoded, nil
+}
+
+var searchArgumentNames = map[string]struct{}{
+	"query": {}, "limit": {}, "domains": {}, "freshness": {}, "include_content": {}, "verify": {},
+	"deduplicate": {}, "schema": {}, "engine": {}, "llm_api_key": {}, "llm_model": {}, "llm_base_url": {},
+	"timeout": {},
+}
+
+func searchPayload(arguments map[string]any) (searchAPIPayload, string, error) {
+	unknown := make([]string, 0)
+	for name := range arguments {
+		if _, ok := searchArgumentNames[name]; !ok {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return searchAPIPayload{}, "", fmt.Errorf("unsupported search_web argument %q", unknown[0])
+	}
+
+	query, present, err := strictSearchString(arguments, "query")
+	if err != nil || !present {
+		return searchAPIPayload{}, "", fmt.Errorf("query is required and must be a string")
+	}
+	if err := validateSearchQuery(query); err != nil {
+		return searchAPIPayload{}, "", err
+	}
+
+	limit, err := optionalSearchInteger(arguments, "limit", models.DefaultSearchLimit, 1, models.MaxSearchLimit)
+	if err != nil {
+		return searchAPIPayload{}, "", err
+	}
+	timeout, err := optionalSearchInteger(arguments, "timeout", models.DefaultSearchTimeoutSeconds, 1, models.MaxSearchTimeoutSeconds)
+	if err != nil {
+		return searchAPIPayload{}, "", err
+	}
+	domains, err := optionalSearchDomains(arguments)
+	if err != nil {
+		return searchAPIPayload{}, "", err
+	}
+	freshness, freshnessPresent, err := strictSearchString(arguments, "freshness")
+	if err != nil {
+		return searchAPIPayload{}, "", err
+	}
+	if freshnessPresent {
+		switch freshness {
+		case "day", "1d", "week", "7d", "month", "year":
+		default:
+			return searchAPIPayload{}, "", fmt.Errorf("freshness must be day, 1d, week, 7d, month, or year")
+		}
+	}
+	includeContent, err := optionalSearchBool(arguments, "include_content", false)
+	if err != nil {
+		return searchAPIPayload{}, "", err
+	}
+	verify, err := optionalSearchBool(arguments, "verify", false)
+	if err != nil {
+		return searchAPIPayload{}, "", err
+	}
+	deduplicate, err := optionalSearchBool(arguments, "deduplicate", true)
+	if err != nil {
+		return searchAPIPayload{}, "", err
+	}
+
+	payload := searchAPIPayload{
+		Query:          query,
+		Limit:          limit,
+		Domains:        domains,
+		Freshness:      freshness,
+		IncludeContent: includeContent,
+		Verify:         verify,
+		Deduplicate:    &deduplicate,
+		Timeout:        timeout,
+	}
+
+	schemaString, schemaPresent, err := strictSearchString(arguments, "schema")
+	if err != nil {
+		return searchAPIPayload{}, "", err
+	}
+	extractionNames := []string{"engine", "llm_api_key", "llm_model", "llm_base_url"}
+	if !schemaPresent {
+		for _, name := range extractionNames {
+			if _, present := arguments[name]; present {
+				return searchAPIPayload{}, "", fmt.Errorf("%s requires schema", name)
+			}
+		}
+		return payload, "", nil
+	}
+	schema, err := decodeSearchSchema(schemaString)
+	if err != nil {
+		return searchAPIPayload{}, "", fmt.Errorf("schema must be one valid JSON schema: %v", err)
+	}
+	engine, enginePresent, err := strictSearchString(arguments, "engine")
+	if err != nil {
+		return searchAPIPayload{}, "", err
+	}
+	if !enginePresent {
+		engine = "auto"
+	}
+	switch engine {
+	case "auto", "compiled", "llm":
+	default:
+		return searchAPIPayload{}, "", fmt.Errorf("engine must be auto, compiled, or llm")
+	}
+	llmAPIKey, _, err := strictSearchString(arguments, "llm_api_key")
+	if err != nil {
+		return searchAPIPayload{}, "", err
+	}
+	llmModel, _, err := strictSearchString(arguments, "llm_model")
+	if err != nil {
+		return searchAPIPayload{}, "", err
+	}
+	llmBaseURL, _, err := strictSearchString(arguments, "llm_base_url")
+	if err != nil {
+		return searchAPIPayload{}, "", err
+	}
+	if err := validateSearchTextOption("llm_api_key", llmAPIKey, models.MaxSearchLLMAPIKeyBytes, true); err != nil {
+		return searchAPIPayload{}, "", err
+	}
+	if err := validateSearchTextOption("llm_model", llmModel, models.MaxSearchLLMModelBytes, true); err != nil {
+		return searchAPIPayload{}, "", err
+	}
+	if llmModel != "" && strings.IndexFunc(llmModel, unicode.IsSpace) >= 0 {
+		return searchAPIPayload{}, "", fmt.Errorf("llm_model must not contain whitespace")
+	}
+	if err := validateSearchTextOption("llm_base_url", llmBaseURL, models.MaxSearchLLMBaseURLBytes, true); err != nil {
+		return searchAPIPayload{}, "", err
+	}
+	if llmBaseURL != "" {
+		llmBaseURL, err = normalizeExtractLLMBaseURL(llmBaseURL)
+		if err != nil {
+			return searchAPIPayload{}, "", fmt.Errorf("llm_base_url must be an absolute http or https URL without credentials, query, or fragment")
+		}
+	}
+	if engine == "llm" && strings.TrimSpace(llmAPIKey) == "" {
+		return searchAPIPayload{}, "", fmt.Errorf("llm_api_key is required when engine is llm")
+	}
+
+	payload.Schema = append(json.RawMessage(nil), schema...)
+	payload.Engine = engine
+	// Compiled extraction never receives caller LLM settings. Auto without a
+	// credential is compiled-only, so model/base options are irrelevant there
+	// as well and are physically omitted from the wire request.
+	if engine == "llm" || engine == "auto" && strings.TrimSpace(llmAPIKey) != "" {
+		payload.LLMAPIKey = llmAPIKey
+		payload.LLMModel = llmModel
+		payload.LLMBaseURL = llmBaseURL
+		return payload, llmAPIKey, nil
+	}
+	return payload, "", nil
+}
+
+func strictSearchString(arguments map[string]any, name string) (string, bool, error) {
+	value, present := arguments[name]
+	if !present {
+		return "", false, nil
+	}
+	result, ok := value.(string)
+	if !ok {
+		return "", true, fmt.Errorf("%s must be a string", name)
+	}
+	return result, true, nil
+}
+
+func optionalSearchBool(arguments map[string]any, name string, fallback bool) (bool, error) {
+	value, present := arguments[name]
+	if !present {
+		return fallback, nil
+	}
+	result, ok := value.(bool)
+	if !ok {
+		return false, fmt.Errorf("%s must be a boolean", name)
+	}
+	return result, nil
+}
+
+func optionalSearchInteger(arguments map[string]any, name string, fallback, minimum, maximum int) (int, error) {
+	value, present := arguments[name]
+	if !present {
+		return fallback, nil
+	}
+	result, ok := exactSearchInteger(value)
+	if !ok {
+		return 0, fmt.Errorf("%s must be an integer", name)
+	}
+	if result < minimum || result > maximum {
+		return 0, fmt.Errorf("%s must be between %d and %d", name, minimum, maximum)
+	}
+	return result, nil
+}
+
+func exactSearchInteger(value any) (int, bool) {
+	maximumInt := int64(^uint(0) >> 1)
+	minimumInt := -maximumInt - 1
+	var result int64
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int8:
+		result = int64(typed)
+	case int16:
+		result = int64(typed)
+	case int32:
+		result = int64(typed)
+	case int64:
+		result = typed
+	case uint:
+		if uint64(typed) > uint64(maximumInt) {
+			return 0, false
+		}
+		result = int64(typed)
+	case uint8:
+		result = int64(typed)
+	case uint16:
+		result = int64(typed)
+	case uint32:
+		result = int64(typed)
+	case uint64:
+		if typed > uint64(maximumInt) {
+			return 0, false
+		}
+		result = int64(typed)
+	case float64:
+		if math.IsNaN(typed) || math.IsInf(typed, 0) || math.Trunc(typed) != typed || typed < float64(minimumInt) || typed > float64(maximumInt) {
+			return 0, false
+		}
+		result = int64(typed)
+	case float32:
+		converted := float64(typed)
+		if math.IsNaN(converted) || math.IsInf(converted, 0) || math.Trunc(converted) != converted || converted < float64(minimumInt) || converted > float64(maximumInt) {
+			return 0, false
+		}
+		result = int64(typed)
+	case json.Number:
+		parsed, err := strconv.ParseInt(string(typed), 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		result = parsed
+	default:
+		return 0, false
+	}
+	if result < minimumInt || result > maximumInt {
+		return 0, false
+	}
+	return int(result), true
+}
+
+func validateSearchQuery(query string) error {
+	if len(query) == 0 || len(query) > maxSearchQueryBytes || !utf8.ValidString(query) ||
+		utf8.RuneCountInString(query) > models.MaxSearchQueryRunes || strings.IndexFunc(query, unicode.IsControl) >= 0 {
+		return fmt.Errorf("query must be valid UTF-8 and contain at most %d characters", models.MaxSearchQueryRunes)
+	}
+	words := strings.Fields(query)
+	if len(words) < 1 || len(words) > models.MaxSearchQueryWords {
+		return fmt.Errorf("query must contain between 1 and %d words", models.MaxSearchQueryWords)
+	}
+	return nil
+}
+
+func optionalSearchDomains(arguments map[string]any) ([]string, error) {
+	value, present := arguments["domains"]
+	if !present {
+		return nil, nil
+	}
+	var values []any
+	switch typed := value.(type) {
+	case []any:
+		values = typed
+	case []string:
+		values = make([]any, len(typed))
+		for index := range typed {
+			values[index] = typed[index]
+		}
+	default:
+		return nil, fmt.Errorf("domains must be an array of strings")
+	}
+	if len(values) > models.MaxSearchDomains {
+		return nil, fmt.Errorf("domains must contain at most %d entries", models.MaxSearchDomains)
+	}
+	result := make([]string, len(values))
+	for index, value := range values {
+		domain, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("domains[%d] must be a string", index)
+		}
+		trimmed := strings.TrimSuffix(strings.TrimSpace(domain), ".")
+		if trimmed == "" || len(domain) > maxSearchRawDomainBytes || !utf8.ValidString(domain) ||
+			strings.IndexFunc(domain, unicode.IsControl) >= 0 || strings.ContainsAny(trimmed, "/\\:@?#*[]") {
+			return nil, fmt.Errorf("domains[%d] must be a registrable hostname", index)
+		}
+		canonical, err := idna.Lookup.ToASCII(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("domains[%d] must be a registrable hostname", index)
+		}
+		canonical = strings.ToLower(canonical)
+		if canonical == "" || len(canonical) > models.MaxSearchDomainBytes || canonical == "localhost" ||
+			strings.HasSuffix(canonical, ".localhost") {
+			return nil, fmt.Errorf("domains[%d] must be a registrable hostname", index)
+		}
+		if _, err := netip.ParseAddr(canonical); err == nil {
+			return nil, fmt.Errorf("domains[%d] must be a registrable hostname", index)
+		}
+		for _, label := range strings.Split(canonical, ".") {
+			if !validSearchDomainLabel(label) {
+				return nil, fmt.Errorf("domains[%d] must be a registrable hostname", index)
+			}
+		}
+		if _, err := publicsuffix.EffectiveTLDPlusOne(canonical); err != nil {
+			return nil, fmt.Errorf("domains[%d] must be a registrable hostname", index)
+		}
+		result[index] = domain
+	}
+	return result, nil
+}
+
+func validSearchDomainLabel(label string) bool {
+	if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+		return false
+	}
+	for index := range len(label) {
+		character := label[index]
+		if character != '-' && (character < 'a' || character > 'z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func decodeSearchSchema(raw string) (json.RawMessage, error) {
+	if len(raw) > models.MaxSearchSchemaBytes {
+		return nil, fmt.Errorf("schema exceeds %d-byte limit", models.MaxSearchSchemaBytes)
+	}
+	if !utf8.ValidString(raw) {
+		return nil, fmt.Errorf("schema must be valid UTF-8")
+	}
+	if err := rejectDuplicateJSONFields([]byte(raw)); err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	var schema json.RawMessage
+	if err := decoder.Decode(&schema); err != nil {
+		return nil, err
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return nil, err
+	}
+	normalized, err := llm.NormalizeSchema(schema)
+	if err != nil {
+		return nil, err
+	}
+	if len(normalized) > models.MaxSearchSchemaBytes {
+		return nil, fmt.Errorf("normalized schema exceeds %d-byte limit", models.MaxSearchSchemaBytes)
+	}
+	if err := llm.ValidateSchema(normalized); err != nil {
+		return nil, err
+	}
+	return append(json.RawMessage(nil), normalized...), nil
+}
+
+func validateSearchTextOption(name, value string, maximum int, allowEmpty bool) error {
+	if value == "" && allowEmpty {
+		return nil
+	}
+	if (!allowEmpty && strings.TrimSpace(value) == "") || len(value) > maximum || !utf8.ValidString(value) ||
+		strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return fmt.Errorf("%s is invalid or exceeds the %d-byte limit", name, maximum)
+	}
+	return nil
+}
+
+func decodeSearchResponse(body []byte) (models.SearchResponse, error) {
+	if !utf8.Valid(body) {
+		return models.SearchResponse{}, fmt.Errorf("response must be valid UTF-8")
+	}
+	if err := rejectDuplicateJSONFields(body); err != nil {
+		return models.SearchResponse{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var response *models.SearchResponse
+	if err := decoder.Decode(&response); err != nil {
+		return models.SearchResponse{}, err
+	}
+	if response == nil {
+		return models.SearchResponse{}, fmt.Errorf("response must be a JSON object")
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return models.SearchResponse{}, err
+	}
+	fields, err := decodeExtractJSONObject(body, "response")
+	if err != nil {
+		return models.SearchResponse{}, err
+	}
+	if err := requirePresentJSONFields(fields, "response", "success", "query", "results", "deduplicated", "dropped_stale", "partial", "timing"); err != nil {
+		return models.SearchResponse{}, err
+	}
+	if response.Results == nil {
+		return models.SearchResponse{}, fmt.Errorf("response results must be a non-null JSON array")
+	}
+	if response.Deduplicated < 0 || response.DroppedStale < 0 {
+		return models.SearchResponse{}, fmt.Errorf("response counters must be non-negative")
+	}
+	if err := validateSearchTiming(response.Timing, fields["timing"]); err != nil {
+		return models.SearchResponse{}, err
+	}
+	if response.Success {
+		if _, present := fields["error"]; present || response.Error != nil {
+			return models.SearchResponse{}, fmt.Errorf("successful response must not contain an error")
+		}
+		if err := validateSearchQuery(response.Query); err != nil {
+			return models.SearchResponse{}, fmt.Errorf("successful response contains an invalid query")
+		}
+		if err := validateSearchResults(response.Results, fields["results"]); err != nil {
+			return models.SearchResponse{}, err
+		}
+		hasErrors := false
+		for _, result := range response.Results {
+			hasErrors = hasErrors || len(result.Errors) > 0
+		}
+		if response.Partial != hasErrors {
+			return models.SearchResponse{}, fmt.Errorf("response partial status is inconsistent with result errors")
+		}
+		return *response, nil
+	}
+	if len(response.Results) != 0 || response.Partial {
+		return models.SearchResponse{}, fmt.Errorf("unsuccessful response must not contain results")
+	}
+	rawError, present := fields["error"]
+	if !present {
+		return models.SearchResponse{}, fmt.Errorf("unsuccessful response is missing an error")
+	}
+	if err := validateExtractErrorDetail(response.Error, rawError, "response error"); err != nil {
+		return models.SearchResponse{}, err
+	}
+	return *response, nil
+}
+
+func validateSearchResponseForRequest(response models.SearchResponse, request searchAPIPayload) error {
+	wantQuery := strings.Join(strings.Fields(request.Query), " ")
+	if response.Query != wantQuery {
+		return fmt.Errorf("response query does not match the request")
+	}
+	if request.Limit < 1 || len(response.Results) > request.Limit {
+		return fmt.Errorf("response exceeds the requested result limit")
+	}
+	hasSchema := len(request.Schema) > 0
+	hasHeavyCapability := request.IncludeContent || request.Verify || hasSchema
+	for index, result := range response.Results {
+		name := fmt.Sprintf("result %d", index)
+		if !request.IncludeContent && result.Content != "" {
+			return fmt.Errorf("%s contains unrequested content", name)
+		}
+		if !request.Verify && (result.VerificationStatus != models.SearchVerificationNotChecked || result.Verified != nil ||
+			result.Evidence != nil || result.Receipt != "") {
+			return fmt.Errorf("%s contains unrequested verification", name)
+		}
+		if !hasSchema && searchResultHasExtraction(result) {
+			return fmt.Errorf("%s contains unrequested extraction", name)
+		}
+		if !hasHeavyCapability && (result.FinalURL != "" || len(result.Errors) > 0) {
+			return fmt.Errorf("%s contains unrequested enrichment", name)
+		}
+		if index >= models.MaxSearchHeavyResults && searchResultHasEnrichment(result) {
+			return fmt.Errorf("%s contains enrichment beyond the top-five limit", name)
+		}
+		for _, resultError := range result.Errors {
+			switch resultError.Stage {
+			case models.SearchResultStageFetch:
+				if !hasHeavyCapability {
+					return fmt.Errorf("%s contains an unrequested fetch error", name)
+				}
+			case models.SearchResultStageVerify:
+				if !request.Verify {
+					return fmt.Errorf("%s contains an unrequested verification error", name)
+				}
+			case models.SearchResultStageExtract:
+				if !hasSchema {
+					return fmt.Errorf("%s contains an unrequested extraction error", name)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func searchResultHasExtraction(result models.SearchResult) bool {
+	return len(result.Data) > 0 || result.Basis != nil || result.Receipts != nil || result.UnlocatedRate != nil ||
+		result.Extractor != nil || result.LLMUsage != nil || len(result.Violations) > 0
+}
+
+func searchResultHasEnrichment(result models.SearchResult) bool {
+	return result.FinalURL != "" || result.Content != "" || result.Verified != nil ||
+		result.VerificationStatus != models.SearchVerificationNotChecked || result.Evidence != nil || result.Receipt != "" ||
+		searchResultHasExtraction(result) || len(result.Errors) > 0
+}
+
+func validateSearchTiming(timing models.SearchTimingInfo, raw json.RawMessage) error {
+	fields, err := decodeExtractJSONObject(raw, "response timing")
+	if err != nil {
+		return err
+	}
+	if err := requirePresentJSONFields(fields, "response timing", "total_ms", "provider_ms", "enrichment_ms"); err != nil {
+		return err
+	}
+	if timing.TotalMs < 0 || timing.ProviderMs < 0 || timing.EnrichmentMs < 0 ||
+		timing.ProviderMs > math.MaxInt64-timing.EnrichmentMs || timing.TotalMs < timing.ProviderMs+timing.EnrichmentMs {
+		return fmt.Errorf("response timing must be non-negative")
+	}
+	return nil
+}
+
+func validateSearchResults(results []models.SearchResult, raw json.RawMessage) error {
+	var rawResults []json.RawMessage
+	if err := json.Unmarshal(raw, &rawResults); err != nil || rawResults == nil || len(rawResults) != len(results) {
+		return fmt.Errorf("response results must be a matching JSON array")
+	}
+	if len(results) > models.MaxSearchLimit {
+		return fmt.Errorf("response contains too many results")
+	}
+	seenURLs := make(map[string]struct{}, len(results))
+	seenIdentities := make(map[string]struct{}, len(results))
+	for index, result := range results {
+		name := fmt.Sprintf("result %d", index)
+		fields, err := decodeExtractJSONObject(rawResults[index], name)
+		if err != nil {
+			return err
+		}
+		if err := requirePresentJSONFields(fields, name, "rank", "title", "url", "verification_status"); err != nil {
+			return err
+		}
+		if result.Rank != index+1 {
+			return fmt.Errorf("%s has an invalid rank", name)
+		}
+		canonicalURL, _, err := publicnet.NormalizeHTTPURL(result.URL, nil, false)
+		if err != nil || canonicalURL != result.URL || len(result.URL) > models.MaxSearchURLBytes {
+			return fmt.Errorf("%s url is not canonical", name)
+		}
+		if _, duplicate := seenURLs[canonicalURL]; duplicate {
+			return fmt.Errorf("response contains a duplicate result URL")
+		}
+		seenURLs[canonicalURL] = struct{}{}
+		effectiveIdentity := canonicalURL
+		if result.FinalURL != "" {
+			if _, ok := fields["final_url"]; !ok {
+				return fmt.Errorf("%s is missing final_url", name)
+			}
+			canonicalFinalURL, _, normalizeErr := publicnet.NormalizeHTTPURL(result.FinalURL, nil, false)
+			if normalizeErr != nil || canonicalFinalURL != result.FinalURL || len(result.FinalURL) > models.MaxSearchURLBytes {
+				return fmt.Errorf("%s final_url is not canonical", name)
+			}
+			effectiveIdentity = canonicalFinalURL
+		} else if _, present := fields["final_url"]; present {
+			return fmt.Errorf("%s final_url must not be empty or null", name)
+		}
+		if _, duplicate := seenIdentities[effectiveIdentity]; duplicate {
+			return fmt.Errorf("response contains a duplicate effective result identity")
+		}
+		seenIdentities[effectiveIdentity] = struct{}{}
+		if result.Score != nil {
+			if _, present := fields["score"]; !present || math.IsNaN(*result.Score) || math.IsInf(*result.Score, 0) || *result.Score < 0 || *result.Score > 1 {
+				return fmt.Errorf("%s score is invalid", name)
+			}
+		} else if _, present := fields["score"]; present {
+			return fmt.Errorf("%s score must not be null", name)
+		}
+		if result.PublishedAt != nil {
+			if _, present := fields["published_at"]; !present || result.PublishedAt.IsZero() {
+				return fmt.Errorf("%s published_at is invalid", name)
+			}
+		} else if _, present := fields["published_at"]; present {
+			return fmt.Errorf("%s published_at must not be null", name)
+		}
+		for field, value := range map[string]string{"snippet": result.Snippet, "content": result.Content} {
+			_, present := fields[field]
+			if value != "" && !present {
+				return fmt.Errorf("%s is missing %s", name, field)
+			}
+			if value == "" && present {
+				return fmt.Errorf("%s %s must not be empty or null", name, field)
+			}
+		}
+		if err := validateSearchVerification(result, fields, name); err != nil {
+			return err
+		}
+		if err := validateSearchExtractionResult(result, fields, name); err != nil {
+			return err
+		}
+		if err := validateSearchResultErrors(result, fields, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSearchVerification(result models.SearchResult, fields map[string]json.RawMessage, name string) error {
+	if result.Verified == nil {
+		if _, present := fields["verified"]; present {
+			return fmt.Errorf("%s verified must not be null", name)
+		}
+	} else if _, present := fields["verified"]; !present {
+		return fmt.Errorf("%s is missing verified", name)
+	}
+	if result.Evidence == nil {
+		if _, present := fields["evidence"]; present {
+			return fmt.Errorf("%s evidence must not be null", name)
+		}
+	} else {
+		rawEvidence, present := fields["evidence"]
+		if !present {
+			return fmt.Errorf("%s is missing evidence", name)
+		}
+		if err := validateSearchResponseAnchor(*result.Evidence, rawEvidence, name+" evidence", false); err != nil {
+			return err
+		}
+	}
+	switch result.VerificationStatus {
+	case models.SearchVerificationNotChecked:
+		if result.Verified != nil || result.Evidence != nil || result.Receipt != "" {
+			return fmt.Errorf("%s has an invalid not-checked verification shape", name)
+		}
+	case models.SearchVerificationVerified:
+		if result.Verified == nil || !*result.Verified || result.Evidence == nil || strings.TrimSpace(result.Receipt) == "" {
+			return fmt.Errorf("%s has an invalid verified shape", name)
+		}
+		if result.Evidence.Method != evidence.MethodExact && result.Evidence.Method != evidence.MethodNormalized && result.Evidence.Method != evidence.MethodFuzzy {
+			return fmt.Errorf("%s has an invalid verification evidence method", name)
+		}
+	case models.SearchVerificationMismatch, models.SearchVerificationUnavailable:
+		if result.Verified == nil || *result.Verified || result.Evidence != nil || result.Receipt != "" {
+			return fmt.Errorf("%s has an invalid negative verification shape", name)
+		}
+	default:
+		return fmt.Errorf("%s has an invalid verification status", name)
+	}
+	if result.Receipt != "" {
+		if _, present := fields["receipt"]; !present || !utf8.ValidString(result.Receipt) || strings.IndexFunc(result.Receipt, unicode.IsControl) >= 0 {
+			return fmt.Errorf("%s receipt is invalid", name)
+		}
+	} else if _, present := fields["receipt"]; present {
+		return fmt.Errorf("%s receipt must not be empty or null", name)
+	}
+	return nil
+}
+
+func validateSearchExtractionResult(result models.SearchResult, fields map[string]json.RawMessage, name string) error {
+	_, hasData := fields["data"]
+	_, hasBasis := fields["basis"]
+	_, hasReceipts := fields["receipts"]
+	_, hasUnlocatedRate := fields["unlocated_rate"]
+	_, hasExtractor := fields["extractor"]
+	_, hasLLMUsage := fields["llm_usage"]
+	_, hasViolations := fields["violations"]
+	hasExtraction := hasData || hasBasis || hasReceipts || hasUnlocatedRate
+	if hasExtraction && (!hasData || !hasBasis || !hasReceipts || !hasUnlocatedRate) {
+		return fmt.Errorf("%s contains an incomplete extraction result", name)
+	}
+	if !hasExtraction {
+		if hasExtractor || hasLLMUsage || hasViolations || len(result.Data) != 0 || result.Basis != nil || result.Receipts != nil || result.UnlocatedRate != nil ||
+			result.Extractor != nil || result.LLMUsage != nil || len(result.Violations) != 0 {
+			return fmt.Errorf("%s contains extraction metadata without data", name)
+		}
+		return nil
+	}
+	if len(result.Data) == 0 || !json.Valid(result.Data) || result.Basis == nil || result.Receipts == nil || result.UnlocatedRate == nil ||
+		math.IsNaN(*result.UnlocatedRate) || math.IsInf(*result.UnlocatedRate, 0) || *result.UnlocatedRate < 0 || *result.UnlocatedRate > 1 {
+		return fmt.Errorf("%s extraction result is invalid", name)
+	}
+	if bytes.Equal(bytes.TrimSpace(fields["basis"]), []byte("null")) || bytes.Equal(bytes.TrimSpace(fields["receipts"]), []byte("null")) ||
+		bytes.Equal(bytes.TrimSpace(fields["unlocated_rate"]), []byte("null")) {
+		return fmt.Errorf("%s extraction metadata must not be null", name)
+	}
+	if len(*result.Basis) != len(*result.Receipts) {
+		return fmt.Errorf("%s extraction evidence and receipts differ", name)
+	}
+	var rawBasis map[string]json.RawMessage
+	if err := json.Unmarshal(fields["basis"], &rawBasis); err != nil || rawBasis == nil || len(rawBasis) != len(*result.Basis) {
+		return fmt.Errorf("%s basis must be a matching JSON object", name)
+	}
+	for path, anchor := range *result.Basis {
+		rawAnchor, present := rawBasis[path]
+		if !present || strings.TrimSpace(path) == "" {
+			return fmt.Errorf("%s basis contains an invalid path", name)
+		}
+		if err := validateSearchResponseAnchor(anchor, rawAnchor, name+" basis", true); err != nil {
+			return err
+		}
+		receipt, present := (*result.Receipts)[path]
+		if !present || strings.TrimSpace(receipt) == "" || !utf8.ValidString(receipt) || strings.IndexFunc(receipt, unicode.IsControl) >= 0 {
+			return fmt.Errorf("%s receipts contain an invalid token", name)
+		}
+	}
+	if result.Extractor != nil {
+		rawExtractor, present := fields["extractor"]
+		if !present {
+			return fmt.Errorf("%s is missing extractor", name)
+		}
+		if err := requireNestedJSONFields(rawExtractor, name+" extractor", "id", "version", "compiled_at", "validation", "mode"); err != nil {
+			return err
+		}
+		if strings.TrimSpace(result.Extractor.ID) == "" || result.Extractor.Version <= 0 || result.Extractor.CompiledAt.IsZero() ||
+			math.IsNaN(result.Extractor.Validation) || math.IsInf(result.Extractor.Validation, 0) ||
+			result.Extractor.Validation < 0 || result.Extractor.Validation > 1 || result.Extractor.Mode != "compiled" {
+			return fmt.Errorf("%s extractor is invalid", name)
+		}
+	} else if _, present := fields["extractor"]; present {
+		return fmt.Errorf("%s extractor must not be null", name)
+	}
+	if result.LLMUsage != nil {
+		rawUsage, present := fields["llm_usage"]
+		if !present {
+			return fmt.Errorf("%s is missing llm_usage", name)
+		}
+		if err := validateExtractLLMUsage(result.LLMUsage, rawUsage, name+" llm_usage"); err != nil {
+			return err
+		}
+	} else if _, present := fields["llm_usage"]; present {
+		return fmt.Errorf("%s llm_usage must not be null", name)
+	}
+	if rawViolations, present := fields["violations"]; present {
+		var violations []json.RawMessage
+		if err := json.Unmarshal(rawViolations, &violations); err != nil || violations == nil || len(violations) != len(result.Violations) || len(violations) == 0 {
+			return fmt.Errorf("%s violations must be a matching non-empty JSON array", name)
+		}
+		for index, rawViolation := range violations {
+			if err := requireNestedJSONFields(rawViolation, fmt.Sprintf("%s violation %d", name, index), "path", "message"); err != nil {
+				return err
+			}
+		}
+	} else if len(result.Violations) != 0 {
+		return fmt.Errorf("%s is missing violations", name)
+	}
+	return nil
+}
+
+func validateSearchResponseAnchor(anchor evidence.Anchor, raw json.RawMessage, name string, allowUnlocated bool) error {
+	fields, err := decodeExtractJSONObject(raw, name)
+	if err != nil {
+		return err
+	}
+	if err := requirePresentJSONFields(fields, name, "quote", "text_range", "method", "snapshot_id", "fetched_at"); err != nil {
+		return err
+	}
+	var textRange []json.RawMessage
+	if err := json.Unmarshal(fields["text_range"], &textRange); err != nil || len(textRange) != 2 {
+		return fmt.Errorf("%s text_range must contain two offsets", name)
+	}
+	if !validSearchResponseSnapshotID(anchor.SnapshotID) || anchor.FetchedAt.IsZero() || !utf8.ValidString(anchor.Quote) ||
+		!utf8.ValidString(anchor.Selector) || strings.IndexFunc(anchor.Selector, unicode.IsControl) >= 0 {
+		return fmt.Errorf("%s is incomplete", name)
+	}
+	if anchor.Selector == "" {
+		if _, present := fields["selector"]; present {
+			return fmt.Errorf("%s selector must not be empty or null", name)
+		}
+	} else if _, present := fields["selector"]; !present {
+		return fmt.Errorf("%s is missing selector", name)
+	}
+	switch anchor.Method {
+	case evidence.MethodExact, evidence.MethodNormalized, evidence.MethodFuzzy:
+		if anchor.Quote == "" || anchor.TextRange[0] < 0 || anchor.TextRange[1] <= anchor.TextRange[0] ||
+			anchor.TextRange[1]-anchor.TextRange[0] != len(anchor.Quote) {
+			return fmt.Errorf("%s is not a located anchor", name)
+		}
+	case evidence.MethodCompiled:
+		if anchor.TextRange != [2]int{} && (anchor.Quote == "" || anchor.TextRange[0] < 0 ||
+			anchor.TextRange[1] <= anchor.TextRange[0] || anchor.TextRange[1]-anchor.TextRange[0] != len(anchor.Quote)) {
+			return fmt.Errorf("%s contains invalid compiled evidence", name)
+		}
+	case evidence.MethodUnlocated:
+		if !allowUnlocated || anchor.Quote != "" || anchor.Selector != "" || anchor.TextRange != [2]int{} {
+			return fmt.Errorf("%s contains an invalid unlocated anchor", name)
+		}
+	default:
+		return fmt.Errorf("%s contains an invalid method", name)
+	}
+	return nil
+}
+
+func validSearchResponseSnapshotID(snapshotID string) bool {
+	if len(snapshotID) != len("sha256:")+64 || !strings.HasPrefix(snapshotID, "sha256:") {
+		return false
+	}
+	for _, character := range snapshotID[len("sha256:"):] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func rejectDuplicateJSONFields(raw []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := consumeUniqueJSONValue(decoder, 0); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values are not allowed")
+		}
+		return err
+	}
+	return nil
+}
+
+func consumeUniqueJSONValue(decoder *json.Decoder, depth int) error {
+	if depth > 256 {
+		return fmt.Errorf("JSON nesting exceeds the response limit")
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, composite := token.(json.Delim)
+	if !composite {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return fmt.Errorf("object field name must be a string")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("JSON contains a duplicate object field")
+			}
+			seen[key] = struct{}{}
+			if err := consumeUniqueJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim('}') {
+			return fmt.Errorf("invalid JSON object")
+		}
+	case '[':
+		for decoder.More() {
+			if err := consumeUniqueJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim(']') {
+			return fmt.Errorf("invalid JSON array")
+		}
+	default:
+		return fmt.Errorf("invalid JSON delimiter")
+	}
+	return nil
+}
+
+func validateSearchResultErrors(result models.SearchResult, fields map[string]json.RawMessage, name string) error {
+	errorsList := result.Errors
+	raw, present := fields["errors"]
+	if !present {
+		if len(errorsList) != 0 {
+			return fmt.Errorf("%s is missing errors", name)
+		}
+		if result.VerificationStatus == models.SearchVerificationUnavailable || len(result.Violations) > 0 {
+			return fmt.Errorf("%s is missing an enrichment error", name)
+		}
+		return nil
+	}
+	var rawErrors []json.RawMessage
+	if err := json.Unmarshal(raw, &rawErrors); err != nil || rawErrors == nil || len(rawErrors) != len(errorsList) || len(rawErrors) == 0 {
+		return fmt.Errorf("%s errors must be a matching non-empty JSON array", name)
+	}
+	seenStages := make(map[models.SearchResultErrorStage]struct{}, len(errorsList))
+	hasVerifyError := false
+	hasExtractError := false
+	for index, resultError := range errorsList {
+		errorName := fmt.Sprintf("%s error %d", name, index)
+		if err := requireNestedJSONFields(rawErrors[index], errorName, "stage", "code", "message"); err != nil {
+			return err
+		}
+		switch resultError.Stage {
+		case models.SearchResultStageFetch, models.SearchResultStageVerify, models.SearchResultStageExtract:
+		default:
+			return fmt.Errorf("%s contains an invalid stage", errorName)
+		}
+		if _, duplicate := seenStages[resultError.Stage]; duplicate {
+			return fmt.Errorf("%s repeats an enrichment error stage", name)
+		}
+		seenStages[resultError.Stage] = struct{}{}
+		hasVerifyError = hasVerifyError || resultError.Stage == models.SearchResultStageVerify
+		hasExtractError = hasExtractError || resultError.Stage == models.SearchResultStageExtract
+		if strings.TrimSpace(resultError.Code) == "" || strings.TrimSpace(resultError.Message) == "" {
+			return fmt.Errorf("%s is incomplete", errorName)
+		}
+	}
+	if hasVerifyError != (result.VerificationStatus == models.SearchVerificationUnavailable) {
+		return fmt.Errorf("%s verification error is inconsistent with its status", name)
+	}
+	if len(result.Data) > 0 && hasExtractError != (len(result.Violations) > 0) {
+		return fmt.Errorf("%s extraction error is inconsistent with its violations", name)
+	}
+	return nil
+}
+
+func searchAPIError(statusCode int, body []byte) string {
+	response, err := decodeSearchResponse(body)
+	if err == nil && !response.Success {
+		return formatSearchError(response.Error, statusCode)
+	}
+	return fmt.Sprintf("search failed (HTTP %d)", statusCode)
+}
+
+func formatSearchError(detail *models.ErrorDetail, statusCode int) string {
+	if detail != nil {
+		code := strings.TrimSpace(detail.Code)
+		message := strings.TrimSpace(detail.Message)
+		switch {
+		case code != "" && message != "":
+			return fmt.Sprintf("[%s] %s", code, message)
+		case message != "":
+			return message
+		case code != "":
+			return fmt.Sprintf("[%s] search failed (HTTP %d)", code, statusCode)
+		}
+	}
+	return fmt.Sprintf("search failed (HTTP %d)", statusCode)
+}
+
+func redactSearchSecrets(message string, secrets ...string) string {
+	for _, secret := range secrets {
+		trimmed := strings.TrimSpace(secret)
+		for _, candidate := range []string{secret, trimmed} {
+			if candidate != "" {
+				message = strings.ReplaceAll(message, candidate, "[REDACTED]")
+			}
+		}
+	}
+	return message
+}
+
+func searchJSONContainsSecret(body []byte, secrets ...string) (bool, error) {
+	candidates := make([]string, 0, len(secrets)*2)
+	for _, secret := range secrets {
+		trimmed := strings.TrimSpace(secret)
+		for _, candidate := range []string{secret, trimmed} {
+			if candidate != "" {
+				candidates = append(candidates, candidate)
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return false, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		value, ok := token.(string)
+		if !ok {
+			continue
+		}
+		for _, candidate := range candidates {
+			if strings.Contains(value, candidate) {
+				return true, nil
+			}
+		}
+	}
 }
 
 func newExtractHTTPClient() *http.Client {
