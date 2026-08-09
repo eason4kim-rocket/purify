@@ -37,66 +37,116 @@ type ReplayResult struct {
 	Found  bool
 }
 
+type replayEvaluation struct {
+	result ReplayResult
+	err    error
+}
+
+// replayProgram compiles one immutable IR once, then evaluates any bounded
+// subset of its fields against a document parsed exactly once. Self-healing
+// uses the per-field error surface so one historical conversion failure counts
+// as one mismatch instead of preventing independent facts from being replayed.
+type replayProgram struct {
+	ir    IR
+	rules map[string]compiledRule
+}
+
+func newReplayProgram(ir IR) (*replayProgram, error) {
+	if err := validateExecutionResources(ir, ""); err != nil {
+		return nil, err
+	}
+	compiled, err := compileRules(ir.Fields)
+	if err != nil {
+		return nil, err
+	}
+	rules := make(map[string]compiledRule, len(compiled))
+	for index := range compiled {
+		rules[compiled[index].rule.Name] = compiled[index]
+	}
+	return &replayProgram{ir: ir, rules: rules}, nil
+}
+
+func (program *replayProgram) replay(html string, fieldNames []string) (map[string]replayEvaluation, error) {
+	if program == nil {
+		return nil, errors.New("compiler: replay program is nil")
+	}
+	if err := validateExecutionResources(program.ir, html); err != nil {
+		return nil, err
+	}
+	document, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	if err != nil {
+		return nil, fmt.Errorf("compiler: parse HTML: %w", err)
+	}
+
+	results := make(map[string]replayEvaluation, len(fieldNames))
+	for _, fieldName := range fieldNames {
+		if _, duplicate := results[fieldName]; duplicate {
+			continue
+		}
+		rule, found := program.rules[fieldName]
+		if !found {
+			results[fieldName] = replayEvaluation{err: &FieldError{
+				Field: fieldName,
+				Stage: "name",
+				Err:   errors.New("field is absent from the extraction revision"),
+			}}
+			continue
+		}
+
+		// A missing required field is a fact-level replay mismatch. All other
+		// selector, regex, transform, conversion, and SingleMatcher behavior is
+		// exactly the production execution behavior.
+		rule.rule.Required = false
+		value, quote, matched, executeErr := executeRule(document, rule)
+		if executeErr != nil {
+			results[fieldName] = replayEvaluation{err: executeErr}
+			continue
+		}
+		if !matched {
+			results[fieldName] = replayEvaluation{result: ReplayResult{Found: false}}
+			continue
+		}
+		encoded, encodeErr := json.Marshal(value)
+		if encodeErr != nil {
+			results[fieldName] = replayEvaluation{err: fmt.Errorf(
+				"compiler: encode replayed field %q: %w", fieldName, encodeErr,
+			)}
+			continue
+		}
+		if len(encoded) > MaxOutputBytes {
+			results[fieldName] = replayEvaluation{err: fmt.Errorf(
+				"%w: replay output is %d bytes, maximum is %d",
+				ErrResourceLimit, len(encoded), MaxOutputBytes,
+			)}
+			continue
+		}
+		results[fieldName] = replayEvaluation{result: ReplayResult{
+			Value: append(json.RawMessage(nil), encoded...),
+			Anchor: evidence.Anchor{
+				Quote: quote, Selector: rule.rule.Selector, Method: evidence.MethodCompiled,
+			},
+			Found: true,
+		}}
+	}
+	return results, nil
+}
+
 // ReplayField evaluates one named rule with the same selector, attribute,
 // regular-expression, transform, type-conversion, and SingleMatcher semantics
 // as Execute. Unlike Execute, a missing required field is reported as
 // Found=false so a verifier can distinguish a genuinely gone field from a
 // corrupt or otherwise non-executable revision.
 func ReplayField(ir IR, fieldName, html string) (ReplayResult, error) {
-	if err := validateExecutionResources(ir, html); err != nil {
-		return ReplayResult{}, err
-	}
-	rules, err := compileRules(ir.Fields)
+	program, err := newReplayProgram(ir)
 	if err != nil {
 		return ReplayResult{}, err
 	}
-
-	var selected *compiledRule
-	for index := range rules {
-		if rules[index].rule.Name == fieldName {
-			selected = &rules[index]
-			break
-		}
-	}
-	if selected == nil {
-		return ReplayResult{}, &FieldError{
-			Field: fieldName,
-			Stage: "name",
-			Err:   errors.New("field is absent from the extraction revision"),
-		}
-	}
-
-	document, err := goquery.NewDocumentFromReader(strings.NewReader(html))
-	if err != nil {
-		return ReplayResult{}, fmt.Errorf("compiler: parse HTML: %w", err)
-	}
-	// Missing is a fact-level state during replay even when the production rule
-	// is required. All other rule behavior remains identical.
-	replayRule := *selected
-	replayRule.rule.Required = false
-	value, quote, found, err := executeRule(document, replayRule)
+	results, err := program.replay(html, []string{fieldName})
 	if err != nil {
 		return ReplayResult{}, err
 	}
-	if !found {
-		return ReplayResult{Found: false}, nil
-	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return ReplayResult{}, fmt.Errorf("compiler: encode replayed field %q: %w", fieldName, err)
-	}
-	if len(encoded) > MaxOutputBytes {
-		return ReplayResult{}, fmt.Errorf("%w: replay output is %d bytes, maximum is %d", ErrResourceLimit, len(encoded), MaxOutputBytes)
-	}
-	return ReplayResult{
-		Value: append(json.RawMessage(nil), encoded...),
-		Anchor: evidence.Anchor{
-			Quote:    quote,
-			Selector: selected.rule.Selector,
-			Method:   evidence.MethodCompiled,
-		},
-		Found: true,
-	}, nil
+	evaluation := results[fieldName]
+	return evaluation.result, evaluation.err
 }
 
 func executeWithOutputLimit(ir IR, html string, outputLimit int) (json.RawMessage, map[string]evidence.Anchor, error) {
