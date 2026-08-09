@@ -47,6 +47,20 @@ type routerSearchService struct {
 	calls int
 }
 
+type routerAnswerService struct {
+	calls int
+}
+
+func (service *routerAnswerService) Answer(_ context.Context, _ *models.AnswerRequest) (*models.AnswerResponse, error) {
+	service.calls++
+	return &models.AnswerResponse{
+		Status: models.AnswerStatusUnknown,
+		Belief: nil,
+		Reason: models.AnswerUnknownNoSearchResults,
+		Needs:  &models.AnswerNeeds{MoreIndependentSources: 2},
+	}, nil
+}
+
 func (service *routerSearchService) Search(_ context.Context, request *models.SearchRequest) (*models.SearchResponse, error) {
 	service.calls++
 	return &models.SearchResponse{
@@ -355,4 +369,165 @@ func TestSearchRouterOptionUsesSharedBucketWithoutDoubleCharge(t *testing.T) {
 	if response.Error == nil || response.Error.Code != models.ErrCodeRateLimited {
 		t.Fatalf("exhausted response = %#v", response)
 	}
+}
+
+func TestAnswerRouteIsAlwaysProtectedAndFailsClosedWithoutOption(t *testing.T) {
+	cfg := &config.Config{
+		Server:    config.ServerConfig{Mode: "test"},
+		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+		RateLimit: config.RateLimitConfig{RequestsPerSecond: 100, Burst: 100},
+	}
+	router := NewRouter(nil, nil, nil, cfg, cache.New(1), time.Now(), nil, nil, nil, nil, nil)
+	body := bytes.NewBufferString(`{"spec":{"subject":"anthropic claude","predicate":"price"}}`)
+	unauthorized := httptest.NewRequest(http.MethodPost, "/api/v1/answer", body)
+	unauthorized.Header.Set("Content-Type", "application/json")
+	unauthorizedResponse := httptest.NewRecorder()
+	router.ServeHTTP(unauthorizedResponse, unauthorized)
+	if unauthorizedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized Answer = %d, body=%s", unauthorizedResponse.Code, unauthorizedResponse.Body)
+	}
+	var unauthorizedEnvelope models.AnswerErrorResponse
+	if err := json.Unmarshal(unauthorizedResponse.Body.Bytes(), &unauthorizedEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if unauthorizedEnvelope.Error == nil || unauthorizedEnvelope.Error.Code != models.ErrCodeUnauthorized {
+		t.Fatalf("unauthorized Answer envelope = %#v", unauthorizedEnvelope)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(unauthorizedResponse.Body.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document) != 1 || document["error"] == nil {
+		t.Fatalf("unauthorized Answer fields = %s", unauthorizedResponse.Body)
+	}
+
+	authorized := httptest.NewRequest(http.MethodPost, "/api/v1/answer", bytes.NewBufferString(
+		`{"spec":{"subject":"anthropic claude","predicate":"price"}}`,
+	))
+	authorized.Header.Set("Content-Type", "application/json")
+	authorized.Header.Set("X-API-Key", "required-secret")
+	authorizedResponse := httptest.NewRecorder()
+	router.ServeHTTP(authorizedResponse, authorized)
+	if authorizedResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unconfigured Answer = %d, body=%s", authorizedResponse.Code, authorizedResponse.Body)
+	}
+	response := decodeRouterAnswerError(t, authorizedResponse)
+	if response.Error == nil || response.Error.Code != models.ErrCodeAnswerUnavailable {
+		t.Fatalf("unconfigured Answer response = %#v", response)
+	}
+}
+
+func TestAnswerCapabilityRequiresAuthUsableKeyAndMaximumCostBurst(t *testing.T) {
+	tests := []struct {
+		name       string
+		auth       config.AuthConfig
+		burst      int
+		header     string
+		wantStatus int
+		wantCalls  int
+	}{
+		{
+			name:       "auth disabled",
+			auth:       config.AuthConfig{Enabled: false, APIKeys: []string{"required-secret"}},
+			burst:      handler.MaxAnswerRequestCost,
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name:       "no keys",
+			auth:       config.AuthConfig{Enabled: true},
+			burst:      handler.MaxAnswerRequestCost,
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name:       "blank keys",
+			auth:       config.AuthConfig{Enabled: true, APIKeys: []string{"", " \t"}},
+			burst:      handler.MaxAnswerRequestCost,
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name:       "burst N minus one",
+			auth:       config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+			burst:      handler.MaxAnswerRequestCost - 1,
+			header:     "required-secret",
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name:       "safe exact boundary",
+			auth:       config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+			burst:      handler.MaxAnswerRequestCost,
+			header:     "required-secret",
+			wantStatus: http.StatusOK,
+			wantCalls:  1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Server:    config.ServerConfig{Mode: "test"},
+				Auth:      test.auth,
+				RateLimit: config.RateLimitConfig{RequestsPerSecond: 0, Burst: test.burst},
+			}
+			service := &routerAnswerService{}
+			router := NewRouterWithOptions(nil, nil, nil, cfg, cache.New(1), time.Now(), nil, nil, nil, nil, nil,
+				WithAnswerService(service))
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/answer", bytes.NewBufferString(
+				`{"spec":{"subject":"anthropic claude","predicate":"price"}}`,
+			))
+			request.Header.Set("Content-Type", "application/json")
+			if test.header != "" {
+				request.Header.Set("X-API-Key", test.header)
+			}
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != test.wantStatus || service.calls != test.wantCalls {
+				t.Fatalf("status/calls = %d/%d, want %d/%d; body=%s", recorder.Code, service.calls, test.wantStatus, test.wantCalls, recorder.Body)
+			}
+			if test.wantStatus == http.StatusServiceUnavailable {
+				response := decodeRouterAnswerError(t, recorder)
+				if response.Error == nil || response.Error.Code != models.ErrCodeAnswerUnavailable {
+					t.Fatalf("fail-closed response = %#v", response)
+				}
+			}
+		})
+	}
+}
+
+func TestAnswerRouterOptionUsesSharedBucketWithoutDoubleCharge(t *testing.T) {
+	cfg := &config.Config{
+		Server:    config.ServerConfig{Mode: "test"},
+		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+		RateLimit: config.RateLimitConfig{RequestsPerSecond: 0, Burst: handler.MaxAnswerRequestCost},
+	}
+	service := &routerAnswerService{}
+	router := NewRouterWithOptions(nil, nil, nil, cfg, cache.New(1), time.Now(), nil, nil, nil, nil, nil,
+		WithAnswerService(service))
+
+	answerRequest := httptest.NewRequest(http.MethodPost, "/api/v1/answer", bytes.NewBufferString(
+		`{"spec":{"subject":"anthropic claude","predicate":"price"}}`,
+	))
+	answerRequest.Header.Set("Content-Type", "application/json")
+	answerRequest.Header.Set("X-API-Key", "required-secret")
+	answerResponse := httptest.NewRecorder()
+	router.ServeHTTP(answerResponse, answerRequest)
+	if answerResponse.Code != http.StatusOK || service.calls != 1 {
+		t.Fatalf("Answer status/calls = %d/%d, body=%s", answerResponse.Code, service.calls, answerResponse.Body)
+	}
+
+	exhausted := httptest.NewRequest(http.MethodPost, "/api/v1/extract", bytes.NewBufferString(`{}`))
+	exhausted.Header.Set("Content-Type", "application/json")
+	exhausted.Header.Set("X-API-Key", "required-secret")
+	exhaustedResponse := httptest.NewRecorder()
+	router.ServeHTTP(exhaustedResponse, exhausted)
+	if exhaustedResponse.Code != http.StatusTooManyRequests || service.calls != 1 {
+		t.Fatalf("exhausted status/calls = %d/%d, body=%s", exhaustedResponse.Code, service.calls, exhaustedResponse.Body)
+	}
+}
+
+func decodeRouterAnswerError(t *testing.T, recorder *httptest.ResponseRecorder) models.AnswerErrorResponse {
+	t.Helper()
+	var response models.AnswerErrorResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode Answer error: %v; body=%s", err, recorder.Body)
+	}
+	return response
 }

@@ -16,6 +16,7 @@ import (
 type routerOptions struct {
 	extractorHealService handler.ExtractorHealService
 	searchService        handler.SearchService
+	answerService        handler.AnswerService
 }
 
 // RouterOption adds an optional API capability without changing the fixed
@@ -39,6 +40,16 @@ func WithSearchService(service handler.SearchService) RouterOption {
 	return func(options *routerOptions) {
 		if options != nil {
 			options.searchService = service
+		}
+	}
+}
+
+// WithAnswerService enables the belief-mode Answer API. The route remains
+// present and authenticated when this option is absent, but fails closed.
+func WithAnswerService(service handler.AnswerService) RouterOption {
+	return func(options *routerOptions) {
+		if options != nil {
+			options.answerService = service
 		}
 	}
 }
@@ -80,8 +91,9 @@ func NewRouterWithOptions(sc *scraper.Scraper, extractService handler.ExtractSer
 	v1.POST("/receipts/verify", handler.VerifyReceipt(receiptSigner))
 	v1.GET("/receipts/pubkey", handler.ReceiptPublicKey(receiptSigner))
 
-	// Protected routes use two groups so Search can retain its own stable
-	// response envelope. Both groups consume from the same identity limiter.
+	// Weighted routes use separate groups so Search and Answer retain their own
+	// stable response envelopes. Every protected group consumes from the same
+	// identity limiter.
 	limiter := middleware.NewLimiter(cfg.RateLimit)
 	searchProtected := v1.Group("")
 	if cfg.Auth.Enabled {
@@ -92,6 +104,16 @@ func NewRouterWithOptions(sc *scraper.Scraper, extractService handler.ExtractSer
 		searchService = nil
 	}
 	searchProtected.POST("/search", handler.SearchWithRateLimiter(searchService, limiter))
+
+	answerProtected := v1.Group("")
+	if cfg.Auth.Enabled {
+		answerProtected.Use(middleware.AnswerAuth(cfg.Auth.APIKeys))
+	}
+	answerService := options.answerService
+	if !answerCapabilityEnabled(cfg) {
+		answerService = nil
+	}
+	answerProtected.POST("/answer", handler.AnswerWithRateLimiter(answerService, limiter))
 
 	standardProtected := v1.Group("")
 	if cfg.Auth.Enabled {
@@ -127,6 +149,18 @@ func NewRouterWithOptions(sc *scraper.Scraper, extractService handler.ExtractSer
 
 func searchCapabilityEnabled(cfg *config.Config) bool {
 	if cfg == nil || !cfg.Auth.Enabled || cfg.RateLimit.Burst < handler.MaxSearchRequestCost {
+		return false
+	}
+	for _, key := range cfg.Auth.APIKeys {
+		if strings.TrimSpace(key) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func answerCapabilityEnabled(cfg *config.Config) bool {
+	if cfg == nil || !cfg.Auth.Enabled || cfg.RateLimit.Burst < handler.MaxAnswerRequestCost {
 		return false
 	}
 	for _, key := range cfg.Auth.APIKeys {

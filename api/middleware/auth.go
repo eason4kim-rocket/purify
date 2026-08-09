@@ -87,10 +87,48 @@ func SearchAuth(apiKeys []string) gin.HandlerFunc {
 	}
 }
 
+// AnswerAuth authenticates the permanently registered Answer route while
+// preserving its error-only non-2xx envelope. An empty effective key set is a
+// no-op; the router independently disables Answer in that state.
+func AnswerAuth(apiKeys []string) gin.HandlerFunc {
+	keySet := make(map[string]struct{}, len(apiKeys))
+	for _, key := range apiKeys {
+		if strings.TrimSpace(key) != "" {
+			keySet[key] = struct{}{}
+		}
+	}
+	if len(keySet) == 0 {
+		return func(c *gin.Context) { c.Next() }
+	}
+
+	return func(c *gin.Context) {
+		key := extractAPIKey(c)
+		if key == "" {
+			abortAnswerUnauthorized(c, "missing API key: provide X-API-Key header or Authorization: Bearer <key>")
+			return
+		}
+		if _, valid := keySet[key]; !valid {
+			abortAnswerUnauthorized(c, "invalid API key")
+			return
+		}
+		c.Set("api_key", key)
+		c.Next()
+	}
+}
+
 func abortSearchUnauthorized(c *gin.Context, message string) {
 	c.AbortWithStatusJSON(http.StatusUnauthorized, models.SearchResponse{
 		Success: false,
 		Results: []models.SearchResult{},
+		Error: &models.ErrorDetail{
+			Code:    models.ErrCodeUnauthorized,
+			Message: message,
+		},
+	})
+}
+
+func abortAnswerUnauthorized(c *gin.Context, message string) {
+	c.AbortWithStatusJSON(http.StatusUnauthorized, models.AnswerErrorResponse{
 		Error: &models.ErrorDetail{
 			Code:    models.ErrCodeUnauthorized,
 			Message: message,
