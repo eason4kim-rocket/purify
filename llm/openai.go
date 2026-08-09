@@ -10,8 +10,18 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/use-agent/purify/models"
+)
+
+const (
+	// MaxLLMResponseBytes caps the complete provider response envelope. The
+	// 32 MiB budget leaves room for a 4 MiB structured JSON value after it is
+	// nested and escaped inside choices[].message.content.
+	MaxLLMResponseBytes = 32 << 20
+
+	defaultHTTPTimeout = 120 * time.Second
 )
 
 // Client is a lightweight OpenAI-compatible API client for structured extraction.
@@ -20,11 +30,11 @@ type Client struct {
 	httpClient *http.Client
 }
 
-// NewClient creates a new LLM client with the given http.Client.
-// Pass nil to use http.DefaultClient.
+// NewClient creates a new LLM client with the given http.Client. A supplied
+// client is used unchanged; nil selects a client with a bounded timeout.
 func NewClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = &http.Client{}
+		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	return &Client{httpClient: httpClient}
 }
@@ -78,15 +88,6 @@ type chatResponse struct {
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
 	} `json:"usage"`
-}
-
-// chatErrorResponse captures an API error from the LLM provider.
-type chatErrorResponse struct {
-	Error struct {
-		Message string `json:"message"`
-		Type    string `json:"type"`
-		Code    string `json:"code"`
-	} `json:"error"`
 }
 
 // rfSupport caches whether an OpenAI-compatible base URL accepts strict
@@ -157,7 +158,7 @@ func (c *Client) extract(ctx context.Context, schema json.RawMessage, params Ext
 func normalizeProviderError(err error) error {
 	var providerErr *providerResponseError
 	if errors.As(err, &providerErr) {
-		return classifyLLMError(providerErr.status, providerErr.body)
+		return classifyLLMError(providerErr.status)
 	}
 	return err
 }
@@ -209,9 +210,21 @@ func (c *Client) sendChat(
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, MaxLLMResponseBytes+1))
 	if err != nil {
-		return nil, models.NewScrapeError(models.ErrCodeLLMFailure, "failed to read LLM response", err)
+		var safeCause error
+		switch {
+		case ctx.Err() != nil:
+			safeCause = ctx.Err()
+		case errors.Is(err, context.Canceled):
+			safeCause = context.Canceled
+		case errors.Is(err, context.DeadlineExceeded):
+			safeCause = context.DeadlineExceeded
+		}
+		return nil, models.NewScrapeError(models.ErrCodeLLMFailure, "failed to read LLM response", safeCause)
+	}
+	if len(respBody) > MaxLLMResponseBytes {
+		return nil, models.NewScrapeError(models.ErrCodeLLMFailure, "LLM response exceeds maximum size", nil)
 	}
 
 	// Handle error status codes.
@@ -276,20 +289,16 @@ Rules:
 - Include exactly the fields allowed by the schema.`, string(schema), string(violationJSON))
 }
 
-// classifyLLMError maps HTTP status codes to appropriate error codes.
-func classifyLLMError(statusCode int, body []byte) *models.ScrapeError {
-	var errResp chatErrorResponse
-	msg := "LLM API error"
-	if err := json.Unmarshal(body, &errResp); err == nil && errResp.Error.Message != "" {
-		msg = errResp.Error.Message
-	}
-
+// classifyLLMError maps HTTP status codes to fixed public errors. Provider
+// response bodies are deliberately excluded because they may echo secrets or
+// user content.
+func classifyLLMError(statusCode int) *models.ScrapeError {
 	switch {
 	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
-		return models.NewScrapeError(models.ErrCodeLLMAuthFailure, msg, nil)
+		return models.NewScrapeError(models.ErrCodeLLMAuthFailure, "LLM authentication failed", nil)
 	case statusCode == http.StatusTooManyRequests:
-		return models.NewScrapeError(models.ErrCodeLLMRateLimited, msg, nil)
+		return models.NewScrapeError(models.ErrCodeLLMRateLimited, "LLM rate limit exceeded", nil)
 	default:
-		return models.NewScrapeError(models.ErrCodeLLMFailure, fmt.Sprintf("LLM API returned %d: %s", statusCode, msg), nil)
+		return models.NewScrapeError(models.ErrCodeLLMFailure, fmt.Sprintf("LLM API returned HTTP %d", statusCode), nil)
 	}
 }

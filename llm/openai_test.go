@@ -9,9 +9,29 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/use-agent/purify/models"
 )
+
+func TestNewClientDefaultTimeoutAndInjectedClientUnchanged(t *testing.T) {
+	defaultClient := NewClient(nil)
+	if defaultClient.httpClient == nil {
+		t.Fatal("NewClient(nil) returned a nil HTTP client")
+	}
+	if defaultClient.httpClient.Timeout != 120*time.Second {
+		t.Fatalf("default timeout = %v, want 120s", defaultClient.httpClient.Timeout)
+	}
+
+	injected := &http.Client{Timeout: 7 * time.Second}
+	client := NewClient(injected)
+	if client.httpClient != injected {
+		t.Fatal("NewClient replaced the injected HTTP client")
+	}
+	if injected.Timeout != 7*time.Second {
+		t.Fatalf("injected timeout = %v, want unchanged 7s", injected.Timeout)
+	}
+}
 
 func TestExtractUsesStrictJSONSchema(t *testing.T) {
 	var gotFormat responseFormat
@@ -39,6 +59,10 @@ func TestExtractUsesStrictJSONSchema(t *testing.T) {
 }
 
 func TestExtractFallsBackAndCachesUnsupportedResponseFormat(t *testing.T) {
+	const baseURL = "https://fallback.test/v1"
+	rfSupport.Delete(baseURL)
+	t.Cleanup(func() { rfSupport.Delete(baseURL) })
+
 	var strictCalls atomic.Int32
 	var objectCalls atomic.Int32
 	client := NewClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -54,7 +78,7 @@ func TestExtractFallsBackAndCachesUnsupportedResponseFormat(t *testing.T) {
 		return chatHTTPResponse(http.StatusOK, `{"ok":true}`), nil
 	})})
 
-	params := ExtractParams{APIKey: "test", Model: "test", BaseURL: "https://fallback.test/v1"}
+	params := ExtractParams{APIKey: "test", Model: "test", BaseURL: baseURL}
 	schema := json.RawMessage(`{"type":"object"}`)
 	for i := 0; i < 2; i++ {
 		if _, err := client.Extract(context.Background(), "content", schema, params); err != nil {
@@ -98,19 +122,178 @@ func TestExtractWithRepairIncludesPreviousOutputAndViolations(t *testing.T) {
 }
 
 func TestFallbackPreservesLLMErrorClassification(t *testing.T) {
+	const secret = "provider-auth-secret"
 	client := NewClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.Header.Get("Authorization") != "Bearer bad" {
 			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
 		}
-		return rawHTTPResponse(http.StatusUnauthorized, `{"error":{"message":"bad key"}}`), nil
+		return rawHTTPResponse(http.StatusUnauthorized, `{"error":{"message":"`+secret+`"}}`), nil
 	})})
 
 	_, err := client.Extract(context.Background(), "content", json.RawMessage(`{"type":"object"}`), ExtractParams{
 		APIKey: "bad", Model: "test", BaseURL: "https://auth.test/v1",
 	})
 	var scrapeErr *models.ScrapeError
-	if !errors.As(err, &scrapeErr) || scrapeErr.Code != models.ErrCodeLLMAuthFailure {
+	if !errors.As(err, &scrapeErr) || scrapeErr.Code != models.ErrCodeLLMAuthFailure ||
+		scrapeErr.Message != "LLM authentication failed" {
 		t.Fatalf("error = %#v, want LLM auth failure", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error leaked provider body: %v", err)
+	}
+}
+
+func TestProviderErrorsUseFixedSanitizedMessages(t *testing.T) {
+	const secret = "provider-error-secret"
+	for _, test := range []struct {
+		name     string
+		status   int
+		wantCode string
+		wantMsg  string
+	}{
+		{name: "forbidden", status: http.StatusForbidden, wantCode: models.ErrCodeLLMAuthFailure, wantMsg: "LLM authentication failed"},
+		{name: "rate limited", status: http.StatusTooManyRequests, wantCode: models.ErrCodeLLMRateLimited, wantMsg: "LLM rate limit exceeded"},
+		{name: "provider failure", status: http.StatusInternalServerError, wantCode: models.ErrCodeLLMFailure, wantMsg: "LLM API returned HTTP 500"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return rawHTTPResponse(test.status, `{"error":{"message":"`+secret+`"}}`), nil
+			})})
+
+			_, err := client.Extract(context.Background(), "content", json.RawMessage(`{"type":"object"}`), ExtractParams{
+				APIKey: "request-secret", Model: "test", BaseURL: "https://sanitized-" + strings.ReplaceAll(test.name, " ", "-") + ".test/v1",
+			})
+			var scrapeErr *models.ScrapeError
+			if !errors.As(err, &scrapeErr) || scrapeErr.Code != test.wantCode || scrapeErr.Message != test.wantMsg {
+				t.Fatalf("error = %#v, want code %q message %q", err, test.wantCode, test.wantMsg)
+			}
+			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "request-secret") {
+				t.Fatalf("error leaked provider body or request secret: %v", err)
+			}
+		})
+	}
+}
+
+func TestProviderResponseBodyLimitExactBoundary(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		body := padResponseBody(t, chatHTTPBody(`{"ok":true}`), MaxLLMResponseBytes)
+		client := NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return rawHTTPResponse(http.StatusOK, body), nil
+		})})
+
+		result, err := client.Extract(context.Background(), "content", json.RawMessage(`{"type":"object"}`), ExtractParams{
+			APIKey: "test", Model: "test", BaseURL: "https://response-limit-success.test/v1",
+		})
+		if err != nil {
+			t.Fatalf("Extract() at exact limit error = %v", err)
+		}
+		if string(result.Data) != `{"ok":true}` {
+			t.Fatalf("Data = %s", result.Data)
+		}
+	})
+
+	t.Run("provider error", func(t *testing.T) {
+		const secret = "exact-limit-provider-secret"
+		body := padResponseBody(t, `{"error":{"message":"`+secret+`"}}`, MaxLLMResponseBytes)
+		client := NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return rawHTTPResponse(http.StatusUnauthorized, body), nil
+		})})
+
+		_, err := client.Extract(context.Background(), "content", json.RawMessage(`{"type":"object"}`), ExtractParams{
+			APIKey: "test", Model: "test", BaseURL: "https://response-limit-error.test/v1",
+		})
+		var scrapeErr *models.ScrapeError
+		if !errors.As(err, &scrapeErr) || scrapeErr.Code != models.ErrCodeLLMAuthFailure ||
+			scrapeErr.Message != "LLM authentication failed" {
+			t.Fatalf("error at exact limit = %#v, want LLM auth failure", err)
+		}
+		if strings.Contains(err.Error(), secret) || strings.Contains(scrapeErr.Message, secret) {
+			t.Fatalf("exact-limit error leaked provider body: %v", err)
+		}
+	})
+}
+
+func TestProviderResponseBodyLimitRejectsNPlusOneWithoutRetainingBody(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusBadRequest} {
+		status := status
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			const secret = "provider-response-secret"
+			body := secret + strings.Repeat("x", MaxLLMResponseBytes+1-len(secret))
+			var calls atomic.Int32
+			client := NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				calls.Add(1)
+				return rawHTTPResponse(status, body), nil
+			})})
+
+			_, err := client.Extract(context.Background(), "content", json.RawMessage(`{"type":"object"}`), ExtractParams{
+				APIKey: "request-secret", Model: "test", BaseURL: "https://response-over-limit-" + strings.ReplaceAll(http.StatusText(status), " ", "-") + ".test/v1",
+			})
+			var scrapeErr *models.ScrapeError
+			if !errors.As(err, &scrapeErr) || scrapeErr.Code != models.ErrCodeLLMFailure ||
+				scrapeErr.Message != "LLM response exceeds maximum size" || scrapeErr.Err != nil {
+				t.Fatalf("error = %#v, want fixed body-limit LLM failure", err)
+			}
+			var providerErr *providerResponseError
+			if errors.As(err, &providerErr) {
+				t.Fatal("oversized response retained a provider response error")
+			}
+			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "request-secret") {
+				t.Fatalf("error leaked response body or request secret: %v", err)
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("provider calls = %d, want no response_format fallback", calls.Load())
+			}
+		})
+	}
+}
+
+func TestProviderResponseReadErrorIsSanitizedAndPreservesContext(t *testing.T) {
+	t.Run("generic read error", func(t *testing.T) {
+		const secret = "provider-read-secret"
+		client := NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return responseWithBody(http.StatusOK, errorReadCloser{err: errors.New(secret)}), nil
+		})})
+
+		_, err := client.Extract(context.Background(), "content", json.RawMessage(`{"type":"object"}`), ExtractParams{
+			APIKey: "request-secret", Model: "test", BaseURL: "https://response-read-error.test/v1",
+		})
+		assertSanitizedReadError(t, err, nil, secret, "request-secret")
+	})
+
+	t.Run("context cancellation", func(t *testing.T) {
+		const secret = "provider-context-secret"
+		ctx, cancel := context.WithCancel(context.Background())
+		client := NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return responseWithBody(http.StatusOK, errorReadCloser{
+				beforeError: cancel,
+				err:         errors.New(secret),
+			}), nil
+		})})
+
+		_, err := client.Extract(ctx, "content", json.RawMessage(`{"type":"object"}`), ExtractParams{
+			APIKey: "request-secret", Model: "test", BaseURL: "https://response-read-context.test/v1",
+		})
+		assertSanitizedReadError(t, err, context.Canceled, secret, "request-secret")
+	})
+}
+
+func assertSanitizedReadError(t *testing.T, err, wantCause error, forbidden ...string) {
+	t.Helper()
+	var scrapeErr *models.ScrapeError
+	if !errors.As(err, &scrapeErr) || scrapeErr.Code != models.ErrCodeLLMFailure ||
+		scrapeErr.Message != "failed to read LLM response" {
+		t.Fatalf("error = %#v, want sanitized response read failure", err)
+	}
+	if wantCause == nil && scrapeErr.Err != nil {
+		t.Fatalf("read error retained unsafe cause: %v", scrapeErr.Err)
+	}
+	if wantCause != nil && !errors.Is(err, wantCause) {
+		t.Fatalf("error = %v, want cause %v", err, wantCause)
+	}
+	for _, value := range forbidden {
+		if strings.Contains(err.Error(), value) {
+			t.Fatalf("error leaked %q: %v", value, err)
+		}
 	}
 }
 
@@ -121,17 +304,47 @@ func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) 
 }
 
 func chatHTTPResponse(status int, content string) *http.Response {
+	return rawHTTPResponse(status, chatHTTPBody(content))
+}
+
+func chatHTTPBody(content string) string {
 	body, _ := json.Marshal(map[string]any{
 		"choices": []any{map[string]any{"message": map[string]any{"content": content}}},
 		"usage":   map[string]any{"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
 	})
-	return rawHTTPResponse(status, string(body))
+	return string(body)
 }
 
 func rawHTTPResponse(status int, body string) *http.Response {
+	return responseWithBody(status, io.NopCloser(strings.NewReader(body)))
+}
+
+func responseWithBody(status int, body io.ReadCloser) *http.Response {
 	return &http.Response{
 		StatusCode: status,
 		Header:     make(http.Header),
-		Body:       io.NopCloser(strings.NewReader(body)),
+		Body:       body,
 	}
 }
+
+func padResponseBody(t *testing.T, body string, size int) string {
+	t.Helper()
+	if len(body) > size {
+		t.Fatalf("base response is %d bytes, exceeds requested %d", len(body), size)
+	}
+	return body + strings.Repeat(" ", size-len(body))
+}
+
+type errorReadCloser struct {
+	beforeError func()
+	err         error
+}
+
+func (reader errorReadCloser) Read([]byte) (int, error) {
+	if reader.beforeError != nil {
+		reader.beforeError()
+	}
+	return 0, reader.err
+}
+
+func (errorReadCloser) Close() error { return nil }
