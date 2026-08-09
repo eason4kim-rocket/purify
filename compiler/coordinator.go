@@ -84,9 +84,11 @@ type hydrationFailure struct {
 
 func (failure hydrationFailure) Error() string { return string(failure.result.reason) }
 
-// Coordinator asynchronously turns bounded catalog references into active
-// deterministic extractors. It never accepts provider or request credentials;
-// its TruthExtractor is a process-owned managed dependency supplied at startup.
+// Coordinator asynchronously turns bounded catalog references into durably
+// admitted deterministic candidates. Only a brand-new logical cluster becomes
+// active here; every stale lineage enters verified healing without replacement.
+// It never accepts provider or request credentials; its TruthExtractor is a
+// process-owned managed dependency supplied at startup.
 type Coordinator struct {
 	ledger    *ledger.Store
 	catalog   *SampleCatalog
@@ -116,7 +118,7 @@ type Coordinator struct {
 	hasObservation func(context.Context, snapshot.ID, func(snapshot.Meta) bool) (bool, error)
 	cleanContent   func(string, string) (string, error)
 	compileIR      func(context.Context, []Sample, json.RawMessage, TruthExtractor) (IR, ValidationReport, error)
-	saveExtractor  func(context.Context, PageKey, IR, ValidationReport) (Extractor, error)
+	submitter      CandidateSubmitter
 }
 
 // NewCoordinator starts one background compiler worker. An optional clock is
@@ -173,8 +175,8 @@ func NewCoordinator(
 			}
 			return response.Content, nil
 		},
-		compileIR:     Compile,
-		saveExtractor: registry.Save,
+		compileIR: Compile,
+		submitter: registry,
 	}
 	c.wg.Add(1)
 	go c.worker()
@@ -220,7 +222,7 @@ func (c *Coordinator) Observe(
 
 func (c *Coordinator) validateOpen() error {
 	if c == nil || c.ledger == nil || c.catalog == nil || c.registry == nil ||
-		c.snapshots == nil || c.extractor == nil || c.clock == nil || c.cancel == nil {
+		c.snapshots == nil || c.extractor == nil || c.clock == nil || c.cancel == nil || c.submitter == nil {
 		return fmt.Errorf("%w: coordinator is nil or uninitialized", ErrInvalidCoordinator)
 	}
 	c.mu.Lock()
@@ -413,7 +415,7 @@ func (c *Coordinator) runClaimed(ctx context.Context, task coordinatorTask) (res
 			result = attemptResult{outcome: attemptTransient, reason: reasonPanicRecovered}
 		}
 	}()
-	samples, saveKey, err := c.hydrate(ctx, task.set, task.schema)
+	samples, _, err := c.hydrate(ctx, task.set, task.schema)
 	if err != nil {
 		var failure hydrationFailure
 		if errors.As(err, &failure) {
@@ -432,7 +434,15 @@ func (c *Coordinator) runClaimed(ctx context.Context, task coordinatorTask) (res
 	if !report.CanEnable {
 		return attemptResult{outcome: attemptWeak, reason: reasonValidationBelowThreshold}
 	}
-	if _, err := c.saveExtractor(ctx, saveKey, ir, report); err != nil {
+	_, err = c.submitter.SubmitCandidate(ctx, Candidate{
+		Key: task.set.Key, CatalogRevision: task.set.Revision,
+		Schema: append(json.RawMessage(nil), task.schema...), IR: ir,
+		Validation: report, Samples: append([]SampleRef(nil), task.set.Samples...),
+	})
+	if err != nil {
+		if errors.Is(err, ErrHealingRequired) {
+			return attemptResult{outcome: attemptNoCandidate, reason: reasonNoExtractorCandidate}
+		}
 		return contextAttemptResult(ctx, reasonSaveFailed)
 	}
 	return attemptResult{outcome: attemptSuccess, reason: reasonCompiled}

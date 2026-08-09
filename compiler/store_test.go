@@ -233,7 +233,7 @@ func TestStoreMetadataRejectsMismatchedClusterID(t *testing.T) {
 	}
 }
 
-func TestStoreLookupBindingPromotionAndDrift(t *testing.T) {
+func TestStoreLookupBindingRejectsSilentReplacementAndDetectsDrift(t *testing.T) {
 	store, durable := openExtractorStore(t)
 	key := extractorTestKey(t, "https://shop.example.com/product/1", json.RawMessage(`{"name":"string"}`))
 	key.TemplateSimHash = 0x8000000000000001
@@ -260,17 +260,13 @@ func TestStoreLookupBindingPromotionAndDrift(t *testing.T) {
 	assertBindingID(t, durable, unbound, first.ID)
 
 	secondIR, secondReport := extractorFixture(".name")
-	second, err := store.Save(context.Background(), key, secondIR, secondReport)
-	if err != nil {
-		t.Fatalf("Save(v2) error = %v", err)
+	if _, err := store.Save(context.Background(), key, secondIR, secondReport); !errors.Is(err, ErrHealingRequired) {
+		t.Fatalf("Save(replacement) error = %v", err)
 	}
-	if second.Version != 2 || second.ID == first.ID || second.TemplateClusterID != first.TemplateClusterID {
-		t.Fatalf("v2 = %+v, v1 = %+v", second, first)
-	}
-	assertBindingID(t, durable, unbound, second.ID)
-	old, err := store.Get(context.Background(), first.ID)
-	if err != nil || old.State != StateStale || old.StaleReason != "superseded" {
-		t.Fatalf("old revision after promotion = %+v, %v", old, err)
+	assertBindingID(t, durable, unbound, first.ID)
+	stillCurrent, err := store.Get(context.Background(), first.ID)
+	if err != nil || stillCurrent.State != StateActive || stillCurrent.Version != 1 {
+		t.Fatalf("active revision changed after rejected replacement = %+v, %v", stillCurrent, err)
 	}
 
 	far := extractorTestKey(t, "https://shop.example.com/product/new", json.RawMessage(`{"name":"string"}`))
@@ -278,7 +274,7 @@ func TestStoreLookupBindingPromotionAndDrift(t *testing.T) {
 	if _, ok, err := store.Lookup(context.Background(), far); err != nil || ok {
 		t.Fatalf("generic far Lookup() = ok %v, err %v", ok, err)
 	}
-	stillActive, err := store.Get(context.Background(), second.ID)
+	stillActive, err := store.Get(context.Background(), first.ID)
 	if err != nil || stillActive.State != StateActive {
 		t.Fatalf("generic miss degraded active extractor: %+v, %v", stillActive, err)
 	}
@@ -288,13 +284,13 @@ func TestStoreLookupBindingPromotionAndDrift(t *testing.T) {
 	if _, ok, err := store.Lookup(context.Background(), boundDrift); err != nil || ok {
 		t.Fatalf("bound drift Lookup() = ok %v, err %v", ok, err)
 	}
-	drifted, err := store.Get(context.Background(), second.ID)
+	drifted, err := store.Get(context.Background(), first.ID)
 	if err != nil || drifted.State != StateStale || drifted.StaleReason != "template_drift" {
 		t.Fatalf("bound active after drift = %+v, %v", drifted, err)
 	}
 }
 
-func TestStorePromotionKeepsCanonicalClusterRepresentative(t *testing.T) {
+func TestStoreInitialRegistrationRejectsNearbyExistingCluster(t *testing.T) {
 	store, durable := openExtractorStore(t)
 	base := uint64(1) << 63
 	firstPage := extractorTestKey(t, "https://example.com/a", json.RawMessage(`{"name":"string"}`))
@@ -314,21 +310,51 @@ func TestStorePromotionKeepsCanonicalClusterRepresentative(t *testing.T) {
 	promotionPage := extractorTestKey(t, "https://example.com/b", json.RawMessage(`{"name":"string"}`))
 	promotionPage.TemplateSimHash = base ^ 0xfc0
 	secondIR, secondReport := extractorFixture(".name")
-	second, err := store.Save(context.Background(), promotionPage, secondIR, secondReport)
-	if err != nil {
-		t.Fatalf("Save(v2) error = %v", err)
+	if _, err := store.Save(context.Background(), promotionPage, secondIR, secondReport); !errors.Is(err, ErrHealingRequired) {
+		t.Fatalf("Save(nearby target) error = %v", err)
 	}
-	if second.TemplateSimHash != base {
-		t.Fatalf("promoted cluster representative = %#x, want %#x", second.TemplateSimHash, base)
-	}
-	assertBindingID(t, durable, oldPage, second.ID)
+	assertBindingID(t, durable, oldPage, first.ID)
 	matched, ok, err := store.Lookup(context.Background(), oldPage)
-	if err != nil || !ok || matched.ID != second.ID {
-		t.Fatalf("Lookup(old page after promotion) = %s/%v/%v", matched.ID, ok, err)
+	if err != nil || !ok || matched.ID != first.ID {
+		t.Fatalf("Lookup(old page after exact registration) = %s/%v/%v", matched.ID, ok, err)
 	}
-	current, err := store.Get(context.Background(), second.ID)
+	current, err := store.Get(context.Background(), first.ID)
 	if err != nil || current.State != StateActive {
-		t.Fatalf("promoted extractor drifted immediately: %+v, %v", current, err)
+		t.Fatalf("first extractor changed unexpectedly: %+v, %v", current, err)
+	}
+}
+
+func TestStoreExactRetryDoesNotStealAnotherLineageBinding(t *testing.T) {
+	store, durable := openExtractorStore(t)
+	schema := json.RawMessage(`{"name":"string"}`)
+	firstKey := extractorTestKey(t, "https://example.com/a", schema)
+	firstKey.TemplateSimHash = uint64(1) << 63
+	secondKey := extractorTestKey(t, "https://example.com/b", schema)
+	secondKey.TemplateSimHash = 0x40000000000000ff
+	ir, report := extractorFixture("h1")
+	first, err := store.Save(context.Background(), firstKey, ir, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Save(context.Background(), secondKey, ir, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := durable.Update(context.Background(), func(tx ledger.WriteTx) error {
+		_, err := tx.ExecContext(context.Background(), `UPDATE extractor_page_bindings
+			SET extractor_id = ? WHERE page_hash = ? AND schema_hash = ?`,
+			second.ID, firstKey.PageHash, firstKey.SchemaHash)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Save(context.Background(), firstKey, ir, report); !errors.Is(err, ErrHealingRequired) {
+		t.Fatalf("Save(exact retry with foreign binding) error = %v", err)
+	}
+	assertBindingID(t, durable, firstKey, second.ID)
+	current, err := store.Get(context.Background(), first.ID)
+	if err != nil || current.State != StateActive {
+		t.Fatalf("first active changed = %+v, %v", current, err)
 	}
 }
 
@@ -426,12 +452,8 @@ func TestStoreClampsRegressingClockAcrossLifecycle(t *testing.T) {
 	}
 
 	secondIR, secondReport := extractorFixture(".name")
-	second, err := store.Save(context.Background(), key, secondIR, secondReport)
-	if err != nil {
-		t.Fatalf("Save(v2, regressing clock) error = %v", err)
-	}
-	if !second.CreatedAt.Equal(storeTestTime) || !second.UpdatedAt.Equal(storeTestTime) {
-		t.Fatalf("v2 times = %s/%s, want floor %s", second.CreatedAt, second.UpdatedAt, storeTestTime)
+	if _, err := store.Save(context.Background(), key, secondIR, secondReport); !errors.Is(err, ErrHealingRequired) {
+		t.Fatalf("Save(replacement, regressing clock) error = %v", err)
 	}
 
 	drift := key
@@ -439,18 +461,18 @@ func TestStoreClampsRegressingClockAcrossLifecycle(t *testing.T) {
 	if _, ok, err := store.Lookup(context.Background(), drift); err != nil || ok {
 		t.Fatalf("Lookup(drift, regressing clock) = ok %v, err %v", ok, err)
 	}
-	drifted, err := store.Get(context.Background(), second.ID)
+	drifted, err := store.Get(context.Background(), first.ID)
 	if err != nil || drifted.State != StateStale || !drifted.UpdatedAt.Equal(storeTestTime) {
 		t.Fatalf("Get(drifted after clock rollback) = %+v, %v", drifted, err)
 	}
-	retired, err := store.Retire(context.Background(), second.ID)
+	retired, err := store.Retire(context.Background(), first.ID)
 	if err != nil {
 		t.Fatalf("Retire(regressing clock) error = %v", err)
 	}
 	if retired.State != StateRetired || !retired.UpdatedAt.Equal(storeTestTime) {
 		t.Fatalf("retired after clock rollback = %+v", retired)
 	}
-	if _, err := store.Get(context.Background(), second.ID); err != nil {
+	if _, err := store.Get(context.Background(), first.ID); err != nil {
 		t.Fatalf("Get(retired after clock rollback) error = %v", err)
 	}
 }

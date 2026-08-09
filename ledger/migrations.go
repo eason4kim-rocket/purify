@@ -517,4 +517,268 @@ var migrations = []string{
 	BEGIN
 		SELECT RAISE(ABORT, 'compiler attempt updated_at cannot move backward');
 	END;`,
+	`CREATE TABLE extractor_heal_runs (
+		id TEXT NOT NULL PRIMARY KEY CHECK (
+			length(id) = 36 AND
+			substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND
+			substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND
+			length(replace(id, '-', '')) = 32 AND
+			id NOT GLOB '*[^0-9a-f-]*'
+		),
+		source_extractor_id TEXT NOT NULL,
+		source_version INTEGER NOT NULL CHECK (source_version > 0),
+		host TEXT NOT NULL CHECK (
+			typeof(host) = 'text' AND length(host) BETWEEN 1 AND 253 AND
+			host = lower(host) AND host = trim(host)
+		),
+		schema_json TEXT NOT NULL CHECK (
+			json_valid(schema_json) AND json_type(schema_json) = 'object' AND
+			length(schema_json) <= 524288
+		),
+		schema_hash TEXT NOT NULL CHECK (
+			length(schema_hash) = 64 AND schema_hash NOT GLOB '*[^0-9a-f]*'
+		),
+		content_profile TEXT NOT NULL CHECK (content_profile = 'extract-default-v1'),
+		target_template_cluster_id TEXT NOT NULL CHECK (
+			length(target_template_cluster_id) = 64 AND
+			target_template_cluster_id NOT GLOB '*[^0-9a-f]*'
+		),
+		target_cluster_simhash BLOB NOT NULL CHECK (
+			typeof(target_cluster_simhash) = 'blob' AND
+			length(target_cluster_simhash) = 8 AND
+			target_cluster_simhash <> zeroblob(8)
+		),
+		catalog_revision TEXT NOT NULL CHECK (
+			length(catalog_revision) = 64 AND
+			catalog_revision NOT GLOB '*[^0-9a-f]*'
+		),
+		candidate_ir TEXT NOT NULL CHECK (
+			json_valid(candidate_ir) AND json_type(candidate_ir) = 'object' AND
+			length(candidate_ir) <= 524288
+		),
+		candidate_ir_hash TEXT NOT NULL CHECK (
+			length(candidate_ir_hash) = 64 AND
+			candidate_ir_hash NOT GLOB '*[^0-9a-f]*'
+		),
+		candidate_ir_format_version INTEGER NOT NULL CHECK (
+			candidate_ir_format_version > 0
+		),
+		validation_report TEXT NOT NULL CHECK (
+			json_valid(validation_report) AND
+			json_type(validation_report) = 'object' AND
+			length(validation_report) <= 524288 AND
+			json_type(validation_report, '$.can_enable') = 'true' AND
+			json_extract(validation_report, '$.can_enable') IS 1
+		),
+		validation REAL NOT NULL CHECK (validation >= 0.9 AND validation <= 1.0),
+		samples_json TEXT NOT NULL CHECK (
+			json_valid(samples_json) AND json_type(samples_json) = 'array' AND
+			json_array_length(samples_json) BETWEEN 3 AND 20 AND
+			length(samples_json) <= 16384
+		),
+		state TEXT NOT NULL DEFAULT 'pending' CHECK (
+			state IN ('pending', 'replaying', 'promoted', 'degraded', 'failed')
+		),
+		terminal_reason TEXT NOT NULL DEFAULT '' CHECK (length(terminal_reason) <= 256),
+		lease_id TEXT CHECK (
+			lease_id IS NULL OR (
+				length(lease_id) = 36 AND
+				substr(lease_id, 9, 1) = '-' AND substr(lease_id, 14, 1) = '-' AND
+				substr(lease_id, 19, 1) = '-' AND substr(lease_id, 24, 1) = '-' AND
+				length(replace(lease_id, '-', '')) = 32 AND
+				lease_id NOT GLOB '*[^0-9a-f-]*'
+			)
+		),
+		lease_until TEXT CHECK (
+			lease_until IS NULL OR (
+				typeof(lease_until) = 'text' AND length(lease_until) = 30 AND
+				substr(lease_until, 5, 1) = '-' AND substr(lease_until, 8, 1) = '-' AND
+				substr(lease_until, 11, 1) = 'T' AND substr(lease_until, 14, 1) = ':' AND
+				substr(lease_until, 17, 1) = ':' AND substr(lease_until, 20, 1) = '.' AND
+				substr(lease_until, 30, 1) = 'Z' AND julianday(lease_until) IS NOT NULL
+			)
+		),
+		replay_total INTEGER NOT NULL DEFAULT 0 CHECK (replay_total >= 0),
+		replay_matched INTEGER NOT NULL DEFAULT 0 CHECK (
+			replay_matched >= 0 AND replay_matched <= replay_total
+		),
+		replay_ratio REAL CHECK (
+			replay_ratio IS NULL OR (replay_ratio >= 0.0 AND replay_ratio <= 1.0)
+		),
+		promoted_extractor_id TEXT,
+		created_at TEXT NOT NULL CHECK (
+			typeof(created_at) = 'text' AND length(created_at) = 30 AND
+			substr(created_at, 5, 1) = '-' AND substr(created_at, 8, 1) = '-' AND
+			substr(created_at, 11, 1) = 'T' AND substr(created_at, 14, 1) = ':' AND
+			substr(created_at, 17, 1) = ':' AND substr(created_at, 20, 1) = '.' AND
+			substr(created_at, 30, 1) = 'Z' AND julianday(created_at) IS NOT NULL
+		),
+		updated_at TEXT NOT NULL CHECK (
+			typeof(updated_at) = 'text' AND length(updated_at) = 30 AND
+			substr(updated_at, 5, 1) = '-' AND substr(updated_at, 8, 1) = '-' AND
+			substr(updated_at, 11, 1) = 'T' AND substr(updated_at, 14, 1) = ':' AND
+			substr(updated_at, 17, 1) = ':' AND substr(updated_at, 20, 1) = '.' AND
+			substr(updated_at, 30, 1) = 'Z' AND julianday(updated_at) IS NOT NULL
+		),
+		completed_at TEXT CHECK (
+			completed_at IS NULL OR (
+				typeof(completed_at) = 'text' AND length(completed_at) = 30 AND
+				substr(completed_at, 5, 1) = '-' AND substr(completed_at, 8, 1) = '-' AND
+				substr(completed_at, 11, 1) = 'T' AND substr(completed_at, 14, 1) = ':' AND
+				substr(completed_at, 17, 1) = ':' AND substr(completed_at, 20, 1) = '.' AND
+				substr(completed_at, 30, 1) = 'Z' AND julianday(completed_at) IS NOT NULL
+			)
+		),
+		CHECK (updated_at >= created_at),
+		CHECK (completed_at IS NULL OR completed_at >= updated_at),
+		CHECK (lease_until IS NULL OR lease_until > updated_at),
+		CHECK (
+			(replay_total = 0 AND replay_matched = 0 AND replay_ratio IS NULL) OR
+			(replay_total > 0 AND replay_ratio IS NOT NULL AND
+				abs(replay_ratio - CAST(replay_matched AS REAL) / replay_total) <= 0.000000000001)
+		),
+		CHECK (
+			(state = 'pending' AND terminal_reason = '' AND lease_id IS NULL AND
+				lease_until IS NULL AND replay_total = 0 AND replay_matched = 0 AND
+				replay_ratio IS NULL AND promoted_extractor_id IS NULL AND completed_at IS NULL) OR
+			(state = 'replaying' AND terminal_reason = '' AND lease_id IS NOT NULL AND
+				lease_until IS NOT NULL AND promoted_extractor_id IS NULL AND completed_at IS NULL) OR
+			(state = 'promoted' AND terminal_reason = 'replay_passed' AND
+				lease_id IS NULL AND lease_until IS NULL AND replay_total > 0 AND
+				replay_ratio >= 0.9 AND promoted_extractor_id IS NOT NULL AND completed_at IS NOT NULL) OR
+			(state IN ('degraded', 'failed') AND terminal_reason <> '' AND
+				lease_id IS NULL AND lease_until IS NULL AND promoted_extractor_id IS NULL AND
+				completed_at IS NOT NULL)
+		),
+		FOREIGN KEY (source_extractor_id) REFERENCES extractors(id) ON DELETE RESTRICT,
+		FOREIGN KEY (promoted_extractor_id) REFERENCES extractors(id) ON DELETE RESTRICT
+	) STRICT;
+
+	CREATE UNIQUE INDEX idx_extractor_heal_runs_pending_target
+		ON extractor_heal_runs(host, schema_hash, target_template_cluster_id)
+		WHERE state IN ('pending', 'replaying');
+	CREATE INDEX idx_extractor_heal_runs_source
+		ON extractor_heal_runs(source_extractor_id, created_at DESC, id);
+	CREATE INDEX idx_extractor_heal_runs_lease
+		ON extractor_heal_runs(lease_until, updated_at, id)
+		WHERE state = 'replaying';
+	CREATE INDEX idx_extractor_heal_runs_terminal
+		ON extractor_heal_runs(state, completed_at DESC, id)
+		WHERE state IN ('promoted', 'degraded', 'failed');
+
+	CREATE INDEX idx_verifications_exact_heal_replay
+		ON verifications(
+			extractor_id, schema_hash, template_cluster_id, verified_at DESC, id
+		)
+		WHERE outcome = 'confirmed' AND extractor_id IS NOT NULL AND
+			schema_hash IS NOT NULL AND template_cluster_id IS NOT NULL;
+
+	CREATE TRIGGER trg_extractor_heal_runs_identity_immutable
+	BEFORE UPDATE ON extractor_heal_runs
+	WHEN
+		OLD.id IS NOT NEW.id OR
+		OLD.source_extractor_id IS NOT NEW.source_extractor_id OR
+		OLD.source_version IS NOT NEW.source_version OR
+		OLD.host IS NOT NEW.host OR
+		OLD.schema_json IS NOT NEW.schema_json OR
+		OLD.schema_hash IS NOT NEW.schema_hash OR
+		OLD.content_profile IS NOT NEW.content_profile OR
+		OLD.target_template_cluster_id IS NOT NEW.target_template_cluster_id OR
+		OLD.target_cluster_simhash IS NOT NEW.target_cluster_simhash OR
+		OLD.catalog_revision IS NOT NEW.catalog_revision OR
+		OLD.candidate_ir IS NOT NEW.candidate_ir OR
+		OLD.candidate_ir_hash IS NOT NEW.candidate_ir_hash OR
+		OLD.candidate_ir_format_version IS NOT NEW.candidate_ir_format_version OR
+		OLD.validation_report IS NOT NEW.validation_report OR
+		OLD.validation IS NOT NEW.validation OR
+		OLD.samples_json IS NOT NEW.samples_json OR
+		OLD.created_at IS NOT NEW.created_at
+	BEGIN
+		SELECT RAISE(ABORT, 'extractor heal candidate is immutable');
+	END;
+
+	CREATE TRIGGER trg_extractor_heal_runs_source_exact
+	BEFORE INSERT ON extractor_heal_runs
+	WHEN NOT EXISTS (
+		SELECT 1 FROM extractors source
+		WHERE source.id = NEW.source_extractor_id AND
+			source.version = NEW.source_version AND source.host = NEW.host AND
+			source.schema_hash = NEW.schema_hash AND source.state = 'stale'
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'extractor heal source is not the exact stale revision');
+	END;
+
+	CREATE TRIGGER trg_extractor_heal_runs_samples_insert
+	BEFORE INSERT ON extractor_heal_runs
+	WHEN EXISTS (
+		SELECT 1 FROM json_each(NEW.samples_json) sample
+		WHERE sample.type <> 'object' OR
+			json_type(sample.value, '$.page_hash') IS NOT 'text' OR
+			length(json_extract(sample.value, '$.page_hash')) <> 64 OR
+			json_extract(sample.value, '$.page_hash') GLOB '*[^0-9a-f]*' OR
+			json_type(sample.value, '$.snapshot_id') IS NOT 'text' OR
+			length(json_extract(sample.value, '$.snapshot_id')) <> 71 OR
+			substr(json_extract(sample.value, '$.snapshot_id'), 1, 7) <> 'sha256:' OR
+			substr(json_extract(sample.value, '$.snapshot_id'), 8) GLOB '*[^0-9a-f]*' OR
+			json_type(sample.value, '$.sample_simhash') IS NOT 'text' OR
+			length(json_extract(sample.value, '$.sample_simhash')) <> 16 OR
+			json_extract(sample.value, '$.sample_simhash') GLOB '*[^0-9a-f]*' OR
+			json_extract(sample.value, '$.sample_simhash') = '0000000000000000' OR
+			json_type(sample.value, '$.fetched_at') IS NOT 'text' OR
+			length(json_extract(sample.value, '$.fetched_at')) <> 30 OR
+			substr(json_extract(sample.value, '$.fetched_at'), 5, 1) <> '-' OR
+			substr(json_extract(sample.value, '$.fetched_at'), 8, 1) <> '-' OR
+			substr(json_extract(sample.value, '$.fetched_at'), 11, 1) <> 'T' OR
+			substr(json_extract(sample.value, '$.fetched_at'), 14, 1) <> ':' OR
+			substr(json_extract(sample.value, '$.fetched_at'), 17, 1) <> ':' OR
+			substr(json_extract(sample.value, '$.fetched_at'), 20, 1) <> '.' OR
+			substr(json_extract(sample.value, '$.fetched_at'), 30, 1) <> 'Z' OR
+			julianday(json_extract(sample.value, '$.fetched_at')) IS NULL OR
+			(SELECT COUNT(*) FROM json_each(sample.value)) <> 4
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'invalid extractor heal sample');
+	END;
+
+	CREATE TRIGGER trg_extractor_heal_runs_state_transition
+	BEFORE UPDATE OF state ON extractor_heal_runs
+	WHEN NOT (
+		(OLD.state = NEW.state) OR
+		(OLD.state = 'pending' AND NEW.state = 'replaying') OR
+		(OLD.state = 'replaying' AND NEW.state IN ('pending', 'promoted', 'degraded', 'failed'))
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'invalid extractor heal state transition');
+	END;
+
+	CREATE TRIGGER trg_extractor_heal_runs_terminal_immutable
+	BEFORE UPDATE ON extractor_heal_runs
+	WHEN OLD.state IN ('promoted', 'degraded', 'failed')
+	BEGIN
+		SELECT RAISE(ABORT, 'terminal extractor heal run is immutable');
+	END;
+
+	CREATE TRIGGER trg_extractor_heal_runs_updated_monotonic
+	BEFORE UPDATE OF updated_at ON extractor_heal_runs
+	WHEN NEW.updated_at < OLD.updated_at
+	BEGIN
+		SELECT RAISE(ABORT, 'extractor heal updated_at cannot move backward');
+	END;
+
+	CREATE TRIGGER trg_extractor_heal_runs_delete_guard
+	BEFORE DELETE ON extractor_heal_runs
+	BEGIN
+		SELECT RAISE(ABORT, 'extractor heal audit cannot be deleted');
+	END;
+
+	CREATE TRIGGER trg_extractors_delete_audit_guard
+	BEFORE DELETE ON extractors
+	WHEN
+		EXISTS (SELECT 1 FROM verifications WHERE extractor_id = OLD.id) OR
+		EXISTS (SELECT 1 FROM extractor_heal_runs
+			WHERE source_extractor_id = OLD.id OR promoted_extractor_id = OLD.id)
+	BEGIN
+		SELECT RAISE(ABORT, 'extractor is referenced by durable audit history');
+	END;`,
 }

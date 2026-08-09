@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -73,11 +74,11 @@ func TestCoordinatorObserveSingleflightDirtyAndRequestCancellation(t *testing.T)
 	}
 	var saveCalls atomic.Int32
 	var savedCenter atomic.Uint64
-	coordinator.saveExtractor = func(_ context.Context, key PageKey, _ IR, _ ValidationReport) (Extractor, error) {
+	coordinator.submitter = candidateSubmitterFunc(func(_ context.Context, candidate Candidate) (Submission, error) {
 		saveCalls.Add(1)
-		savedCenter.Store(key.TemplateSimHash)
-		return Extractor{}, nil
-	}
+		savedCenter.Store(candidate.Key.ClusterSimHash)
+		return Submission{Status: SubmissionInitialActive}, nil
+	})
 
 	schema := catalogSchema()
 	var readySet SampleSet
@@ -237,9 +238,9 @@ func TestCoordinatorRevisionHandoffDoesNotReapplyExpiredCooldown(t *testing.T) {
 				ir, report := extractorFixture("h1.name")
 				return ir, report, nil
 			}
-			harness.coordinator.saveExtractor = func(context.Context, PageKey, IR, ValidationReport) (Extractor, error) {
-				return Extractor{}, nil
-			}
+			harness.coordinator.submitter = candidateSubmitterFunc(func(context.Context, Candidate) (Submission, error) {
+				return Submission{Status: SubmissionInitialActive}, nil
+			})
 			harness.coordinator.process(coordinatorTask{
 				set: SampleSet{Key: set.Key, Revision: queuedRevision}, schema: schema,
 			})
@@ -480,10 +481,19 @@ func TestCoordinatorOutcomeClassificationAndHydrationFailures(t *testing.T) {
 				ir, report := extractorFixture("h1.name")
 				return ir, report, nil
 			}
-			harness.coordinator.saveExtractor = func(context.Context, PageKey, IR, ValidationReport) (Extractor, error) {
-				return Extractor{}, errors.New("database detail must not persist")
-			}
+			harness.coordinator.submitter = candidateSubmitterFunc(func(context.Context, Candidate) (Submission, error) {
+				return Submission{}, errors.New("database detail must not persist")
+			})
 		}, attemptTransient, reasonSaveFailed},
+		{"healing required", func() {
+			harness.coordinator.compileIR = func(context.Context, []Sample, json.RawMessage, TruthExtractor) (IR, ValidationReport, error) {
+				ir, report := extractorFixture("h1.name")
+				return ir, report, nil
+			}
+			harness.coordinator.submitter = candidateSubmitterFunc(func(context.Context, Candidate) (Submission, error) {
+				return Submission{Status: SubmissionRejectedRetired}, ErrHealingRequired
+			})
+		}, attemptNoCandidate, reasonNoExtractorCandidate},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -513,6 +523,71 @@ func TestCoordinatorOutcomeClassificationAndHydrationFailures(t *testing.T) {
 	got := harness.coordinator.runClaimed(context.Background(), task)
 	if got.outcome != attemptTransient || got.reason != reasonPanicRecovered {
 		t.Fatalf("panic result = %#v", got)
+	}
+}
+
+func TestCoordinatorHealingRequiredIsTerminalForSameCatalogRevision(t *testing.T) {
+	harness := newCoordinatorHarness(t)
+	set, schema := readyCoordinatorSet(t, harness, 465, MinCompileSamples)
+	var compileCalls atomic.Int32
+	harness.coordinator.compileIR = func(context.Context, []Sample, json.RawMessage, TruthExtractor) (IR, ValidationReport, error) {
+		compileCalls.Add(1)
+		ir, report := extractorFixture("h1.name")
+		return ir, report, nil
+	}
+	harness.coordinator.submitter = candidateSubmitterFunc(func(context.Context, Candidate) (Submission, error) {
+		return Submission{Status: SubmissionRejectedAmbiguous}, fmt.Errorf("%w: %w", ErrHealingRequired, ErrCandidateAmbiguous)
+	})
+	task := coordinatorTask{set: set, schema: schema}
+	harness.coordinator.process(task)
+	state := readCoordinatorAttempt(t, harness.durable, set.Key)
+	if state.outcome != attemptNoCandidate || state.reason != reasonNoExtractorCandidate ||
+		state.attemptRevision != set.Revision {
+		t.Fatalf("first terminal admission state = %#v", state)
+	}
+	harness.clock.Add(CoordinatorWeakDelay + time.Second)
+	harness.coordinator.process(task)
+	if got := compileCalls.Load(); got != 1 {
+		t.Fatalf("same rejected revision compiled %d times, want 1", got)
+	}
+}
+
+func TestCoordinatorWaitsForDurableCandidateAdmissionBeforeSuccess(t *testing.T) {
+	harness := newCoordinatorHarness(t)
+	set, schema := readyCoordinatorSet(t, harness, 475, MinCompileSamples)
+	harness.coordinator.compileIR = func(context.Context, []Sample, json.RawMessage, TruthExtractor) (IR, ValidationReport, error) {
+		ir, report := extractorFixture("h1.name")
+		return ir, report, nil
+	}
+	entered := make(chan Candidate, 1)
+	durable := make(chan struct{})
+	harness.coordinator.submitter = candidateSubmitterFunc(func(ctx context.Context, candidate Candidate) (Submission, error) {
+		entered <- candidate
+		select {
+		case <-durable:
+			return Submission{Status: SubmissionPendingHeal}, nil
+		case <-ctx.Done():
+			return Submission{}, ctx.Err()
+		}
+	})
+
+	results := make(chan attemptResult, 1)
+	go func() {
+		results <- harness.coordinator.runClaimed(context.Background(), coordinatorTask{set: set, schema: schema})
+	}()
+	admitted := <-entered
+	if admitted.Key != set.Key || admitted.CatalogRevision != set.Revision ||
+		!bytes.Equal(admitted.Schema, schema) || !sameCandidateSamples(admitted.Samples, set.Samples) {
+		t.Fatalf("submitted candidate lost exact catalog identity: %+v", admitted)
+	}
+	select {
+	case result := <-results:
+		t.Fatalf("coordinator returned before durable admission: %#v", result)
+	default:
+	}
+	close(durable)
+	if result := <-results; result.outcome != attemptSuccess || result.reason != reasonCompiled {
+		t.Fatalf("result after durable admission = %#v", result)
 	}
 }
 

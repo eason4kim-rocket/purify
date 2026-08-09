@@ -305,11 +305,11 @@ func (s *Store) Lookup(ctx context.Context, key PageKey) (Extractor, bool, error
 	return result, found, nil
 }
 
-// Save promotes a validated IR as the active revision for its nearest logical
-// cluster, or creates a new cluster. Exact retries return the current row.
-// Replacing an active revision demotes it to stale in the same transaction
-// before the partial-unique-index-protected insert.
-func (s *Store) Save(ctx context.Context, key PageKey, ir IR, report ValidationReport) (Extractor, error) {
+// RegisterInitial installs version one for one exact fixed template cluster.
+// Exact retries return the current row. Once any revision or attributable page
+// binding exists, this path never replaces, reactivates, or recenters it;
+// callers must enter the verified healing workflow instead.
+func (s *Store) RegisterInitial(ctx context.Context, key PageKey, ir IR, report ValidationReport) (Extractor, error) {
 	if err := s.validate(); err != nil {
 		return Extractor{}, err
 	}
@@ -323,99 +323,95 @@ func (s *Store) Save(ctx context.Context, key PageKey, ir IR, report ValidationR
 
 	var saved Extractor
 	err = s.ledger.Update(ctx, func(tx ledger.WriteTx) error {
+		compileKey := CompileKey{
+			Host: key.Host, SchemaHash: key.SchemaHash, ContentProfile: DefaultCompilerProfile,
+			TemplateClusterID: templateClusterID(key.TemplateSimHash),
+			ClusterSimHash:    key.TemplateSimHash,
+		}
+		current, found, err := loadLatestCandidateTarget(ctx, tx, compileKey)
+		if err != nil {
+			return err
+		}
+		if found {
+			if current.State == StateActive {
+				active, err := loadExtractorByID(ctx, tx, current.ID)
+				if err != nil {
+					return err
+				}
+				if exactRegistration(active, key, key.TemplateSimHash, irJSON, reportJSON, irHash) {
+					bound, hasBinding, err := loadPageBindingMetadata(ctx, tx, key)
+					if err != nil {
+						return err
+					}
+					if hasBinding && bound.ID != active.ID {
+						return fmt.Errorf("%w: page is attributable to extractor %q in state %q",
+							ErrHealingRequired, bound.ID, bound.State)
+					}
+					if err := bindPage(ctx, tx, key, active.ID, maxExtractorTime(s.now(), active.UpdatedAt)); err != nil {
+						return err
+					}
+					saved = active
+					return nil
+				}
+			}
+			return fmt.Errorf("%w: exact cluster %q already has revision %d in state %q",
+				ErrHealingRequired, current.TemplateClusterID, current.Version, current.State)
+		}
 		clusters, err := loadClusterMetadata(ctx, tx, key)
 		if err != nil {
 			return err
 		}
-		clusterID := ""
-		clusterFingerprint := key.TemplateSimHash
-		var clusterUpdatedAt time.Time
-		if candidate, ok := nearestMetadata(clusters, key.TemplateSimHash); ok {
-			clusterID = candidate.TemplateClusterID
-			clusterFingerprint = candidate.TemplateSimHash
-			clusterUpdatedAt = candidate.UpdatedAt
-		} else {
-			if len(clusters) >= MaxTemplateClusters {
-				return fmt.Errorf("%w: host %q schema %q has %d clusters", ErrClusterLimit, key.Host, key.SchemaHash, len(clusters))
-			}
-			clusterID = templateClusterID(key.TemplateSimHash)
+		if nearest, matched := nearestMetadata(clusters, key.TemplateSimHash); matched {
+			return fmt.Errorf("%w: page target is within distance %d of cluster %q",
+				ErrHealingRequired, simhash.Distance(nearest.TemplateSimHash, key.TemplateSimHash),
+				nearest.TemplateClusterID)
 		}
 
-		active, hasActive, err := loadActiveCluster(ctx, tx, key, clusterID)
-		if err != nil {
+		if bound, hasBinding, err := loadPageBindingMetadata(ctx, tx, key); err != nil {
 			return err
-		}
-		if hasActive && exactRegistration(active, key, clusterFingerprint, irJSON, reportJSON, irHash) {
-			if err := bindPage(ctx, tx, key, active.ID, maxExtractorTime(s.now(), active.UpdatedAt)); err != nil {
-				return err
-			}
-			saved = active
-			return nil
+		} else if hasBinding {
+			return fmt.Errorf("%w: page is attributable to extractor %q in state %q",
+				ErrHealingRequired, bound.ID, bound.State)
 		}
 
-		version, err := nextClusterVersion(ctx, tx, key, clusterID)
+		var clusterCount int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT template_cluster_id)
+			FROM extractors WHERE host = ? AND schema_hash = ?`, key.Host, key.SchemaHash).Scan(&clusterCount); err != nil {
+			return fmt.Errorf("compiler: count extractor clusters: %w", err)
+		}
+		if clusterCount >= MaxTemplateClusters {
+			return fmt.Errorf("%w: host %q schema %q has %d clusters", ErrClusterLimit, key.Host, key.SchemaHash, clusterCount)
+		}
+		now, err := normalizeCatalogTime(s.now())
 		if err != nil {
-			return err
+			return storeInputError("store clock is invalid: %v", err)
 		}
-		now := maxExtractorTime(s.now(), clusterUpdatedAt)
-		if hasActive {
-			now = maxExtractorTime(now, active.UpdatedAt)
-		}
-		formattedNow := formatExtractorTime(now)
-		if hasActive {
-			writeResult, err := tx.ExecContext(ctx, `UPDATE extractors
-				SET state = 'stale', stale_reason = 'superseded', updated_at = ?
-				WHERE id = ? AND state = 'active'`, formattedNow, active.ID)
-			if err != nil {
-				return fmt.Errorf("compiler: demote active extractor: %w", err)
-			}
-			changed, err := writeResult.RowsAffected()
-			if err != nil {
-				return fmt.Errorf("compiler: inspect extractor demotion: %w", err)
-			}
-			if changed != 1 {
-				return storeCorruption("active extractor demotion changed %d rows", changed)
-			}
-		}
-
 		id, err := newExtractorID()
 		if err != nil {
 			return err
 		}
-		simhashBlob := encodeSimHash(clusterFingerprint)
+		formattedNow := formatExtractorTime(now)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO extractors (
 			id, host, schema_json, schema_hash, template_cluster_id,
 			template_simhash, ir, ir_hash, ir_format_version, version,
 			validation_report, validation, state, empty_window,
 			stale_reason, created_at, last_used_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', '[]', '', ?, NULL, ?)`,
-			id, key.Host, string(key.Schema), key.SchemaHash, clusterID,
-			simhashBlob, string(irJSON), irHash, ir.Version, version,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'active', '[]', '', ?, NULL, ?)`,
+			id, key.Host, string(key.Schema), key.SchemaHash, compileKey.TemplateClusterID,
+			encodeSimHash(key.TemplateSimHash), string(irJSON), irHash, ir.Version,
 			string(reportJSON), report.Overall, formattedNow, formattedNow,
 		); err != nil {
-			return fmt.Errorf("compiler: insert active extractor: %w", err)
-		}
-		if err := rebindClusterPages(ctx, tx, key, clusterID, id, now); err != nil {
-			return err
+			return fmt.Errorf("compiler: insert initial active extractor: %w", err)
 		}
 		if err := bindPage(ctx, tx, key, id, now); err != nil {
 			return err
 		}
 		saved = Extractor{
-			ID:                id,
-			Host:              key.Host,
-			Schema:            append(json.RawMessage(nil), key.Schema...),
-			SchemaHash:        key.SchemaHash,
-			TemplateClusterID: clusterID,
-			TemplateSimHash:   clusterFingerprint,
-			IR:                ir,
-			IRHash:            irHash,
-			Version:           version,
-			Validation:        report,
-			State:             StateActive,
-			EmptyWindow:       []UseOutcome{},
-			CreatedAt:         now,
-			UpdatedAt:         now,
+			ID: id, Host: key.Host, Schema: append(json.RawMessage(nil), key.Schema...),
+			SchemaHash: key.SchemaHash, TemplateClusterID: compileKey.TemplateClusterID,
+			TemplateSimHash: key.TemplateSimHash, IR: ir, IRHash: irHash, Version: 1,
+			Validation: report, State: StateActive, EmptyWindow: []UseOutcome{},
+			CreatedAt: now, UpdatedAt: now,
 		}
 		return nil
 	})
@@ -425,10 +421,16 @@ func (s *Store) Save(ctx context.Context, key PageKey, ir IR, report ValidationR
 	return cloneExtractor(saved), nil
 }
 
-// RegisterActive is the explicit lifecycle spelling retained for callers that
-// synthesize revisions directly. It is identical to Save.
+// Save is retained for callers compiled against the Phase 2 API. It now has
+// the same initial-only safety semantics as RegisterInitial.
+func (s *Store) Save(ctx context.Context, key PageKey, ir IR, report ValidationReport) (Extractor, error) {
+	return s.RegisterInitial(ctx, key, ir, report)
+}
+
+// RegisterActive is the legacy explicit spelling. Active replacement is no
+// longer admitted through this API; verified healing owns every promotion.
 func (s *Store) RegisterActive(ctx context.Context, key PageKey, ir IR, report ValidationReport) (Extractor, error) {
-	return s.Save(ctx, key, ir, report)
+	return s.RegisterInitial(ctx, key, ir, report)
 }
 
 // Get returns one extractor revision by UUID.
@@ -557,7 +559,7 @@ func (s *Store) RecordUse(ctx context.Context, key PageKey, id string, outcome U
 }
 
 // Retire performs the only explicit terminal transition. A retired extractor
-// is never reactivated; a later Save creates a new revision instead.
+// is never reactivated, and initial registration cannot append to its lineage.
 func (s *Store) Retire(ctx context.Context, id string) (Extractor, error) {
 	if err := s.validate(); err != nil {
 		return Extractor{}, err
