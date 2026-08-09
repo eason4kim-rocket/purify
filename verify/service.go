@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -190,7 +191,7 @@ type Service struct {
 // NewService validates the core dependencies. Every successful verification is
 // signed, compared to its old snapshot, and recorded atomically.
 func NewService(config Config) (*Service, error) {
-	if config.Revisitor == nil || config.Snapshots == nil || config.Receipts == nil || config.Recorder == nil {
+	if config.Revisitor == nil || config.Snapshots == nil || config.Receipts == nil || isNilVerificationRecorder(config.Recorder) {
 		return nil, ErrNotConfigured
 	}
 	ids := config.IDs
@@ -227,7 +228,29 @@ type resolvedClaim struct {
 // Verify revisits one URL, adjudicates every claim, and records all rows plus
 // at most one aggregate changed event in one transaction.
 func (s *Service) Verify(ctx context.Context, request models.VerifyRequest) (*models.VerifyResponse, error) {
-	if s == nil || s.revisitor == nil || s.snapshots == nil || s.receipts == nil || s.recorder == nil || s.ids == nil {
+	if s == nil {
+		return nil, ErrNotConfigured
+	}
+	return s.verify(ctx, request, s.recorder)
+}
+
+// VerifyWithRecorder runs the same verification pipeline as Verify but commits
+// this invocation through recorder. The override is neither stored on Service
+// nor visible to concurrent or subsequent calls.
+func (s *Service) VerifyWithRecorder(
+	ctx context.Context,
+	request models.VerifyRequest,
+	recorder VerificationRecorder,
+) (*models.VerifyResponse, error) {
+	return s.verify(ctx, request, recorder)
+}
+
+func (s *Service) verify(
+	ctx context.Context,
+	request models.VerifyRequest,
+	recorder VerificationRecorder,
+) (*models.VerifyResponse, error) {
+	if s == nil || s.revisitor == nil || s.snapshots == nil || s.receipts == nil || isNilVerificationRecorder(recorder) || s.ids == nil {
 		return nil, ErrNotConfigured
 	}
 	if ctx == nil {
@@ -356,7 +379,7 @@ func (s *Service) Verify(ctx context.Context, request models.VerifyRequest) (*mo
 			return nil, err
 		}
 	}
-	if err := s.recorder.RecordVerificationBatch(ctx, rows, outboxEvent); err != nil {
+	if err := recorder.RecordVerificationBatch(ctx, rows, outboxEvent); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrRecord, err)
 	}
 
@@ -370,6 +393,19 @@ func (s *Service) Verify(ctx context.Context, request models.VerifyRequest) (*mo
 		SnapshotID:     observation.SnapshotID,
 		VerifiedAt:     verifiedAt,
 	}, nil
+}
+
+func isNilVerificationRecorder(recorder VerificationRecorder) bool {
+	if recorder == nil {
+		return true
+	}
+	value := reflect.ValueOf(recorder)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func resolveWebhook(rawURL, secret string) (string, string, error) {

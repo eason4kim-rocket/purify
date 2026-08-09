@@ -2318,6 +2318,241 @@ func TestVerifyHonorsContextCancellation(t *testing.T) {
 	})
 }
 
+func TestVerifyWithRecorderUsesInvocationRecorderWithoutRetainingIt(t *testing.T) {
+	defaultRecorder := &fakeRecorder{}
+	overrideRecorder := &fakeRecorder{}
+	service := testService(
+		t,
+		fixture(t, "old.html"),
+		observation(fixture(t, "changed.html"), 200),
+		testSigner(t),
+		defaultRecorder,
+		nil,
+	)
+	request := models.VerifyRequest{
+		URL:           testURL,
+		WebhookURL:    "https://hooks.example.test/facts",
+		WebhookSecret: "override-secret",
+		Claims: []models.Claim{
+			testClaim("plan", `"Pro Plan"`, "Pro Plan", "#plan .title"),
+		},
+	}
+
+	overrideResponse, err := service.VerifyWithRecorder(context.Background(), request, overrideRecorder)
+	if err != nil {
+		t.Fatalf("VerifyWithRecorder() error = %v", err)
+	}
+	if defaultRecorder.callCount() != 0 || overrideRecorder.callCount() != 1 {
+		t.Fatalf("record calls after override = (default=%d, override=%d), want (0, 1)", defaultRecorder.callCount(), overrideRecorder.callCount())
+	}
+
+	defaultResponse, err := service.Verify(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if defaultRecorder.callCount() != 1 || overrideRecorder.callCount() != 1 {
+		t.Fatalf("record calls after Verify = (default=%d, override=%d), want (1, 1)", defaultRecorder.callCount(), overrideRecorder.callCount())
+	}
+	if !reflect.DeepEqual(overrideResponse, defaultResponse) {
+		t.Fatalf("responses differ:\noverride=%#v\ndefault=%#v", overrideResponse, defaultResponse)
+	}
+	if !reflect.DeepEqual(overrideRecorder.committedBatches(), defaultRecorder.committedBatches()) {
+		t.Fatalf("recorded rows differ:\noverride=%#v\ndefault=%#v", overrideRecorder.committedBatches(), defaultRecorder.committedBatches())
+	}
+	if !reflect.DeepEqual(overrideRecorder.committedOutboxEvents(), defaultRecorder.committedOutboxEvents()) {
+		t.Fatalf("outbox events differ:\noverride=%#v\ndefault=%#v", overrideRecorder.committedOutboxEvents(), defaultRecorder.committedOutboxEvents())
+	}
+}
+
+func TestVerifyWithRecorderRejectsNilRecorderBeforeExternalWork(t *testing.T) {
+	var revisits atomic.Int32
+	var snapshotReads atomic.Int32
+	var idCalls atomic.Int32
+	codec := &countingReceiptCodec{delegate: testSigner(t)}
+	service := mustService(t, Config{
+		Revisitor: revisitorFunc(func(context.Context, string) (RevisitResult, error) {
+			revisits.Add(1)
+			return RevisitResult{}, errors.New("unexpected revisit")
+		}),
+		Snapshots: snapshotReaderFunc(func(snapshot.ID) ([]byte, snapshot.Meta, error) {
+			snapshotReads.Add(1)
+			return nil, snapshot.Meta{}, errors.New("unexpected snapshot read")
+		}),
+		Receipts: codec,
+		Recorder: &fakeRecorder{},
+		IDs: func() (string, error) {
+			idCalls.Add(1)
+			return "unexpected-id", nil
+		},
+	})
+	request := models.VerifyRequest{
+		URL:    testURL,
+		Claims: []models.Claim{testClaim("plan", `"Pro Plan"`, "Pro Plan", "#plan .title")},
+	}
+	var typedNil *fakeRecorder
+	tests := []struct {
+		name     string
+		recorder VerificationRecorder
+	}{
+		{name: "nil interface"},
+		{name: "typed nil", recorder: typedNil},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response, err := service.VerifyWithRecorder(context.Background(), request, test.recorder)
+			if response != nil || !errors.Is(err, ErrNotConfigured) {
+				t.Fatalf("VerifyWithRecorder() = (%#v, %v), want nil + ErrNotConfigured", response, err)
+			}
+		})
+	}
+	if revisits.Load() != 0 || snapshotReads.Load() != 0 || codec.verifyCalls.Load() != 0 || codec.signCalls.Load() != 0 || idCalls.Load() != 0 {
+		t.Fatalf(
+			"nil recorder reached dependencies: revisits=%d snapshots=%d verifies=%d signs=%d ids=%d",
+			revisits.Load(), snapshotReads.Load(), codec.verifyCalls.Load(), codec.signCalls.Load(), idCalls.Load(),
+		)
+	}
+}
+
+func TestVerifyWithRecorderPreservesRecorderFailureSemantics(t *testing.T) {
+	newService := func(t *testing.T, defaultRecorder VerificationRecorder) *Service {
+		t.Helper()
+		return testService(
+			t,
+			fixture(t, "old.html"),
+			observation(fixture(t, "changed.html"), 200),
+			testSigner(t),
+			defaultRecorder,
+			nil,
+		)
+	}
+	request := models.VerifyRequest{
+		URL:    testURL,
+		Claims: []models.Claim{testClaim("plan", `"Pro Plan"`, "Pro Plan", "#plan .title")},
+	}
+
+	t.Run("error", func(t *testing.T) {
+		defaultRecorder := &fakeRecorder{}
+		marker := errors.New("override record failed")
+		service := newService(t, defaultRecorder)
+		response, err := service.VerifyWithRecorder(context.Background(), request, verificationRecorderFunc(
+			func(context.Context, []ledger.Verification, *ledger.OutboxEvent) error { return marker },
+		))
+		if response != nil || !errors.Is(err, ErrRecord) || !errors.Is(err, marker) {
+			t.Fatalf("VerifyWithRecorder() = (%#v, %v), want nil + ErrRecord + marker", response, err)
+		}
+		if defaultRecorder.callCount() != 0 {
+			t.Fatal("failed override leaked to default recorder")
+		}
+	})
+
+	t.Run("cancellation", func(t *testing.T) {
+		defaultRecorder := &fakeRecorder{}
+		service := newService(t, defaultRecorder)
+		ctx, cancel := context.WithCancel(context.Background())
+		response, err := service.VerifyWithRecorder(ctx, request, verificationRecorderFunc(
+			func(callCtx context.Context, _ []ledger.Verification, _ *ledger.OutboxEvent) error {
+				cancel()
+				return callCtx.Err()
+			},
+		))
+		if response != nil || !errors.Is(err, ErrRecord) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("VerifyWithRecorder() = (%#v, %v), want nil + ErrRecord + context.Canceled", response, err)
+		}
+		if defaultRecorder.callCount() != 0 {
+			t.Fatal("canceled override leaked to default recorder")
+		}
+	})
+
+	t.Run("panic", func(t *testing.T) {
+		defaultRecorder := &fakeRecorder{}
+		service := newService(t, defaultRecorder)
+		marker := &struct{ label string }{label: "override panic"}
+		defer func() {
+			if recovered := recover(); recovered != marker {
+				t.Fatalf("recovered panic = %#v, want original marker %#v", recovered, marker)
+			}
+			if defaultRecorder.callCount() != 0 {
+				t.Fatal("panicking override leaked to default recorder")
+			}
+		}()
+		_, _ = service.VerifyWithRecorder(context.Background(), request, verificationRecorderFunc(
+			func(context.Context, []ledger.Verification, *ledger.OutboxEvent) error { panic(marker) },
+		))
+		t.Fatal("VerifyWithRecorder() returned after recorder panic")
+	})
+}
+
+func TestVerifyWithRecorderConcurrentOverridesDoNotCrossWire(t *testing.T) {
+	const callsPerRecorder = 16
+	defaultRecorder := &fakeRecorder{}
+	leftRecorder := &fakeRecorder{}
+	rightRecorder := &fakeRecorder{}
+	service := testService(
+		t,
+		fixture(t, "old.html"),
+		observation(fixture(t, "same.html"), 200),
+		testSigner(t),
+		defaultRecorder,
+		nil,
+	)
+
+	start := make(chan struct{})
+	errorsSeen := make(chan error, callsPerRecorder*2)
+	var workers sync.WaitGroup
+	for index := range callsPerRecorder * 2 {
+		recorder := VerificationRecorder(leftRecorder)
+		path := "left"
+		if index%2 == 1 {
+			recorder = rightRecorder
+			path = "right"
+		}
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			_, err := service.VerifyWithRecorder(context.Background(), models.VerifyRequest{
+				URL:    testURL,
+				Claims: []models.Claim{testClaim(path, `"Pro Plan"`, "Pro Plan", "#plan .title")},
+			}, recorder)
+			if err != nil {
+				errorsSeen <- err
+			}
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(errorsSeen)
+	for err := range errorsSeen {
+		t.Errorf("VerifyWithRecorder() error = %v", err)
+	}
+
+	assertRecorderPaths := func(name string, recorder *fakeRecorder, wantPath string) {
+		t.Helper()
+		batches := recorder.committedBatches()
+		if len(batches) != callsPerRecorder {
+			t.Fatalf("%s recorder batches = %d, want %d", name, len(batches), callsPerRecorder)
+		}
+		for index, batch := range batches {
+			if len(batch) != 1 || batch[0].Path != wantPath {
+				t.Fatalf("%s recorder batch[%d] = %#v, want one %q row", name, index, batch, wantPath)
+			}
+		}
+	}
+	assertRecorderPaths("left", leftRecorder, "left")
+	assertRecorderPaths("right", rightRecorder, "right")
+	if defaultRecorder.callCount() != 0 {
+		t.Fatalf("default recorder calls = %d, want 0", defaultRecorder.callCount())
+	}
+
+	_, err := service.Verify(context.Background(), models.VerifyRequest{
+		URL:    testURL,
+		Claims: []models.Claim{testClaim("default", `"Pro Plan"`, "Pro Plan", "#plan .title")},
+	})
+	if err != nil || defaultRecorder.callCount() != 1 {
+		t.Fatalf("Verify() after concurrent overrides = (err=%v, calls=%d), want success + one default record", err, defaultRecorder.callCount())
+	}
+}
+
 func TestServiceConcurrentVerify(t *testing.T) {
 	const calls = 32
 	oldHTML := fixture(t, "old.html")
@@ -2392,6 +2627,7 @@ func TestNewServiceRequiresCoreDependencies(t *testing.T) {
 		{name: "snapshots", mutate: func(config *Config) { config.Snapshots = nil }},
 		{name: "receipts", mutate: func(config *Config) { config.Receipts = nil }},
 		{name: "recorder", mutate: func(config *Config) { config.Recorder = nil }},
+		{name: "typed nil recorder", mutate: func(config *Config) { config.Recorder = (*fakeRecorder)(nil) }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -2409,6 +2645,16 @@ type revisitorFunc func(context.Context, string) (RevisitResult, error)
 
 func (f revisitorFunc) Revisit(ctx context.Context, target string) (RevisitResult, error) {
 	return f(ctx, target)
+}
+
+type verificationRecorderFunc func(context.Context, []ledger.Verification, *ledger.OutboxEvent) error
+
+func (f verificationRecorderFunc) RecordVerificationBatch(
+	ctx context.Context,
+	rows []ledger.Verification,
+	event *ledger.OutboxEvent,
+) error {
+	return f(ctx, rows, event)
 }
 
 type revisionResolverFunc func(context.Context, string) (compiler.Extractor, error)
