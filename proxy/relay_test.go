@@ -225,6 +225,24 @@ func TestStartDirectRelayRejectsNilDialer(t *testing.T) {
 	}
 }
 
+func TestNewExternalDialContextValidatesProxyAndNetwork(t *testing.T) {
+	for _, rawURL := range []string{"", "://bad", "ftp://proxy.test:21", "http:///missing-host", "http://:secret@proxy.test:8080", "http://proxy.test:0", "http://proxy.test/path", "http://proxy.test?secret=value"} {
+		if _, err := NewExternalDialContext(rawURL); err == nil {
+			t.Errorf("NewExternalDialContext(%q) error = nil", rawURL)
+		}
+	}
+	dial, err := NewExternalDialContext("http://proxy.test:8080")
+	if err != nil {
+		t.Fatalf("NewExternalDialContext(valid) error = %v", err)
+	}
+	if _, err := dial(context.Background(), "udp", "1.1.1.1:53"); err == nil {
+		t.Fatal("external dialer accepted udp")
+	}
+	if _, err := NewExternalDialContext("https://proxy.test"); err != nil {
+		t.Fatalf("NewExternalDialContext(default port) error = %v", err)
+	}
+}
+
 func TestDirectRelayPassesDomainIPv4IPv6AndPortToDialer(t *testing.T) {
 	attempts := make(chan string, 3)
 	relay, err := StartDirectRelay(func(_ context.Context, network, address string) (net.Conn, error) {

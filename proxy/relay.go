@@ -44,9 +44,61 @@ type Relay struct {
 // that forwards connections through the given external proxy URL.
 // Supports both socks5:// and http:// external proxies with auth.
 func StartRelay(externalProxyURL string) (*Relay, error) {
-	return startRelay(func(ctx context.Context, _ string, target string) (net.Conn, error) {
+	dialContext, err := NewExternalDialContext(externalProxyURL)
+	if err != nil {
+		return nil, err
+	}
+	return startRelay(dialContext)
+}
+
+// NewExternalDialContext returns a context-aware connector that routes literal
+// targets through one configured HTTP(S) or SOCKS5 proxy. It is intended as
+// the trusted lower layer of publicnet.Policy: policy resolves and validates
+// the destination first, while this connector preserves deployment proxying.
+func NewExternalDialContext(externalProxyURL string) (publicnet.DialContextFunc, error) {
+	parsed, err := url.Parse(externalProxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("proxy relay: parse external proxy URL: %w", err)
+	}
+	if parsed.Host == "" || parsed.Opaque != "" || parsed.User != nil && parsed.User.Username() == "" ||
+		parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != "" && parsed.Path != "/" {
+		return nil, errors.New("proxy relay: external proxy URL is invalid")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	defaultPort := ""
+	switch parsed.Scheme {
+	case "http":
+		defaultPort = "80"
+	case "https":
+		defaultPort = "443"
+	case "socks5", "socks5h":
+		defaultPort = "1080"
+	default:
+		return nil, fmt.Errorf("proxy relay: unsupported proxy scheme %q", parsed.Scheme)
+	}
+	hostname := parsed.Hostname()
+	if hostname == "" {
+		return nil, errors.New("proxy relay: external proxy URL is invalid")
+	}
+	port := parsed.Port()
+	if port == "" {
+		port = defaultPort
+	}
+	portNumber, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || portNumber == 0 {
+		return nil, errors.New("proxy relay: external proxy port must be between 1 and 65535")
+	}
+	parsed.Host = net.JoinHostPort(hostname, strconv.FormatUint(portNumber, 10))
+	parsed.Path = ""
+	externalProxyURL = parsed.String()
+	return func(ctx context.Context, network, target string) (net.Conn, error) {
+		switch network {
+		case "tcp", "tcp4", "tcp6":
+		default:
+			return nil, fmt.Errorf("proxy relay: unsupported network %q", network)
+		}
 		return dialExternal(ctx, externalProxyURL, target)
-	})
+	}, nil
 }
 
 // StartDirectRelay creates a local SOCKS5 relay whose every CONNECT request is
