@@ -13,7 +13,50 @@ import (
 	"time"
 
 	"github.com/use-agent/purify/config"
+	"github.com/use-agent/purify/engine"
+	"github.com/use-agent/purify/models"
+	"github.com/use-agent/purify/scraper"
 )
+
+type boundedRodScraperStub struct {
+	maximumBodyBytes int64
+	request          *models.ScrapeRequest
+	result           *scraper.ScrapeResult
+}
+
+func (stub *boundedRodScraperStub) DoScrapeRodBounded(_ context.Context, request *models.ScrapeRequest, maximumBodyBytes int64) (*scraper.ScrapeResult, error) {
+	stub.request = request
+	stub.maximumBodyBytes = maximumBodyBytes
+	return stub.result, nil
+}
+
+func TestNewRodFetchPassesMaximumBodyBytesIntoScraper(t *testing.T) {
+	stub := &boundedRodScraperStub{result: &scraper.ScrapeResult{
+		RawHTML:     "<html>bounded</html>",
+		Title:       "bounded",
+		StatusCode:  http.StatusOK,
+		FinalURL:    "https://example.test/final",
+		ContentType: "text/html",
+	}}
+	fetch := newRodFetch(stub)
+	result, err := fetch(context.Background(), &engine.FetchRequest{
+		URL:              "https://example.test/start",
+		Timeout:          2 * time.Second,
+		MaximumBodyBytes: 12345,
+	})
+	if err != nil {
+		t.Fatalf("newRodFetch callback error = %v", err)
+	}
+	if stub.maximumBodyBytes != 12345 {
+		t.Fatalf("DoScrapeRodBounded maximum = %d", stub.maximumBodyBytes)
+	}
+	if stub.request == nil || stub.request.URL != "https://example.test/start" {
+		t.Fatalf("mapped scrape request = %#v", stub.request)
+	}
+	if result.HTML != stub.result.RawHTML || result.FinalURL != stub.result.FinalURL {
+		t.Fatalf("mapped fetch result = %#v", result)
+	}
+}
 
 func TestOpenSnapshotStoreDisabledDoesNotWrite(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "must-not-exist")
@@ -26,6 +69,50 @@ func TestOpenSnapshotStoreDisabledDoesNotWrite(t *testing.T) {
 	}
 	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
 		t.Fatalf("disabled snapshot setup touched disk: stat error = %v", err)
+	}
+}
+
+func TestNewOutboundPolicyValidatesConfiguredProxy(t *testing.T) {
+	policy, err := newOutboundPolicy("")
+	if err != nil {
+		t.Fatalf("newOutboundPolicy(direct) error = %v", err)
+	}
+	if policy == nil {
+		t.Fatal("newOutboundPolicy(direct) returned nil")
+	}
+
+	for _, proxyURL := range []string{
+		"not a proxy URL",
+		"ftp://proxy.example:21",
+		"http://proxy.example:0",
+		"socks5://:1080",
+	} {
+		t.Run(proxyURL, func(t *testing.T) {
+			if policy, err := newOutboundPolicy(proxyURL); err == nil || policy != nil {
+				t.Fatalf("newOutboundPolicy(%q) = (%#v, %v), want nil + error", proxyURL, policy, err)
+			}
+		})
+	}
+}
+
+func TestVerifyRevisitTimeoutUsesExistingScraperBounds(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		config config.ScraperConfig
+		want   time.Duration
+	}{
+		{name: "default", config: config.ScraperConfig{DefaultTimeout: 30 * time.Second, MaxTimeout: 120 * time.Second}, want: 30 * time.Second},
+		{name: "zero default", config: config.ScraperConfig{}, want: 30 * time.Second},
+		{name: "negative default", config: config.ScraperConfig{DefaultTimeout: -time.Second}, want: 30 * time.Second},
+		{name: "scraper maximum", config: config.ScraperConfig{DefaultTimeout: 30 * time.Second, MaxTimeout: 5 * time.Second}, want: 5 * time.Second},
+		{name: "verification hard maximum", config: config.ScraperConfig{DefaultTimeout: 5 * time.Minute}, want: 120 * time.Second},
+		{name: "both maxima", config: config.ScraperConfig{DefaultTimeout: 5 * time.Minute, MaxTimeout: 3 * time.Minute}, want: 120 * time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := verifyRevisitTimeout(test.config); got != test.want {
+				t.Fatalf("verifyRevisitTimeout() = %s, want %s", got, test.want)
+			}
+		})
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/use-agent/purify/api"
+	"github.com/use-agent/purify/api/handler"
 	"github.com/use-agent/purify/batch"
 	"github.com/use-agent/purify/cache"
 	"github.com/use-agent/purify/cleaner"
@@ -22,11 +23,24 @@ import (
 	"github.com/use-agent/purify/engine"
 	extractdomain "github.com/use-agent/purify/extract"
 	"github.com/use-agent/purify/jobs"
+	"github.com/use-agent/purify/ledger"
 	"github.com/use-agent/purify/llm"
+	"github.com/use-agent/purify/models"
+	"github.com/use-agent/purify/proxy"
+	"github.com/use-agent/purify/publicnet"
 	"github.com/use-agent/purify/receipts"
+	"github.com/use-agent/purify/revisit"
 	"github.com/use-agent/purify/scrape"
 	"github.com/use-agent/purify/scraper"
 	"github.com/use-agent/purify/snapshot"
+	verifydomain "github.com/use-agent/purify/verify"
+	"github.com/use-agent/purify/webhook"
+)
+
+const (
+	defaultVerifyRevisitTimeout             = 30 * time.Second
+	maximumVerifyRevisitTimeout             = 120 * time.Second
+	maximumVerifyObservationBodyBytes int64 = 4 << 20
 )
 
 func main() {
@@ -60,6 +74,13 @@ func run() error {
 	}
 	slog.Info("receipt signing enabled", "kid", receiptKID)
 
+	// ── 2b. Initialise the verification ledger ─────────────────────
+	ledgerStore, err := ledger.Open(cfg.Storage.DataDir)
+	if err != nil {
+		return fmt.Errorf("initialise verification ledger: %w", err)
+	}
+	defer ledgerStore.Close()
+
 	// ── 3. Initialise scraper (launches browser) ────────────────────
 	sc, err := scraper.NewScraper(cfg.Browser, cfg.Scraper)
 	if err != nil {
@@ -78,6 +99,67 @@ func run() error {
 		slog.Info("snapshot store enabled", "dataDir", cfg.Storage.DataDir)
 	} else {
 		slog.Info("snapshot store disabled")
+	}
+
+	// ── 3b. Enforce one public-only outbound policy ─────────────────
+	outboundPolicy, err := newOutboundPolicy(cfg.Browser.DefaultProxy)
+	if err != nil {
+		return fmt.Errorf("initialise outbound network policy: %w", err)
+	}
+
+	// ── 3c. Deliver transactionally queued verification webhooks ───
+	webhookClient, err := webhook.NewPublicHTTPClient(outboundPolicy, webhook.DefaultOutboxHTTPTimeout)
+	if err != nil {
+		return fmt.Errorf("initialise webhook HTTP client: %w", err)
+	}
+	defer webhookClient.CloseIdleConnections()
+	webhookDeliverer, err := webhook.NewRawDeliverer(webhookClient)
+	if err != nil {
+		return fmt.Errorf("initialise webhook deliverer: %w", err)
+	}
+	outboxWorker, err := webhook.NewOutboxWorker(context.Background(), ledgerStore, webhookDeliverer, webhook.OutboxWorkerOptions{})
+	if err != nil {
+		return fmt.Errorf("initialise webhook outbox worker: %w", err)
+	}
+	defer outboxWorker.Close()
+
+	// ── 3d. Build a provenance-preserving verification service ──────
+	var verifyService handler.VerifyService
+	if snapshotStore != nil {
+		safeRelay, relayErr := proxy.StartDirectRelay(outboundPolicy.DialContext)
+		if relayErr != nil {
+			return fmt.Errorf("initialise safe browser relay: %w", relayErr)
+		}
+		defer safeRelay.Close()
+
+		rodFetch := newRodFetch(sc)
+		revisitService, revisitErr := revisit.New(revisit.Config{
+			Engines: []engine.Engine{
+				engine.NewHTTPEngine(""),
+				engine.NewRodEngine(rodFetch, false),
+				engine.NewRodEngine(rodFetch, true),
+			},
+			Finalizer:        sc,
+			Policy:           outboundPolicy,
+			SafeProxyURL:     "socks5://" + safeRelay.Addr(),
+			Timeout:          verifyRevisitTimeout(cfg.Scraper),
+			MaximumBodyBytes: maximumVerifyObservationBodyBytes,
+		})
+		if revisitErr != nil {
+			return fmt.Errorf("initialise page revisit service: %w", revisitErr)
+		}
+		verifyService, err = verifydomain.NewService(verifydomain.Config{
+			Revisitor: revisitService,
+			Snapshots: snapshotStore,
+			Receipts:  receiptSigner,
+			Recorder:  ledgerStore,
+		})
+		if err != nil {
+			return fmt.Errorf("initialise fact verification service: %w", err)
+		}
+		slog.Info("fact verification enabled")
+	} else {
+		slog.Info("fact verification unavailable because snapshots are disabled")
 	}
 
 	// ── 4. Initialise cleaner ───────────────────────────────────────
@@ -130,7 +212,7 @@ func run() error {
 
 	// ── 5. Setup router ─────────────────────────────────────────────
 	startTime := time.Now()
-	router := api.NewRouter(sc, extractService, receiptSigner, cfg, cc, startTime, scrapeService, batchService, crawlService, mapService)
+	router := api.NewRouter(sc, extractService, receiptSigner, cfg, cc, startTime, scrapeService, batchService, crawlService, mapService, verifyService)
 
 	// ── 6. Start HTTP server ────────────────────────────────────────
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -245,20 +327,7 @@ func newCanonicalScrapeService(sc *scraper.Scraper, cl *cleaner.Cleaner, cc *cac
 
 	// Rod callbacks bypass the legacy dispatcher. The canonical service owns
 	// ordered escalation and persists only the quality-selected candidate.
-	rodFetch := func(ctx context.Context, request *engine.FetchRequest) (*engine.FetchResult, error) {
-		scrapeRequest := scraper.ScrapeRequestFromFetchRequest(request)
-		result, err := sc.DoScrapeRod(ctx, scrapeRequest)
-		if err != nil {
-			return nil, err
-		}
-		return &engine.FetchResult{
-			HTML:        result.RawHTML,
-			Title:       result.Title,
-			StatusCode:  result.StatusCode,
-			FinalURL:    result.FinalURL,
-			ContentType: result.ContentType,
-		}, nil
-	}
+	rodFetch := newRodFetch(sc)
 
 	rodEngine := engine.NewRodEngine(rodFetch, false)
 	stealthEngine := engine.NewRodEngine(rodFetch, true)
@@ -280,6 +349,53 @@ func newCanonicalScrapeService(sc *scraper.Scraper, cl *cleaner.Cleaner, cc *cac
 	return scrape.NewService(fetchers, cl, cc, sc, scrape.Config{
 		MaximumTimeout: cfg.Scraper.MaxTimeout,
 	})
+}
+
+type boundedRodScraper interface {
+	DoScrapeRodBounded(context.Context, *models.ScrapeRequest, int64) (*scraper.ScrapeResult, error)
+}
+
+func newRodFetch(sc boundedRodScraper) engine.RodFetchFunc {
+	return func(ctx context.Context, request *engine.FetchRequest) (*engine.FetchResult, error) {
+		scrapeRequest := scraper.ScrapeRequestFromFetchRequest(request)
+		result, err := sc.DoScrapeRodBounded(ctx, scrapeRequest, request.MaximumBodyBytes)
+		if err != nil {
+			return nil, err
+		}
+		return &engine.FetchResult{
+			HTML:        result.RawHTML,
+			Title:       result.Title,
+			StatusCode:  result.StatusCode,
+			FinalURL:    result.FinalURL,
+			ContentType: result.ContentType,
+		}, nil
+	}
+}
+
+func newOutboundPolicy(defaultProxyURL string) (*publicnet.Policy, error) {
+	options := publicnet.Options{}
+	if defaultProxyURL != "" {
+		dialContext, err := proxy.NewExternalDialContext(defaultProxyURL)
+		if err != nil {
+			return nil, err
+		}
+		options.DialContext = dialContext
+	}
+	return publicnet.NewPolicy(options), nil
+}
+
+func verifyRevisitTimeout(scraperConfig config.ScraperConfig) time.Duration {
+	timeout := scraperConfig.DefaultTimeout
+	if timeout <= 0 {
+		timeout = defaultVerifyRevisitTimeout
+	}
+	if scraperConfig.MaxTimeout > 0 && timeout > scraperConfig.MaxTimeout {
+		timeout = scraperConfig.MaxTimeout
+	}
+	if timeout > maximumVerifyRevisitTimeout {
+		timeout = maximumVerifyRevisitTimeout
+	}
+	return timeout
 }
 
 func openSnapshotStore(cfg config.StorageConfig) (*snapshot.Store, error) {

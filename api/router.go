@@ -20,7 +20,7 @@ import (
 //	API:     Auth (if enabled) → RateLimit
 //
 // Health and receipt verification endpoints are intentionally outside auth.
-func NewRouter(sc *scraper.Scraper, extractService handler.ExtractService, receiptSigner *receipts.Signer, cfg *config.Config, cc *cache.Cache, startTime time.Time, scrapeRunner handler.ScrapeRunner, batchService handler.BatchService, crawlService handler.CrawlService, mapService handler.MapService) *gin.Engine {
+func NewRouter(sc *scraper.Scraper, extractService handler.ExtractService, receiptSigner *receipts.Signer, cfg *config.Config, cc *cache.Cache, startTime time.Time, scrapeRunner handler.ScrapeRunner, batchService handler.BatchService, crawlService handler.CrawlService, mapService handler.MapService, verifyService handler.VerifyService) *gin.Engine {
 	gin.SetMode(cfg.Server.Mode)
 
 	r := gin.New()
@@ -59,6 +59,9 @@ func NewRouter(sc *scraper.Scraper, extractService handler.ExtractService, recei
 
 	// Map
 	protected.POST("/map", handler.PostMap(mapService))
+
+	// Re-verify evidence-backed facts against a durable current observation.
+	protected.POST("/verify", handler.Verify(verifyService))
 
 	return r
 }
