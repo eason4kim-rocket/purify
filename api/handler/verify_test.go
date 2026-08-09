@@ -74,6 +74,7 @@ func TestVerifyHTTPAdapterMapsErrorsWithoutLeakingInternals(t *testing.T) {
 		{name: "invalid receipt", err: verifydomain.ErrInvalidReceipt, wantStatus: http.StatusBadRequest, wantCode: models.ErrCodeInvalidReceipt},
 		{name: "not configured", err: verifydomain.ErrNotConfigured, wantStatus: http.StatusServiceUnavailable, wantCode: models.ErrCodeEvidenceUnavailable},
 		{name: "missing snapshot", err: fmt.Errorf("%w: disk-path-secret", verifydomain.ErrSnapshot), wantStatus: http.StatusServiceUnavailable, wantCode: models.ErrCodeEvidenceUnavailable},
+		{name: "compiled evidence unavailable", err: fmt.Errorf("%w: disk-path-secret", verifydomain.ErrEvidenceUnavailable), wantStatus: http.StatusServiceUnavailable, wantCode: models.ErrCodeEvidenceUnavailable},
 		{name: "deadline", err: context.DeadlineExceeded, wantStatus: http.StatusGatewayTimeout, wantCode: models.ErrCodeTimeout},
 		{name: "canceled", err: context.Canceled, wantStatus: http.StatusGatewayTimeout, wantCode: models.ErrCodeTimeout},
 		{name: "wrapped revisit deadline", err: fmt.Errorf("%w: %w", verifydomain.ErrRevisit, context.DeadlineExceeded), wantStatus: http.StatusGatewayTimeout, wantCode: models.ErrCodeTimeout},

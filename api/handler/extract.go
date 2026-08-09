@@ -88,6 +88,8 @@ func mapExtractErrorToStatus(e *models.ScrapeError) int {
 		return http.StatusBadGateway
 	case models.ErrCodeEvidenceUnavailable:
 		return http.StatusServiceUnavailable
+	case models.ErrCodeExtractorUnavailable:
+		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
 	}

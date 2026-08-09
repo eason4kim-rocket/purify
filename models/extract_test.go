@@ -125,7 +125,7 @@ func TestExtractResponseCompiledExtractorContract(t *testing.T) {
 	encoded, err := json.Marshal(ExtractResponse{
 		Success: true,
 		Extractor: &ExtractorMetadata{
-			ID:         42,
+			ID:         "123e4567-e89b-12d3-a456-426614174000",
 			Version:    3,
 			CompiledAt: compiledAt,
 			Validation: 0.97,
@@ -143,7 +143,15 @@ func TestExtractResponseCompiledExtractorContract(t *testing.T) {
 	if err := json.Unmarshal(document["extractor"], &extractor); err != nil {
 		t.Fatalf("extractor decode error = %v", err)
 	}
-	if extractor["id"] != float64(42) || extractor["version"] != float64(3) || extractor["validation"] != 0.97 || extractor["mode"] != "compiled" || extractor["compiled_at"] != compiledAt.Format(time.RFC3339) {
+	if extractor["id"] != "123e4567-e89b-12d3-a456-426614174000" || extractor["version"] != float64(3) || extractor["validation"] != 0.97 || extractor["mode"] != "compiled" || extractor["compiled_at"] != compiledAt.Format(time.RFC3339) {
 		t.Fatalf("extractor = %#v", extractor)
+	}
+}
+
+func TestExtractRequestDefaultsEngineToAuto(t *testing.T) {
+	request := ExtractRequest{}
+	request.Defaults()
+	if request.Engine != "auto" {
+		t.Fatalf("Engine = %q, want auto", request.Engine)
 	}
 }

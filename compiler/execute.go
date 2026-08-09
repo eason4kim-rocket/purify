@@ -28,6 +28,77 @@ func Execute(ir IR, html string) (json.RawMessage, map[string]evidence.Anchor, e
 	return executeWithOutputLimit(ir, html, MaxOutputBytes)
 }
 
+// ReplayResult is the exact result of evaluating one immutable field rule.
+// Found is false only when the selector, attribute, or regular expression did
+// not match. Value and Anchor are populated together for a successful replay.
+type ReplayResult struct {
+	Value  json.RawMessage
+	Anchor evidence.Anchor
+	Found  bool
+}
+
+// ReplayField evaluates one named rule with the same selector, attribute,
+// regular-expression, transform, type-conversion, and SingleMatcher semantics
+// as Execute. Unlike Execute, a missing required field is reported as
+// Found=false so a verifier can distinguish a genuinely gone field from a
+// corrupt or otherwise non-executable revision.
+func ReplayField(ir IR, fieldName, html string) (ReplayResult, error) {
+	if err := validateExecutionResources(ir, html); err != nil {
+		return ReplayResult{}, err
+	}
+	rules, err := compileRules(ir.Fields)
+	if err != nil {
+		return ReplayResult{}, err
+	}
+
+	var selected *compiledRule
+	for index := range rules {
+		if rules[index].rule.Name == fieldName {
+			selected = &rules[index]
+			break
+		}
+	}
+	if selected == nil {
+		return ReplayResult{}, &FieldError{
+			Field: fieldName,
+			Stage: "name",
+			Err:   errors.New("field is absent from the extraction revision"),
+		}
+	}
+
+	document, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	if err != nil {
+		return ReplayResult{}, fmt.Errorf("compiler: parse HTML: %w", err)
+	}
+	// Missing is a fact-level state during replay even when the production rule
+	// is required. All other rule behavior remains identical.
+	replayRule := *selected
+	replayRule.rule.Required = false
+	value, quote, found, err := executeRule(document, replayRule)
+	if err != nil {
+		return ReplayResult{}, err
+	}
+	if !found {
+		return ReplayResult{Found: false}, nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return ReplayResult{}, fmt.Errorf("compiler: encode replayed field %q: %w", fieldName, err)
+	}
+	if len(encoded) > MaxOutputBytes {
+		return ReplayResult{}, fmt.Errorf("%w: replay output is %d bytes, maximum is %d", ErrResourceLimit, len(encoded), MaxOutputBytes)
+	}
+	return ReplayResult{
+		Value: append(json.RawMessage(nil), encoded...),
+		Anchor: evidence.Anchor{
+			Quote:    quote,
+			Selector: selected.rule.Selector,
+			Method:   evidence.MethodCompiled,
+		},
+		Found: true,
+	}, nil
+}
+
 func executeWithOutputLimit(ir IR, html string, outputLimit int) (json.RawMessage, map[string]evidence.Anchor, error) {
 	if err := validateExecutionResources(ir, html); err != nil {
 		return nil, nil, err

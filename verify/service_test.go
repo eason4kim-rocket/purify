@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/use-agent/purify/compiler"
 	"github.com/use-agent/purify/evidence"
 	"github.com/use-agent/purify/ledger"
 	"github.com/use-agent/purify/models"
@@ -234,12 +235,11 @@ func TestVerifyReceiptRestoresClaimAndRefreshesReceipt(t *testing.T) {
 	signer := testSigner(t)
 	oldAnchor := testAnchor("Pro Plan", "#plan .title")
 	oldReceipt, err := signer.Sign(receipts.Payload{
-		URL:              testURL,
-		Path:             "plan",
-		Value:            json.RawMessage(`"Pro Plan"`),
-		Anchor:           oldAnchor,
-		ExtractorVersion: "extractor-7",
-		IssuedAt:         oldFetchedAt,
+		URL:      testURL,
+		Path:     "plan",
+		Value:    json.RawMessage(`"Pro Plan"`),
+		Anchor:   oldAnchor,
+		IssuedAt: oldFetchedAt,
 	})
 	if err != nil {
 		t.Fatalf("Sign(old receipt) error = %v", err)
@@ -262,8 +262,355 @@ func TestVerifyReceiptRestoresClaimAndRefreshesReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify(refreshed receipt) error = %v", err)
 	}
-	if refreshed.URL != testFinalURL || refreshed.Path != "plan" || refreshed.ExtractorVersion != "extractor-7" || refreshed.Anchor.SnapshotID != newSnapshotID {
+	if refreshed.URL != testFinalURL || refreshed.Path != "plan" || refreshed.ExtractorVersion != "" || refreshed.Anchor.SnapshotID != newSnapshotID {
 		t.Fatalf("refreshed payload = %#v", refreshed)
+	}
+}
+
+func TestVerifyCompiledReceiptReplaysImmutableRuleOnOldAndCurrentSnapshots(t *testing.T) {
+	const extractorID = "123e4567-e89b-12d3-a456-426614174000"
+	tests := []struct {
+		name          string
+		rule          compiler.FieldRule
+		oldHTML       string
+		currentHTML   string
+		oldValue      json.RawMessage
+		wantStatus    models.VerifyStatus
+		wantNewValue  json.RawMessage
+		wantQuote     string
+		wantRange     [2]int
+		wantGoneScope models.VerifyGoneScope
+	}{
+		{
+			name:        "date attribute unchanged",
+			rule:        compiler.FieldRule{Name: "released", Selector: "time.release", Attr: "datetime", Transforms: []string{"parse_date"}, Type: compiler.TypeDate, Required: true},
+			oldHTML:     `<time class="release" datetime="August 9, 2026 14:30 +08:00">Launch</time>`,
+			currentHTML: `<time class="release" datetime="August 9, 2026 14:30 +08:00">Updated label</time>`,
+			oldValue:    json.RawMessage(`"2026-08-09T06:30:00Z"`),
+			wantStatus:  models.VerifyStatusConfirmed,
+			wantQuote:   "August 9, 2026 14:30 +08:00",
+		},
+		{
+			name:         "href regex changed",
+			rule:         compiler.FieldRule{Name: "sku", Selector: "a.product", Attr: "href", Regex: `sku=([A-Z]+-\d+)`, Type: compiler.TypeString, Required: true},
+			oldHTML:      `<a class="product" href="/p?sku=OLD-1">Product</a>`,
+			currentHTML:  `<a class="product" href="/p?sku=NEW-2">Product</a>`,
+			oldValue:     json.RawMessage(`"OLD-1"`),
+			wantStatus:   models.VerifyStatusChanged,
+			wantNewValue: json.RawMessage(`"NEW-2"`),
+			wantQuote:    "NEW-2",
+		},
+		{
+			name:        "transform preserves semantic value",
+			rule:        compiler.FieldRule{Name: "brand", Selector: ".brand", Transforms: []string{"trim", "collapse_ws", "lower"}, Type: compiler.TypeString, Required: true},
+			oldHTML:     `<span class="brand"> ACME   PRO </span>`,
+			currentHTML: `<span class="brand"> acme pro </span>`,
+			oldValue:    json.RawMessage(`"acme pro"`),
+			wantStatus:  models.VerifyStatusConfirmed,
+			wantQuote:   " acme pro ",
+		},
+		{
+			name:         "untransformed string case change is exact",
+			rule:         compiler.FieldRule{Name: "brand", Selector: ".brand", Type: compiler.TypeString, Required: true},
+			oldHTML:      `<span class="brand">Acme</span>`,
+			currentHTML:  `<span class="brand">ACME</span>`,
+			oldValue:     json.RawMessage(`"Acme"`),
+			wantStatus:   models.VerifyStatusChanged,
+			wantNewValue: json.RawMessage(`"ACME"`),
+			wantQuote:    "ACME",
+			wantRange:    [2]int{0, 4},
+		},
+		{
+			name:         "untransformed string whitespace change is exact",
+			rule:         compiler.FieldRule{Name: "brand", Selector: ".brand", Type: compiler.TypeString, Required: true},
+			oldHTML:      `<span class="brand">Acme</span>`,
+			currentHTML:  `<span class="brand"> Acme </span>`,
+			oldValue:     json.RawMessage(`"Acme"`),
+			wantStatus:   models.VerifyStatusChanged,
+			wantNewValue: json.RawMessage(`" Acme "`),
+			wantQuote:    " Acme ",
+		},
+		{
+			name:        "duplicate selector uses first match",
+			rule:        compiler.FieldRule{Name: "tier", Selector: ".tier", Transforms: []string{"trim"}, Type: compiler.TypeString, Required: true},
+			oldHTML:     `<span class="tier">First</span><span class="tier">Old second</span>`,
+			currentHTML: `<span class="tier">First</span><span class="tier">New second</span>`,
+			oldValue:    json.RawMessage(`"First"`),
+			wantStatus:  models.VerifyStatusConfirmed,
+			wantQuote:   "First",
+			wantRange:   [2]int{0, 5},
+		},
+		{
+			name:        "duplicate quote is deliberately unlocated",
+			rule:        compiler.FieldRule{Name: "label", Selector: ".primary", Type: compiler.TypeString, Required: true},
+			oldHTML:     `<span class="primary">Same</span><span>Same</span>`,
+			currentHTML: `<span class="primary">Same</span><span>Same</span>`,
+			oldValue:    json.RawMessage(`"Same"`),
+			wantStatus:  models.VerifyStatusConfirmed,
+			wantQuote:   "Same",
+		},
+		{
+			name:          "missing current field is gone",
+			rule:          compiler.FieldRule{Name: "price", Selector: ".price", Attr: "data-value", Type: compiler.TypeNumber, Required: true},
+			oldHTML:       `<span class="price" data-value="29.99"></span>`,
+			currentHTML:   `<span class="price"></span>`,
+			oldValue:      json.RawMessage(`29.99`),
+			wantStatus:    models.VerifyStatusGone,
+			wantGoneScope: models.VerifyGoneScopeField,
+		},
+		{
+			name:         "literal dot and backslash field name round trips",
+			rule:         compiler.FieldRule{Name: `price.\usd`, Selector: ".price", Attr: "data-value", Type: compiler.TypeNumber, Required: true},
+			oldHTML:      `<span class="price" data-value="29.99"></span>`,
+			currentHTML:  `<span class="price" data-value="39.99"></span>`,
+			oldValue:     json.RawMessage(`29.99`),
+			wantStatus:   models.VerifyStatusChanged,
+			wantNewValue: json.RawMessage(`39.99`),
+			wantQuote:    "39.99",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			signer := testSigner(t)
+			version := 7
+			ir := compiler.IR{Version: compiler.CurrentIRVersion, Fields: []compiler.FieldRule{test.rule}}
+			revisions := revisionResolverFunc(func(context.Context, string) (compiler.Extractor, error) {
+				return compiler.Extractor{ID: extractorID, Version: version, IR: ir}, nil
+			})
+			receiptPath := strings.ReplaceAll(test.rule.Name, ".", `\.`)
+			token, err := signer.Sign(receipts.Payload{
+				URL:   testURL,
+				Path:  receiptPath,
+				Value: test.oldValue,
+				Anchor: evidence.Anchor{
+					Quote:      "signed old quote",
+					Selector:   test.rule.Selector,
+					Method:     evidence.MethodCompiled,
+					SnapshotID: oldSnapshotID,
+					FetchedAt:  oldFetchedAt,
+				},
+				ExtractorVersion: fmt.Sprintf("%s@%d", extractorID, version),
+				IssuedAt:         oldFetchedAt,
+			})
+			if err != nil {
+				t.Fatalf("Sign(): %v", err)
+			}
+			service := testService(t, test.oldHTML, observation(test.currentHTML, 200), signer, &fakeRecorder{}, revisions)
+			response, err := service.Verify(context.Background(), models.VerifyRequest{Receipt: token})
+			if err != nil {
+				t.Fatalf("Verify(): %v", err)
+			}
+			result := response.Results[0]
+			if result.Status != test.wantStatus || result.GoneScope != test.wantGoneScope || !bytes.Equal(result.NewValue, test.wantNewValue) {
+				t.Fatalf("result = %#v", result)
+			}
+			if test.wantStatus == models.VerifyStatusGone {
+				if result.Evidence != nil || result.Receipt != "" {
+					t.Fatalf("gone result retained evidence: %#v", result)
+				}
+				return
+			}
+			if result.Evidence == nil || result.Evidence.Method != evidence.MethodCompiled || result.Evidence.Selector != test.rule.Selector || result.Evidence.Quote != test.wantQuote || result.Evidence.TextRange != test.wantRange {
+				t.Fatalf("replayed evidence = %#v", result.Evidence)
+			}
+			refreshed, err := signer.Verify(result.Receipt)
+			if err != nil {
+				t.Fatalf("Verify(refreshed receipt): %v", err)
+			}
+			if refreshed.ExtractorVersion != fmt.Sprintf("%s@%d", extractorID, version) || refreshed.Anchor.Method != evidence.MethodCompiled || refreshed.Anchor.SnapshotID != newSnapshotID {
+				t.Fatalf("refreshed receipt = %#v", refreshed)
+			}
+			wantReceiptValue := test.oldValue
+			if test.wantStatus == models.VerifyStatusChanged {
+				wantReceiptValue = test.wantNewValue
+			}
+			if !bytes.Equal(refreshed.Value, wantReceiptValue) {
+				t.Fatalf("refreshed receipt value = %s, want exact replay %s", refreshed.Value, wantReceiptValue)
+			}
+		})
+	}
+}
+
+func TestVerifyCompiledReceiptFailsClosedBeforeVerdict(t *testing.T) {
+	const extractorID = "123e4567-e89b-12d3-a456-426614174000"
+	validIR := compiler.IR{Version: compiler.CurrentIRVersion, Fields: []compiler.FieldRule{{Name: "price", Selector: ".price", Type: compiler.TypeNumber, Required: true}}}
+	tests := []struct {
+		name     string
+		method   evidence.Method
+		version  string
+		resolver ExtractorRevisionResolver
+		wantErr  error
+		direct   bool
+	}{
+		{name: "missing version", method: evidence.MethodCompiled, wantErr: ErrInvalidReceipt},
+		{name: "malformed version", method: evidence.MethodCompiled, version: strings.ToUpper(extractorID) + "@1", wantErr: ErrInvalidReceipt},
+		{name: "revision resolver missing", method: evidence.MethodCompiled, version: extractorID + "@1", wantErr: ErrEvidenceUnavailable},
+		{name: "revision not found", method: evidence.MethodCompiled, version: extractorID + "@1", resolver: revisionResolverFunc(func(context.Context, string) (compiler.Extractor, error) {
+			return compiler.Extractor{}, compiler.ErrExtractorNotFound
+		}), wantErr: ErrEvidenceUnavailable},
+		{name: "returned version mismatch", method: evidence.MethodCompiled, version: extractorID + "@1", resolver: revisionResolverFunc(func(context.Context, string) (compiler.Extractor, error) {
+			return compiler.Extractor{ID: extractorID, Version: 2, IR: validIR}, nil
+		}), wantErr: ErrEvidenceUnavailable},
+		{name: "noncompiled method with version", method: evidence.MethodExact, version: extractorID + "@1", wantErr: ErrInvalidReceipt},
+		{name: "direct compiled claim", method: evidence.MethodCompiled, direct: true, wantErr: ErrInvalidClaim},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var revisits atomic.Int32
+			signer := testSigner(t)
+			service := mustService(t, Config{
+				Revisitor: revisitorFunc(func(context.Context, string) (RevisitResult, error) {
+					revisits.Add(1)
+					return RevisitResult{}, errors.New("unexpected revisit")
+				}),
+				Snapshots: snapshotReaderFunc(func(snapshot.ID) ([]byte, snapshot.Meta, error) {
+					return nil, snapshot.Meta{}, errors.New("unexpected snapshot")
+				}),
+				Receipts:           signer,
+				Recorder:           &fakeRecorder{},
+				ExtractorRevisions: test.resolver,
+			})
+			anchor := testAnchor("29.99", ".price")
+			anchor.Method = test.method
+			request := models.VerifyRequest{URL: testURL, Claims: []models.Claim{{Path: "price", Value: json.RawMessage(`29.99`), Anchor: anchor}}}
+			if !test.direct {
+				token, err := signer.Sign(receipts.Payload{URL: testURL, Path: "price", Value: json.RawMessage(`29.99`), Anchor: anchor, ExtractorVersion: test.version, IssuedAt: oldFetchedAt})
+				if err != nil {
+					t.Fatalf("Sign(): %v", err)
+				}
+				request = models.VerifyRequest{Receipt: token}
+			}
+			response, err := service.Verify(context.Background(), request)
+			if response != nil || !errors.Is(err, test.wantErr) || revisits.Load() != 0 {
+				t.Fatalf("Verify() = (%#v, %v), revisits=%d; want %v", response, err, revisits.Load(), test.wantErr)
+			}
+		})
+	}
+}
+
+func TestCompiledFieldNameReversesOnlyCanonicalTopLevelPaths(t *testing.T) {
+	tests := []struct {
+		path    string
+		want    string
+		wantErr bool
+	}{
+		{path: "price", want: "price"},
+		{path: `price\.usd`, want: "price.usd"},
+		{path: `price\\.usd`, want: `price\.usd`},
+		{path: `price\usd`, want: `price\usd`},
+		{path: "object.child", wantErr: true},
+		{path: `object.\.child`, wantErr: true},
+	}
+	for _, test := range tests {
+		got, err := compiledFieldName(test.path)
+		if test.wantErr {
+			if err == nil {
+				t.Errorf("compiledFieldName(%q) = %q, want error", test.path, got)
+			}
+			continue
+		}
+		if err != nil || got != test.want {
+			t.Errorf("compiledFieldName(%q) = (%q, %v), want %q", test.path, got, err, test.want)
+		}
+	}
+}
+
+func TestRawScalarEqualUsesCompiledCanonicalJSONSemantics(t *testing.T) {
+	tests := []struct {
+		name          string
+		first, second json.RawMessage
+		want          bool
+	}{
+		{name: "identical string", first: json.RawMessage(`"Acme"`), second: json.RawMessage(`"Acme"`), want: true},
+		{name: "canonical string escape", first: json.RawMessage(`"\u0041cme"`), second: json.RawMessage(`"Acme"`), want: true},
+		{name: "string case is exact", first: json.RawMessage(`"Acme"`), second: json.RawMessage(`"ACME"`)},
+		{name: "string whitespace is exact", first: json.RawMessage(`"Acme"`), second: json.RawMessage(`" Acme "`)},
+		{name: "outer JSON whitespace is insignificant", first: json.RawMessage(` 1 `), second: json.RawMessage(`1`), want: true},
+		{name: "number lexical form is exact", first: json.RawMessage(`1.0`), second: json.RawMessage(`1`)},
+		{name: "boolean is exact", first: json.RawMessage(`true`), second: json.RawMessage(`true`), want: true},
+		{name: "different boolean", first: json.RawMessage(`true`), second: json.RawMessage(`false`)},
+	}
+	for _, test := range tests {
+		if got := rawScalarEqual(test.first, test.second); got != test.want {
+			t.Errorf("%s: rawScalarEqual(%s, %s) = %v, want %v", test.name, test.first, test.second, got, test.want)
+		}
+	}
+}
+
+func TestVerifyCompiledReceiptRejectsCorruptIRAndOldSnapshotMismatch(t *testing.T) {
+	const extractorID = "123e4567-e89b-12d3-a456-426614174000"
+	tests := []struct {
+		name    string
+		ir      compiler.IR
+		oldHTML string
+	}{
+		{name: "corrupt IR", ir: compiler.IR{Version: compiler.CurrentIRVersion, Fields: []compiler.FieldRule{{Name: "price", Selector: `div:not(`, Type: compiler.TypeNumber}}}, oldHTML: `<span class="price">29.99</span>`},
+		{name: "old snapshot mismatch", ir: compiler.IR{Version: compiler.CurrentIRVersion, Fields: []compiler.FieldRule{{Name: "price", Selector: ".price", Type: compiler.TypeNumber}}}, oldHTML: `<span class="price">19.99</span>`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			signer := testSigner(t)
+			token, err := signer.Sign(receipts.Payload{URL: testURL, Path: "price", Value: json.RawMessage(`29.99`), Anchor: evidence.Anchor{Quote: "29.99", Selector: ".price", Method: evidence.MethodCompiled, SnapshotID: oldSnapshotID, FetchedAt: oldFetchedAt}, ExtractorVersion: extractorID + "@1", IssuedAt: oldFetchedAt})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var revisits atomic.Int32
+			service := testService(t, test.oldHTML, observation(`<span class="price">29.99</span>`, 200), signer, &fakeRecorder{}, revisionResolverFunc(func(context.Context, string) (compiler.Extractor, error) {
+				return compiler.Extractor{ID: extractorID, Version: 1, IR: test.ir}, nil
+			}))
+			service.revisitor = revisitorFunc(func(context.Context, string) (RevisitResult, error) {
+				revisits.Add(1)
+				return RevisitResult{}, errors.New("unexpected revisit")
+			})
+			response, err := service.Verify(context.Background(), models.VerifyRequest{Receipt: token})
+			if response != nil || !errors.Is(err, ErrEvidenceUnavailable) || revisits.Load() != 0 {
+				t.Fatalf("Verify() = (%#v, %v), revisits=%d", response, err, revisits.Load())
+			}
+		})
+	}
+}
+
+func TestVerifyCompiledReceiptRejectsGenericEquivalentOldString(t *testing.T) {
+	const extractorID = "123e4567-e89b-12d3-a456-426614174000"
+	signer := testSigner(t)
+	token, err := signer.Sign(receipts.Payload{
+		URL:   testURL,
+		Path:  "brand",
+		Value: json.RawMessage(`"ACME"`),
+		Anchor: evidence.Anchor{
+			Quote: "ACME", Selector: ".brand", Method: evidence.MethodCompiled,
+			SnapshotID: oldSnapshotID, FetchedAt: oldFetchedAt,
+		},
+		ExtractorVersion: extractorID + "@1",
+		IssuedAt:         oldFetchedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var revisits atomic.Int32
+	service := testService(
+		t,
+		`<span class="brand">Acme</span>`,
+		observation(`<span class="brand">ACME</span>`, 200),
+		signer,
+		&fakeRecorder{},
+		revisionResolverFunc(func(context.Context, string) (compiler.Extractor, error) {
+			return compiler.Extractor{
+				ID: extractorID, Version: 1,
+				IR: compiler.IR{Version: compiler.CurrentIRVersion, Fields: []compiler.FieldRule{{
+					Name: "brand", Selector: ".brand", Type: compiler.TypeString, Required: true,
+				}}},
+			}, nil
+		}),
+	)
+	service.revisitor = revisitorFunc(func(context.Context, string) (RevisitResult, error) {
+		revisits.Add(1)
+		return RevisitResult{}, errors.New("unexpected revisit")
+	})
+	response, err := service.Verify(context.Background(), models.VerifyRequest{Receipt: token})
+	if response != nil || !errors.Is(err, ErrEvidenceUnavailable) || revisits.Load() != 0 {
+		t.Fatalf("Verify() = (%#v, %v), revisits=%d", response, err, revisits.Load())
 	}
 }
 
@@ -1887,6 +2234,12 @@ func (f revisitorFunc) Revisit(ctx context.Context, target string) (RevisitResul
 	return f(ctx, target)
 }
 
+type revisionResolverFunc func(context.Context, string) (compiler.Extractor, error)
+
+func (f revisionResolverFunc) Get(ctx context.Context, id string) (compiler.Extractor, error) {
+	return f(ctx, id)
+}
+
 type snapshotReaderFunc func(snapshot.ID) ([]byte, snapshot.Meta, error)
 
 func (f snapshotReaderFunc) Content(id snapshot.ID, _ int) ([]byte, error) {
@@ -2059,7 +2412,7 @@ func testService(
 	current RevisitResult,
 	codec ReceiptCodec,
 	recorder VerificationRecorder,
-	_ any,
+	revisions ExtractorRevisionResolver,
 ) *Service {
 	t.Helper()
 	return mustService(t, Config{
@@ -2090,8 +2443,9 @@ func testService(
 				return nil, snapshot.Meta{}, fmt.Errorf("unexpected snapshot %q", id)
 			}
 		}),
-		Receipts: codec,
-		Recorder: recorder,
+		Receipts:           codec,
+		Recorder:           recorder,
+		ExtractorRevisions: revisions,
 		IDs: func() (string, error) {
 			return "verification-fixture", nil
 		},

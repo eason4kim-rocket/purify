@@ -16,8 +16,13 @@ type ExtractRequest struct {
 	// Schema is the JSON schema describing the desired output structure. Required.
 	Schema json.RawMessage `json:"schema" binding:"required"`
 
-	// LLMAPIKey is the user's own LLM API key (BYOK). Required.
-	LLMAPIKey string `json:"llm_api_key" binding:"required"`
+	// Engine selects deterministic extraction, direct LLM extraction, or the
+	// automatic compiled-first fallback chain. Default: "auto".
+	Engine string `json:"engine,omitempty" binding:"omitempty,oneof=auto compiled llm"`
+
+	// LLMAPIKey is the user's own LLM API key (BYOK). It is required only when
+	// Engine is "llm" or when the auto engine must fall back to the LLM path.
+	LLMAPIKey string `json:"llm_api_key,omitempty"`
 
 	// LLMModel is the model to use for extraction. Default: "gpt-4o-mini".
 	LLMModel string `json:"llm_model,omitempty"`
@@ -58,6 +63,9 @@ type ExtractRequest struct {
 
 // Defaults applies default values to unset fields.
 func (r *ExtractRequest) Defaults() {
+	if r.Engine == "" {
+		r.Engine = "auto"
+	}
 	if r.LLMModel == "" {
 		r.LLMModel = "gpt-4o-mini"
 	}
@@ -151,7 +159,7 @@ type FieldReceipts map[string]string
 // ExtractorMetadata describes a compiled extractor selected by the Phase 2
 // auto engine. Nil means no deterministic extractor served the response.
 type ExtractorMetadata struct {
-	ID         int64     `json:"id"`
+	ID         string    `json:"id"`
 	Version    int       `json:"version"`
 	CompiledAt time.Time `json:"compiled_at"`
 	Validation float64   `json:"validation"`

@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/use-agent/purify/compiler"
 	"github.com/use-agent/purify/evidence"
 	"github.com/use-agent/purify/llm"
 	"github.com/use-agent/purify/models"
@@ -38,6 +40,16 @@ type ReceiptSigner interface {
 	Sign(receipts.Payload) (string, error)
 }
 
+// CompiledRepository is the deterministic extractor cache boundary. A lookup
+// is read-only except for the repository's attributable template-drift rule;
+// callers must report only successful or required-empty executions.
+type CompiledRepository interface {
+	Lookup(context.Context, compiler.PageKey) (compiler.Extractor, bool, error)
+	Touch(context.Context, compiler.PageKey, string) (compiler.Extractor, error)
+	RecordEmpty(context.Context, compiler.PageKey, string) (compiler.Extractor, error)
+	RecordUse(context.Context, compiler.PageKey, string, compiler.UseOutcome) (compiler.Extractor, error)
+}
+
 // Artifact keeps the public cleaned page and its selected raw source together.
 // Source may be nil only when an external caller deliberately supplies a
 // response-only artifact; evidence and deterministic compilation require it.
@@ -48,7 +60,8 @@ type Artifact struct {
 
 // Config controls deterministic time injection in tests.
 type Config struct {
-	Now func() time.Time
+	Now                func() time.Time
+	CompiledRepository CompiledRepository
 }
 
 // OperationError preserves phase timing while retaining the domain cause for
@@ -93,10 +106,12 @@ func TimingFromError(err error) (models.ExtractTimingInfo, bool) {
 // Service coordinates canonical fetch, strict schema validation, one bounded
 // repair, optional evidence alignment, and receipt signing.
 type Service struct {
-	runner    Runner
-	extractor StructuredExtractor
-	signer    ReceiptSigner
-	now       func() time.Time
+	runner           Runner
+	extractor        StructuredExtractor
+	signer           ReceiptSigner
+	compiled         CompiledRepository
+	validateCompiled func(json.RawMessage, json.RawMessage) ([]llm.Violation, error)
+	now              func() time.Time
 }
 
 // NewService constructs an extraction service. signer may be nil when evidence
@@ -112,15 +127,30 @@ func NewService(runner Runner, extractor StructuredExtractor, signer ReceiptSign
 	if now == nil {
 		now = time.Now
 	}
-	return &Service{runner: runner, extractor: extractor, signer: signer, now: now}, nil
+	compiledRepository := cfg.CompiledRepository
+	if isNilCompiledRepository(compiledRepository) {
+		compiledRepository = nil
+	}
+	return &Service{
+		runner:           runner,
+		extractor:        extractor,
+		signer:           signer,
+		compiled:         compiledRepository,
+		validateCompiled: llm.ValidateAgainstSchema,
+		now:              now,
+	}, nil
 }
 
-// Extract runs the complete LLM extraction path. The caller-owned request is
-// never mutated and cache is forcibly bypassed so evidence is tied to a fresh,
-// raw source rather than manufactured from a response-only cache entry.
+// Extract runs the requested compiled/LLM dispatch. The caller-owned request
+// is never mutated and cache is forcibly bypassed so deterministic execution
+// and evidence stay tied to one fresh raw source.
 func (s *Service) Extract(ctx context.Context, request *models.ExtractRequest) (*models.ExtractResponse, error) {
 	startedAt := s.now()
 	prepared, err := prepareRequest(request)
+	if err != nil {
+		return nil, s.operationError(err, startedAt, models.ExtractTimingInfo{})
+	}
+	tryCompiled, err := s.prepareDispatch(prepared)
 	if err != nil {
 		return nil, s.operationError(err, startedAt, models.ExtractTimingInfo{})
 	}
@@ -134,7 +164,7 @@ func (s *Service) Extract(ctx context.Context, request *models.ExtractRequest) (
 		return nil, s.operationError(err, startedAt, timing)
 	}
 
-	response, err := s.extractPreparedArtifact(ctx, artifact, prepared, startedAt)
+	response, err := s.extractPreparedArtifact(ctx, artifact, prepared, startedAt, tryCompiled)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +191,11 @@ func (s *Service) ExtractArtifact(ctx context.Context, artifact *Artifact, reque
 	if err != nil {
 		return nil, s.operationError(err, startedAt, models.ExtractTimingInfo{})
 	}
-	return s.extractPreparedArtifact(ctx, artifact, prepared, startedAt)
+	tryCompiled, err := s.prepareDispatch(prepared)
+	if err != nil {
+		return nil, s.operationError(err, startedAt, models.ExtractTimingInfo{})
+	}
+	return s.extractPreparedArtifact(ctx, artifact, prepared, startedAt, tryCompiled)
 }
 
 func (s *Service) fetchArtifact(ctx context.Context, request *models.ScrapeRequest) (*Artifact, error) {
@@ -193,6 +227,25 @@ func (s *Service) fetchArtifact(ctx context.Context, request *models.ScrapeReque
 }
 
 func (s *Service) extractPreparedArtifact(
+	ctx context.Context,
+	artifact *Artifact,
+	request *models.ExtractRequest,
+	startedAt time.Time,
+	tryCompiled bool,
+) (*models.ExtractResponse, error) {
+	if tryCompiled {
+		response, err := s.extractCompiledArtifact(ctx, artifact, request, startedAt)
+		if err == nil {
+			return response, nil
+		}
+		if !shouldFallbackToLLM(request, err) {
+			return nil, err
+		}
+	}
+	return s.extractLLMArtifact(ctx, artifact, request, startedAt)
+}
+
+func (s *Service) extractLLMArtifact(
 	ctx context.Context,
 	artifact *Artifact,
 	request *models.ExtractRequest,
@@ -289,6 +342,282 @@ func (s *Service) extractPreparedArtifact(
 	return response, nil
 }
 
+func (s *Service) extractCompiledArtifact(
+	ctx context.Context,
+	artifact *Artifact,
+	request *models.ExtractRequest,
+	startedAt time.Time,
+) (*models.ExtractResponse, error) {
+	baseTiming, err := validateArtifact(artifact)
+	if err != nil {
+		return nil, s.operationError(err, startedAt, baseTiming)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, s.operationError(err, startedAt, baseTiming)
+	}
+	if artifact.Source == nil || strings.TrimSpace(artifact.Source.RawHTML) == "" {
+		return nil, s.operationError(extractorUnavailable("compiled extraction requires raw HTML", nil), startedAt, baseTiming)
+	}
+	if request.Evidence {
+		if artifact.Source.SnapshotID == "" {
+			return nil, s.operationError(
+				models.NewScrapeError(models.ErrCodeEvidenceUnavailable, "evidence mode requires a fresh stored snapshot", nil),
+				startedAt,
+				baseTiming,
+			)
+		}
+		if s.signer == nil {
+			return nil, s.operationError(
+				models.NewScrapeError(models.ErrCodeEvidenceUnavailable, "evidence receipt signer is unavailable", nil),
+				startedAt,
+				baseTiming,
+			)
+		}
+	}
+
+	sourceURL := artifact.Source.FinalURL
+	if strings.TrimSpace(sourceURL) == "" {
+		sourceURL = request.URL
+	}
+	extractionStartedAt := s.now()
+	finishExtraction := func() {
+		baseTiming.ExtractionMs = elapsedMilliseconds(extractionStartedAt, s.now())
+	}
+	key, err := compiler.BuildPageKey(sourceURL, request.Schema, artifact.Source.RawHTML)
+	if err != nil {
+		finishExtraction()
+		return nil, s.operationError(extractorUnavailable("compiled extraction is incompatible with this page", err), startedAt, baseTiming)
+	}
+	extractor, found, err := s.compiled.Lookup(ctx, key)
+	if err != nil {
+		finishExtraction()
+		return nil, s.compiledInternalOperationError(ctx, err, startedAt, baseTiming)
+	}
+	if !found {
+		finishExtraction()
+		return nil, s.operationError(extractorUnavailable("no active compiled extractor matches this page", nil), startedAt, baseTiming)
+	}
+
+	data, anchors, err := compiler.Execute(extractor.IR, artifact.Source.RawHTML)
+	if err != nil {
+		if errors.Is(err, compiler.ErrRequiredField) {
+			if _, recordErr := s.compiled.RecordEmpty(ctx, key, extractor.ID); recordErr != nil {
+				finishExtraction()
+				return nil, s.compiledInternalOperationError(ctx, recordErr, startedAt, baseTiming)
+			}
+			finishExtraction()
+			return nil, s.operationError(extractorUnavailable("compiled extractor did not produce a required field", err), startedAt, baseTiming)
+		}
+		finishExtraction()
+		return nil, s.compiledInternalOperationError(ctx, err, startedAt, baseTiming)
+	}
+	violations, err := s.validateCompiled(request.Schema, data)
+	if err != nil {
+		finishExtraction()
+		return nil, s.compiledInternalOperationError(ctx, err, startedAt, baseTiming)
+	}
+	if len(violations) > 0 {
+		finishExtraction()
+		return nil, s.operationError(extractorUnavailable("compiled extractor output violates the requested schema", nil), startedAt, baseTiming)
+	}
+
+	response := &models.ExtractResponse{
+		Success:  true,
+		Data:     append(json.RawMessage(nil), data...),
+		Metadata: artifact.Public.Metadata,
+		Tokens:   artifact.Public.Tokens,
+		Extractor: &models.ExtractorMetadata{
+			ID:         extractor.ID,
+			Version:    extractor.Version,
+			CompiledAt: extractor.CreatedAt,
+			Validation: extractor.Validation.Overall,
+			Mode:       "compiled",
+		},
+	}
+	if request.Evidence {
+		basis, unlocatedRate, evidenceErr := hydrateCompiledEvidence(
+			data,
+			anchors,
+			artifact.Public.Content,
+			string(artifact.Source.SnapshotID),
+			artifact.Source.FetchedAt,
+		)
+		if evidenceErr != nil {
+			finishExtraction()
+			return nil, s.operationError(
+				models.NewScrapeError(models.ErrCodeEvidenceUnavailable, "compiled evidence could not be aligned", evidenceErr),
+				startedAt,
+				baseTiming,
+			)
+		}
+		receiptTokens, signErr := signFieldReceipts(
+			data,
+			basis,
+			sourceURL,
+			s.now().UTC(),
+			s.signer,
+			fmt.Sprintf("%s@%d", extractor.ID, extractor.Version),
+		)
+		if signErr != nil {
+			finishExtraction()
+			return nil, s.operationError(
+				models.NewScrapeError(models.ErrCodeInternal, "failed to sign evidence receipts", signErr),
+				startedAt,
+				baseTiming,
+			)
+		}
+		typedReceipts := models.FieldReceipts(receiptTokens)
+		response.SnapshotID = string(artifact.Source.SnapshotID)
+		response.UnlocatedRate = &unlocatedRate
+		response.Basis = &basis
+		response.Receipts = &typedReceipts
+	}
+
+	_, err = s.compiled.Touch(ctx, key, extractor.ID)
+	if err != nil {
+		finishExtraction()
+		return nil, s.compiledInternalOperationError(ctx, err, startedAt, baseTiming)
+	}
+	finishExtraction()
+	baseTiming.TotalMs = elapsedMilliseconds(startedAt, s.now())
+	response.Timing = baseTiming
+	return response, nil
+}
+
+func (s *Service) prepareDispatch(request *models.ExtractRequest) (bool, error) {
+	hasLLMKey := strings.TrimSpace(request.LLMAPIKey) != ""
+	if request.Engine == "llm" {
+		if !hasLLMKey {
+			return false, models.NewScrapeError(models.ErrCodeInvalidInput, "llm_api_key is required for LLM extraction", nil)
+		}
+		return false, nil
+	}
+
+	eligible := request.CSSSelector == "" && request.OutputFormat == "markdown" && request.ExtractMode == "readability"
+	if eligible {
+		eligible = compiler.ValidateCompileSchema(request.Schema) == nil
+	}
+	if eligible && s.compiled != nil {
+		return true, nil
+	}
+	if request.Engine == "auto" && hasLLMKey {
+		return false, nil
+	}
+	return false, extractorUnavailable("compiled extraction is unavailable for this request", nil)
+}
+
+func shouldFallbackToLLM(request *models.ExtractRequest, err error) bool {
+	if request == nil || request.Engine != "auto" || strings.TrimSpace(request.LLMAPIKey) == "" {
+		return false
+	}
+	var scrapeError *models.ScrapeError
+	if errors.As(err, &scrapeError) && scrapeError.Code == models.ErrCodeExtractorUnavailable {
+		return true
+	}
+	return errors.Is(err, errCompiledAttemptInternal)
+}
+
+func extractorUnavailable(message string, cause error) error {
+	return models.NewScrapeError(models.ErrCodeExtractorUnavailable, message, cause)
+}
+
+func isNilCompiledRepository(repository CompiledRepository) bool {
+	if repository == nil {
+		return true
+	}
+	value := reflect.ValueOf(repository)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+var errCompiledAttemptInternal = errors.New("extract: compiled attempt internal failure")
+
+type compiledAttemptInternalCause struct {
+	cause error
+}
+
+func (e *compiledAttemptInternalCause) Error() string {
+	return errCompiledAttemptInternal.Error()
+}
+
+func (e *compiledAttemptInternalCause) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *compiledAttemptInternalCause) Is(target error) bool {
+	return target == errCompiledAttemptInternal
+}
+
+func (s *Service) compiledInternalOperationError(
+	ctx context.Context,
+	cause error,
+	startedAt time.Time,
+	timing models.ExtractTimingInfo,
+) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return s.operationError(ctxErr, startedAt, timing)
+	}
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+		return s.operationError(cause, startedAt, timing)
+	}
+	return s.operationError(models.NewScrapeError(
+		models.ErrCodeInternal,
+		"compiled extractor subsystem failed",
+		&compiledAttemptInternalCause{cause: cause},
+	), startedAt, timing)
+}
+
+func hydrateCompiledEvidence(
+	data json.RawMessage,
+	anchors map[string]evidence.Anchor,
+	cleaned string,
+	snapshotID string,
+	fetchedAt time.Time,
+) (models.EvidenceBasis, float64, error) {
+	values, err := evidence.LeafValues(data)
+	if err != nil {
+		return nil, 0, err
+	}
+	basis := make(models.EvidenceBasis, len(values))
+	unlocated := 0
+	for field, anchor := range anchors {
+		path := strings.ReplaceAll(field, ".", `\.`)
+		if _, ok := values[path]; !ok {
+			return nil, 0, fmt.Errorf("compiled anchor %q has no output value", field)
+		}
+		anchor.TextRange = [2]int{}
+		located := false
+		if anchor.Quote != "" {
+			start := strings.Index(cleaned, anchor.Quote)
+			if start >= 0 && strings.LastIndex(cleaned, anchor.Quote) == start {
+				anchor.TextRange = [2]int{start, start + len(anchor.Quote)}
+				located = true
+			}
+		}
+		anchor.SnapshotID = snapshotID
+		anchor.FetchedAt = fetchedAt
+		anchor.Method = evidence.MethodCompiled
+		if !located {
+			unlocated++
+		}
+		basis[path] = anchor
+	}
+	if len(basis) != len(values) {
+		return nil, 0, fmt.Errorf("compiled evidence/value path count mismatch: %d != %d", len(basis), len(values))
+	}
+	if len(values) == 0 {
+		return basis, 0, nil
+	}
+	return basis, float64(unlocated) / float64(len(values)), nil
+}
+
 func prepareRequest(request *models.ExtractRequest) (*models.ExtractRequest, error) {
 	if request == nil {
 		return nil, models.NewScrapeError(models.ErrCodeInvalidInput, "extract request is required", nil)
@@ -305,8 +634,10 @@ func prepareRequest(request *models.ExtractRequest) (*models.ExtractRequest, err
 	if err != nil || parsed.Host == "" || parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return nil, models.NewScrapeError(models.ErrCodeInvalidInput, "url must be an absolute http or https URL", err)
 	}
-	if strings.TrimSpace(prepared.LLMAPIKey) == "" {
-		return nil, models.NewScrapeError(models.ErrCodeInvalidInput, "llm_api_key is required for LLM extraction", nil)
+	switch prepared.Engine {
+	case "auto", "compiled", "llm":
+	default:
+		return nil, models.NewScrapeError(models.ErrCodeInvalidInput, "engine must be auto, compiled, or llm", nil)
 	}
 	normalizedSchema, err := llm.NormalizeSchema(prepared.Schema)
 	if err != nil {
@@ -384,6 +715,7 @@ func signFieldReceipts(
 	sourceURL string,
 	issuedAt time.Time,
 	signer ReceiptSigner,
+	extractorVersion ...string,
 ) (map[string]string, error) {
 	if signer == nil {
 		return nil, errors.New("receipt signer is unavailable")
@@ -402,17 +734,22 @@ func signFieldReceipts(
 	sort.Strings(paths)
 
 	tokens := make(map[string]string, len(paths))
+	version := ""
+	if len(extractorVersion) > 0 {
+		version = extractorVersion[0]
+	}
 	for _, path := range paths {
 		anchor, ok := basis[path]
 		if !ok {
 			return nil, fmt.Errorf("evidence anchor missing for %q", path)
 		}
 		token, err := signer.Sign(receipts.Payload{
-			URL:      sourceURL,
-			Path:     path,
-			Value:    values[path],
-			Anchor:   anchor,
-			IssuedAt: issuedAt,
+			URL:              sourceURL,
+			Path:             path,
+			Value:            values[path],
+			Anchor:           anchor,
+			ExtractorVersion: version,
+			IssuedAt:         issuedAt,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("sign %q: %w", path, err)

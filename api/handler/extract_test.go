@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -60,7 +61,7 @@ func TestExtractRejectsBindingErrorsWithoutCallingService(t *testing.T) {
 	for _, body := range []string{
 		`{`,
 		`{"url":"not-a-url","schema":{},"llm_api_key":"secret"}`,
-		`{"url":"https://example.test","schema":{}}`,
+		`{"url":"https://example.test","schema":{},"engine":"invalid"}`,
 		`{"url":"https://example.test","schema":{},"llm_api_key":"secret","timeout":121}`,
 	} {
 		recorder := httptest.NewRecorder()
@@ -73,6 +74,22 @@ func TestExtractRejectsBindingErrorsWithoutCallingService(t *testing.T) {
 	}
 	if service.calls != 0 {
 		t.Fatalf("service calls = %d, want 0", service.calls)
+	}
+}
+
+func TestExtractAllowsMissingLLMKeyForEngineDispatch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &recordingExtractService{response: &models.ExtractResponse{Success: true}}
+	router := gin.New()
+	router.POST("/extract", Extract(service))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/extract", bytes.NewBufferString(
+		`{"url":"https://example.test","schema":{"type":"object"},"engine":"compiled"}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || service.calls != 1 || service.request == nil || service.request.LLMAPIKey != "" || service.request.Engine != "compiled" {
+		t.Fatalf("status/service = %d, %d, %#v; body=%s", recorder.Code, service.calls, service.request, recorder.Body)
 	}
 }
 
@@ -100,6 +117,44 @@ func TestExtractMapsWrappedDomainErrorsAndTiming(t *testing.T) {
 	}
 	if response.Success || response.Error == nil || response.Error.Code != models.ErrCodeLLMRateLimited || response.Timing != timing {
 		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestExtractMapsCompiledAvailabilityAndInternalFailures(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		name       string
+		code       string
+		message    string
+		wantStatus int
+	}{
+		{name: "semantic unavailable", code: models.ErrCodeExtractorUnavailable, message: "no active compiled extractor matches this page", wantStatus: http.StatusConflict},
+		{name: "compiled subsystem failure", code: models.ErrCodeInternal, message: "compiled extractor subsystem failed", wantStatus: http.StatusInternalServerError},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &recordingExtractService{err: models.NewScrapeError(test.code, test.message, errors.New("private repository detail"))}
+			router := gin.New()
+			router.POST("/extract", Extract(service))
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/extract", bytes.NewBufferString(
+				`{"url":"https://example.test","schema":{},"engine":"compiled"}`,
+			))
+			request.Header.Set("Content-Type", "application/json")
+			router.ServeHTTP(recorder, request)
+
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.wantStatus, recorder.Body)
+			}
+			var response models.ExtractResponse
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response.Error == nil || response.Error.Code != test.code || response.Error.Message != test.message || bytes.Contains(recorder.Body.Bytes(), []byte("private repository detail")) {
+				t.Fatalf("response leaked or changed error = %#v; body=%s", response.Error, recorder.Body)
+			}
+		})
 	}
 }
 
@@ -131,16 +186,17 @@ func TestExtractFailsClosedForUnavailableOrEmptyService(t *testing.T) {
 
 func TestMapExtractErrorToStatus(t *testing.T) {
 	tests := map[string]int{
-		models.ErrCodeTimeout:             http.StatusGatewayTimeout,
-		models.ErrCodeNavigation:          http.StatusBadGateway,
-		models.ErrCodeInvalidInput:        http.StatusBadRequest,
-		models.ErrCodeRateLimited:         http.StatusTooManyRequests,
-		models.ErrCodeLLMRateLimited:      http.StatusTooManyRequests,
-		models.ErrCodeUnauthorized:        http.StatusUnauthorized,
-		models.ErrCodeLLMAuthFailure:      http.StatusUnauthorized,
-		models.ErrCodeLLMFailure:          http.StatusBadGateway,
-		models.ErrCodeEvidenceUnavailable: http.StatusServiceUnavailable,
-		models.ErrCodeInternal:            http.StatusInternalServerError,
+		models.ErrCodeTimeout:              http.StatusGatewayTimeout,
+		models.ErrCodeNavigation:           http.StatusBadGateway,
+		models.ErrCodeInvalidInput:         http.StatusBadRequest,
+		models.ErrCodeRateLimited:          http.StatusTooManyRequests,
+		models.ErrCodeLLMRateLimited:       http.StatusTooManyRequests,
+		models.ErrCodeUnauthorized:         http.StatusUnauthorized,
+		models.ErrCodeLLMAuthFailure:       http.StatusUnauthorized,
+		models.ErrCodeLLMFailure:           http.StatusBadGateway,
+		models.ErrCodeEvidenceUnavailable:  http.StatusServiceUnavailable,
+		models.ErrCodeExtractorUnavailable: http.StatusConflict,
+		models.ErrCodeInternal:             http.StatusInternalServerError,
 	}
 	for code, want := range tests {
 		if got := mapExtractErrorToStatus(models.NewScrapeError(code, "test", nil)); got != want {

@@ -84,7 +84,7 @@ func mapVerifyError(err error) (int, string, string) {
 		return http.StatusBadRequest, models.ErrCodeInvalidReceipt, "receipt is invalid or not re-verifiable"
 	case errors.Is(err, verifydomain.ErrInvalidRequest), errors.Is(err, verifydomain.ErrInvalidClaim):
 		return http.StatusBadRequest, models.ErrCodeInvalidInput, "verify request is invalid"
-	case errors.Is(err, verifydomain.ErrNotConfigured), errors.Is(err, verifydomain.ErrSnapshot):
+	case errors.Is(err, verifydomain.ErrNotConfigured), errors.Is(err, verifydomain.ErrSnapshot), errors.Is(err, verifydomain.ErrEvidenceUnavailable):
 		return http.StatusServiceUnavailable, models.ErrCodeEvidenceUnavailable, "verification evidence is unavailable"
 	case errors.Is(err, verifydomain.ErrRecord):
 		return http.StatusServiceUnavailable, models.ErrCodeInternal, "verification could not be recorded"

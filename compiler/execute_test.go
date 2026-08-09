@@ -65,6 +65,71 @@ func TestExecuteExtractsTypedFieldsAndAnchors(t *testing.T) {
 	}
 }
 
+func TestReplayFieldUsesExactRulePipelineAndFirstMatch(t *testing.T) {
+	ir := compiler.IR{Version: compiler.CurrentIRVersion, Fields: []compiler.FieldRule{
+		{
+			Name:       "released_at",
+			Selector:   "time.release",
+			Attr:       "datetime",
+			Regex:      `^date:(.+)$`,
+			Transforms: []string{"trim", "parse_date"},
+			Type:       compiler.TypeDate,
+			Required:   true,
+		},
+		{
+			Name:       "sku",
+			Selector:   "a.product",
+			Attr:       "href",
+			Regex:      `sku=([A-Z]+-\d+)`,
+			Transforms: []string{"lower"},
+			Type:       compiler.TypeString,
+		},
+	}}
+	html := `<time class="release" datetime="date: August 9, 2026 14:30 +08:00"></time>` +
+		`<a class="product" href="/one?sku=FIRST-1">first</a>` +
+		`<a class="product" href="/two?sku=SECOND-2">second</a>`
+
+	released, err := compiler.ReplayField(ir, "released_at", html)
+	if err != nil {
+		t.Fatalf("ReplayField(date): %v", err)
+	}
+	if !released.Found || string(released.Value) != `"2026-08-09T06:30:00Z"` ||
+		released.Anchor.Quote != " August 9, 2026 14:30 +08:00" ||
+		released.Anchor.Selector != "time.release" || released.Anchor.Method != evidence.MethodCompiled {
+		t.Fatalf("date replay = %#v", released)
+	}
+
+	sku, err := compiler.ReplayField(ir, "sku", html)
+	if err != nil {
+		t.Fatalf("ReplayField(sku): %v", err)
+	}
+	if !sku.Found || string(sku.Value) != `"first-1"` || sku.Anchor.Quote != "FIRST-1" {
+		t.Fatalf("sku replay = %#v", sku)
+	}
+}
+
+func TestReplayFieldDistinguishesMissingFromExecutionFailure(t *testing.T) {
+	ir := compiler.IR{Version: compiler.CurrentIRVersion, Fields: []compiler.FieldRule{{
+		Name: "price", Selector: ".price", Attr: "data-value", Type: compiler.TypeNumber, Required: true,
+	}}}
+
+	missing, err := compiler.ReplayField(ir, "price", `<span class="price"></span>`)
+	if err != nil || missing.Found || missing.Value != nil {
+		t.Fatalf("ReplayField(missing) = (%#v, %v), want clean miss", missing, err)
+	}
+	if _, err := compiler.ReplayField(ir, "price", `<span class="price" data-value="not-a-number"></span>`); err == nil {
+		t.Fatal("ReplayField(conversion failure) succeeded")
+	}
+	if _, err := compiler.ReplayField(ir, "absent", `<span class="price" data-value="1"></span>`); err == nil {
+		t.Fatal("ReplayField(absent revision field) succeeded")
+	}
+	badIR := ir
+	badIR.Fields = append(badIR.Fields, compiler.FieldRule{Name: "bad", Selector: `div:not(`, Type: compiler.TypeString})
+	if _, err := compiler.ReplayField(badIR, "price", `<span class="price" data-value="1"></span>`); err == nil {
+		t.Fatal("ReplayField(corrupt sibling rule) succeeded")
+	}
+}
+
 func TestExecuteRequiredMissesReturnFieldError(t *testing.T) {
 	tests := []struct {
 		name string

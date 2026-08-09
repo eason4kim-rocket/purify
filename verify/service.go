@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/andybalholm/cascadia"
+	"github.com/use-agent/purify/compiler"
 	"github.com/use-agent/purify/evidence"
 	"github.com/use-agent/purify/ledger"
 	"github.com/use-agent/purify/models"
@@ -46,15 +47,16 @@ const (
 )
 
 var (
-	ErrNotConfigured  = errors.New("verify: service is not configured")
-	ErrInvalidRequest = errors.New("verify: invalid request")
-	ErrInvalidClaim   = errors.New("verify: invalid claim")
-	ErrInvalidReceipt = errors.New("verify: invalid receipt")
-	ErrSnapshot       = errors.New("verify: read old snapshot")
-	ErrRevisit        = errors.New("verify: revisit failed")
-	ErrRevisitStatus  = errors.New("verify: revisit returned unusable status")
-	ErrReceiptSigning = errors.New("verify: sign refreshed receipt")
-	ErrRecord         = errors.New("verify: record verification")
+	ErrNotConfigured       = errors.New("verify: service is not configured")
+	ErrInvalidRequest      = errors.New("verify: invalid request")
+	ErrInvalidClaim        = errors.New("verify: invalid claim")
+	ErrInvalidReceipt      = errors.New("verify: invalid receipt")
+	ErrSnapshot            = errors.New("verify: read old snapshot")
+	ErrRevisit             = errors.New("verify: revisit failed")
+	ErrRevisitStatus       = errors.New("verify: revisit returned unusable status")
+	ErrReceiptSigning      = errors.New("verify: sign refreshed receipt")
+	ErrRecord              = errors.New("verify: record verification")
+	ErrEvidenceUnavailable = errors.New("verify: compiled evidence is unavailable")
 )
 
 // HTTPStatusError reports a definite response that cannot be interpreted as
@@ -104,6 +106,12 @@ type VerificationRecorder interface {
 	RecordVerificationBatch(context.Context, []ledger.Verification, *ledger.OutboxEvent) error
 }
 
+// ExtractorRevisionResolver resolves an immutable compiled revision by UUID.
+// compiler.Store satisfies this interface directly.
+type ExtractorRevisionResolver interface {
+	Get(context.Context, string) (compiler.Extractor, error)
+}
+
 // FactChange is one changed scalar delivered only after its ledger transaction
 // commits successfully.
 type FactChange struct {
@@ -128,20 +136,22 @@ type IDGenerator func() (string, error)
 
 // Config supplies all transport- and environment-specific dependencies.
 type Config struct {
-	Revisitor Revisitor
-	Snapshots SnapshotReader
-	Receipts  ReceiptCodec
-	Recorder  VerificationRecorder
-	IDs       IDGenerator
+	Revisitor          Revisitor
+	Snapshots          SnapshotReader
+	Receipts           ReceiptCodec
+	Recorder           VerificationRecorder
+	IDs                IDGenerator
+	ExtractorRevisions ExtractorRevisionResolver
 }
 
 // Service executes three-state verification.
 type Service struct {
-	revisitor Revisitor
-	snapshots SnapshotReader
-	receipts  ReceiptCodec
-	recorder  VerificationRecorder
-	ids       IDGenerator
+	revisitor          Revisitor
+	snapshots          SnapshotReader
+	receipts           ReceiptCodec
+	recorder           VerificationRecorder
+	ids                IDGenerator
+	extractorRevisions ExtractorRevisionResolver
 }
 
 // NewService validates the core dependencies. Every successful verification is
@@ -155,12 +165,19 @@ func NewService(config Config) (*Service, error) {
 		ids = randomVerificationID
 	}
 	return &Service{
-		revisitor: config.Revisitor,
-		snapshots: config.Snapshots,
-		receipts:  config.Receipts,
-		recorder:  config.Recorder,
-		ids:       ids,
+		revisitor:          config.Revisitor,
+		snapshots:          config.Snapshots,
+		receipts:           config.Receipts,
+		recorder:           config.Recorder,
+		ids:                ids,
+		extractorRevisions: config.ExtractorRevisions,
 	}, nil
+}
+
+type compiledClaim struct {
+	id      string
+	version int
+	ir      compiler.IR
 }
 
 type resolvedClaim struct {
@@ -169,6 +186,7 @@ type resolvedClaim struct {
 	quoteVerifiable  bool
 	oldReceipt       string
 	extractorVersion string
+	compiled         *compiledClaim
 }
 
 // Verify revisits one URL, adjudicates every claim, and records all rows plus
@@ -188,7 +206,7 @@ func (s *Service) Verify(ctx context.Context, request models.VerifyRequest) (*mo
 		return nil, err
 	}
 
-	targetURL, claims, err := s.resolveRequest(request)
+	targetURL, claims, err := s.resolveRequest(ctx, request)
 	if err != nil {
 		return nil, err
 	}
@@ -368,7 +386,7 @@ func changedOutboxEvent(destinationURL, secret string, changed ChangedEvent) (*l
 	}, nil
 }
 
-func (s *Service) resolveRequest(request models.VerifyRequest) (string, []resolvedClaim, error) {
+func (s *Service) resolveRequest(ctx context.Context, request models.VerifyRequest) (string, []resolvedClaim, error) {
 	hasClaims := len(request.Claims) > 0
 	hasReceipt := strings.TrimSpace(request.Receipt) != ""
 	if hasClaims == hasReceipt {
@@ -408,11 +426,24 @@ func (s *Service) resolveRequest(request models.VerifyRequest) (string, []resolv
 			}
 		}
 		claim := models.Claim{Path: payload.Path, Value: cloneRaw(payload.Value), Anchor: payload.Anchor}
-		resolved = append(resolved, resolvedClaim{
+		receiptClaim := resolvedClaim{
 			claim:            claim,
 			oldReceipt:       request.Receipt,
 			extractorVersion: payload.ExtractorVersion,
-		})
+		}
+		if payload.Anchor.Method == evidence.MethodCompiled {
+			if strings.TrimSpace(payload.ExtractorVersion) == "" {
+				return "", nil, fmt.Errorf("%w: compiled receipt has no extractor revision", ErrInvalidReceipt)
+			}
+			compiled, resolveErr := s.resolveCompiledRevision(ctx, payload.ExtractorVersion)
+			if resolveErr != nil {
+				return "", nil, resolveErr
+			}
+			receiptClaim.compiled = compiled
+		} else if strings.TrimSpace(payload.ExtractorVersion) != "" {
+			return "", nil, fmt.Errorf("%w: extractor revision requires compiled evidence", ErrInvalidReceipt)
+		}
+		resolved = append(resolved, receiptClaim)
 	} else {
 		var err error
 		targetURL, err = canonicalHTTPURL(request.URL)
@@ -422,6 +453,9 @@ func (s *Service) resolveRequest(request models.VerifyRequest) (string, []resolv
 		for index := range request.Claims {
 			claim := request.Claims[index]
 			claim.Value = cloneRaw(claim.Value)
+			if claim.Anchor.Method == evidence.MethodCompiled {
+				return "", nil, fmt.Errorf("%w %d: compiled evidence requires a signed extractor revision", ErrInvalidClaim, index)
+			}
 			resolved = append(resolved, resolvedClaim{claim: claim})
 		}
 	}
@@ -480,6 +514,75 @@ func (s *Service) resolveRequest(request models.VerifyRequest) (string, []resolv
 		}
 	}
 	return targetURL, resolved, nil
+}
+
+func (s *Service) resolveCompiledRevision(ctx context.Context, encoded string) (*compiledClaim, error) {
+	id, version, err := parseExtractorVersion(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidReceipt, err)
+	}
+	if s.extractorRevisions == nil {
+		return nil, fmt.Errorf("%w: extractor revision resolver is not configured", ErrEvidenceUnavailable)
+	}
+	revision, err := s.extractorRevisions.Get(ctx, id)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("%w: resolve extractor revision: %w", ErrEvidenceUnavailable, err)
+	}
+	if revision.ID != id || revision.Version != version {
+		return nil, fmt.Errorf("%w: extractor revision identity mismatch", ErrEvidenceUnavailable)
+	}
+	// ReplayField performs the definitive resource and IR validation against
+	// each snapshot. Keep a defensive copy so a mutable test or adapter cannot
+	// change the revision after identity validation.
+	ir := cloneIR(revision.IR)
+	return &compiledClaim{id: id, version: version, ir: ir}, nil
+}
+
+func parseExtractorVersion(value string) (string, int, error) {
+	if value == "" || strings.TrimSpace(value) != value || strings.Count(value, "@") != 1 {
+		return "", 0, errors.New("extractor_version must be <lowercase UUID>@<positive version>")
+	}
+	id, encodedVersion, _ := strings.Cut(value, "@")
+	if !validLowercaseUUID(id) || encodedVersion == "" || encodedVersion[0] == '0' {
+		return "", 0, errors.New("extractor_version must be <lowercase UUID>@<positive version>")
+	}
+	for _, character := range encodedVersion {
+		if character < '0' || character > '9' {
+			return "", 0, errors.New("extractor_version must be <lowercase UUID>@<positive version>")
+		}
+	}
+	version, err := strconv.Atoi(encodedVersion)
+	if err != nil || version <= 0 {
+		return "", 0, errors.New("extractor_version must be <lowercase UUID>@<positive version>")
+	}
+	return id, version, nil
+}
+
+func validLowercaseUUID(value string) bool {
+	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
+		return false
+	}
+	for index, character := range value {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			continue
+		}
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneIR(value compiler.IR) compiler.IR {
+	copy := compiler.IR{Version: value.Version, Fields: make([]compiler.FieldRule, len(value.Fields))}
+	for index := range value.Fields {
+		copy.Fields[index] = value.Fields[index]
+		copy.Fields[index].Transforms = append([]string(nil), value.Fields[index].Transforms...)
+	}
+	return copy
 }
 
 func validateAnchor(anchor evidence.Anchor) error {
@@ -575,6 +678,16 @@ func (s *Service) loadOldSnapshot(targetURL string, claims []resolvedClaim) ([]b
 	}
 	oldQuotes := newQuoteCorpus(oldPage.text)
 	for index := range claims {
+		if claims[index].compiled != nil {
+			replayed, replayErr := replayCompiledClaim(claims[index], string(oldHTML))
+			if replayErr != nil {
+				return nil, fmt.Errorf("%w: replay old snapshot path %q: %v", ErrEvidenceUnavailable, claims[index].claim.Path, replayErr)
+			}
+			if !replayed.Found || !rawScalarEqual(replayed.Value, claims[index].claim.Value) {
+				return nil, fmt.Errorf("%w: old snapshot does not match compiled receipt path %q", ErrEvidenceUnavailable, claims[index].claim.Path)
+			}
+			continue
+		}
 		if !oldSnapshotSupportsClaim(oldPage, oldQuotes, claims[index]) {
 			return nil, fmt.Errorf(
 				"%w %d: old snapshot %q does not support path %q and value %s",
@@ -587,6 +700,62 @@ func (s *Service) loadOldSnapshot(targetURL string, claims []resolvedClaim) ([]b
 		}
 	}
 	return oldHTML, nil
+}
+
+func replayCompiledClaim(claim resolvedClaim, html string) (compiler.ReplayResult, error) {
+	if claim.compiled == nil {
+		return compiler.ReplayResult{}, errors.New("compiled revision is missing")
+	}
+	fieldName, err := compiledFieldName(claim.claim.Path)
+	if err != nil {
+		return compiler.ReplayResult{}, err
+	}
+	return compiler.ReplayField(claim.compiled.ir, fieldName, html)
+}
+
+// compiledFieldName reverses evidence's top-level path escaping exactly.
+// Compiler IR emits scalar top-level fields only, so an unescaped dot would
+// denote a nested path that no immutable FieldRule can truthfully represent.
+func compiledFieldName(path string) (string, error) {
+	var field strings.Builder
+	field.Grow(len(path))
+	for index := 0; index < len(path); index++ {
+		switch path[index] {
+		case '.':
+			return "", errors.New("compiled receipt path cannot contain an unescaped separator")
+		case '\\':
+			if index+1 < len(path) && path[index+1] == '.' {
+				field.WriteByte('.')
+				index++
+				continue
+			}
+			field.WriteByte('\\')
+		default:
+			field.WriteByte(path[index])
+		}
+	}
+	name := field.String()
+	if strings.ReplaceAll(name, ".", `\.`) != path {
+		return "", errors.New("compiled receipt path is not canonically escaped")
+	}
+	return name, nil
+}
+
+func rawScalarEqual(first, second json.RawMessage) bool {
+	left, err := decodeScalar(first)
+	if err != nil {
+		return false
+	}
+	right, err := decodeScalar(second)
+	if err != nil || left.kind != right.kind {
+		return false
+	}
+	// decodeScalar canonicalizes JSON string escapes and insignificant outer
+	// whitespace while deliberately retaining a number's lexical form. A
+	// compiled replay has already applied every declared transform and emitted
+	// its typed value through json.Marshal, so verification must not add the
+	// generic verifier's case/whitespace or rational-number equivalence here.
+	return bytes.Equal(left.raw, right.raw)
 }
 
 func oldSnapshotSupportsClaim(page *canonicalPage, quotes quoteCorpus, claim resolvedClaim) bool {
@@ -776,6 +945,59 @@ func (s *Service) verifyOne(
 		return result, row, nil, nil
 	}
 
+	if claim.compiled != nil {
+		replayed, err := replayCompiledClaim(claim, observation.RawHTML)
+		if err != nil {
+			return models.ClaimResult{}, ledger.Verification{}, nil, fmt.Errorf(
+				"%w: replay current snapshot path %q: %v",
+				ErrEvidenceUnavailable,
+				claim.claim.Path,
+				err,
+			)
+		}
+		if !replayed.Found {
+			result.Status = models.VerifyStatusGone
+			result.GoneScope = models.VerifyGoneScopeField
+			row.Outcome = ledger.OutcomeGone
+			row.GoneScope = ledger.GoneScopeField
+			return result, row, nil, nil
+		}
+
+		anchor := hydrateCompiledAnchor(replayed.Anchor, page.text, observation, verifiedAt)
+		if rawScalarEqual(replayed.Value, claim.claim.Value) {
+			result.Status = models.VerifyStatusConfirmed
+			result.Evidence = anchorPointer(anchor)
+			row.Outcome = ledger.OutcomeConfirmed
+			receipt, signErr := s.signCurrent(observation.FinalURL, claim, claim.claim.Value, anchor, verifiedAt)
+			if signErr != nil {
+				return models.ClaimResult{}, ledger.Verification{}, nil, signErr
+			}
+			result.Receipt = receipt
+			row.Receipt = receipt
+			return result, row, nil, nil
+		}
+
+		result.Status = models.VerifyStatusChanged
+		result.NewValue = cloneRaw(replayed.Value)
+		result.Evidence = anchorPointer(anchor)
+		row.Outcome = ledger.OutcomeChanged
+		row.NewValue = cloneRaw(replayed.Value)
+		receipt, signErr := s.signCurrent(observation.FinalURL, claim, replayed.Value, anchor, verifiedAt)
+		if signErr != nil {
+			return models.ClaimResult{}, ledger.Verification{}, nil, signErr
+		}
+		result.Receipt = receipt
+		row.Receipt = receipt
+		change := &FactChange{
+			Path:     claim.claim.Path,
+			OldValue: cloneRaw(claim.claim.Value),
+			NewValue: cloneRaw(replayed.Value),
+			Evidence: anchor,
+			Receipt:  receipt,
+		}
+		return result, row, change, nil
+	}
+
 	if claim.claim.Anchor.Selector != "" {
 		candidate, quote, quoteSpan, selectorState := page.scalarAtSelector(claim.claim.Anchor.Selector, claim.scalar.kind)
 		if selectorState == selectorValue {
@@ -847,6 +1069,25 @@ func (s *Service) verifyOne(
 	row.Outcome = ledger.OutcomeGone
 	row.GoneScope = ledger.GoneScopeField
 	return result, row, nil, nil
+}
+
+func hydrateCompiledAnchor(
+	anchor evidence.Anchor,
+	cleaned string,
+	observation RevisitResult,
+	fetchedAt time.Time,
+) evidence.Anchor {
+	anchor.TextRange = [2]int{}
+	if anchor.Quote != "" {
+		start := strings.Index(cleaned, anchor.Quote)
+		if start >= 0 && strings.LastIndex(cleaned, anchor.Quote) == start {
+			anchor.TextRange = [2]int{start, start + len(anchor.Quote)}
+		}
+	}
+	anchor.Method = evidence.MethodCompiled
+	anchor.SnapshotID = observation.SnapshotID
+	anchor.FetchedAt = fetchedAt
+	return anchor
 }
 
 func (s *Service) signCurrent(

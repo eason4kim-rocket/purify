@@ -139,6 +139,9 @@ func TestServiceExtractBuildsEvidenceAndReceiptsFromSelectedSource(t *testing.T)
 		if payload.URL != result.Source.FinalURL || payload.Anchor.SnapshotID != string(result.Source.SnapshotID) || !payload.Anchor.FetchedAt.Equal(fetchedAt) {
 			t.Fatalf("receipt payload = %#v", payload)
 		}
+		if payload.ExtractorVersion != "" {
+			t.Fatalf("LLM receipt extractor version = %q, want empty", payload.ExtractorVersion)
+		}
 		if token := (*response.Receipts)[payload.Path]; token != "signed:"+payload.Path {
 			t.Fatalf("receipt[%q] = %q", payload.Path, token)
 		}
@@ -234,8 +237,14 @@ func TestServiceValidationAndCancellationAvoidExternalCalls(t *testing.T) {
 	}{
 		{name: "nil request", ctx: context.Background()},
 		{name: "relative URL", request: func() *models.ExtractRequest { r := validExtractRequest(); r.URL = "/relative"; return r }(), ctx: context.Background()},
-		{name: "missing LLM key", request: func() *models.ExtractRequest { r := validExtractRequest(); r.LLMAPIKey = ""; return r }(), ctx: context.Background()},
+		{name: "missing LLM key", request: func() *models.ExtractRequest {
+			r := validExtractRequest()
+			r.Engine = "llm"
+			r.LLMAPIKey = ""
+			return r
+		}(), ctx: context.Background()},
 		{name: "invalid schema", request: func() *models.ExtractRequest { r := validExtractRequest(); r.Schema = json.RawMessage(`{`); return r }(), ctx: context.Background()},
+		{name: "invalid engine", request: func() *models.ExtractRequest { r := validExtractRequest(); r.Engine = "hybrid"; return r }(), ctx: context.Background()},
 		{name: "canceled context", request: validExtractRequest(), ctx: canceledContext()},
 	}
 	for _, test := range tests {
