@@ -7,19 +7,27 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	urlpkg "net/url"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/use-agent/purify/llm"
 	"github.com/use-agent/purify/models"
 )
 
 const (
-	maxAPIResponseBytes      int64 = 32 << 20
-	maxVerifyURLBytes              = 16 << 10
-	maxVerifyClaimsJSONBytes       = 512 << 10
+	maxAPIResponseBytes          int64 = 32 << 20
+	maxVerifyURLBytes                  = 16 << 10
+	maxVerifyClaimsJSONBytes           = 512 << 10
+	maxExtractSchemaJSONBytes          = 512 << 10
+	maxExtractLLMCredentialBytes       = 16 << 10
+	maxExtractLLMModelBytes            = 256
+	maxExtractLLMBaseURLBytes          = 16 << 10
 )
 
 type apiHTTPResponse struct {
@@ -99,20 +107,6 @@ type mapResponse struct {
 	} `json:"error"`
 }
 
-// extractResponse mirrors the Purify extract API response.
-type extractResponse struct {
-	Success  bool            `json:"success"`
-	Data     json.RawMessage `json:"data"`
-	Metadata *struct {
-		Title     string `json:"title"`
-		SourceURL string `json:"source_url"`
-	} `json:"metadata"`
-	Error *struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
-
 func newVerifyFactTool() mcp.Tool {
 	return mcp.NewTool("verify_fact",
 		mcp.WithDescription("Revisit a web page and verify evidence-backed claims, returning confirmed, changed, or gone for each claim."),
@@ -123,6 +117,44 @@ func newVerifyFactTool() mcp.Tool {
 		mcp.WithString("claims",
 			mcp.Required(),
 			mcp.Description("A non-empty JSON array of evidence-backed Purify claims"),
+		),
+		mcp.WithSchemaAdditionalProperties(false),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
+	)
+}
+
+func newExtractDataTool() mcp.Tool {
+	return mcp.NewTool("extract_data",
+		mcp.WithDescription("Scrape a web page and extract structured data. The default auto engine uses a compiled extractor first and falls back to the caller's LLM only when an LLM API key is supplied."),
+		mcp.WithString("url",
+			mcp.Required(),
+			mcp.Description("The URL of the web page to scrape"),
+			mcp.MaxLength(maxVerifyURLBytes),
+		),
+		mcp.WithString("schema",
+			mcp.Required(),
+			mcp.Description("One JSON value containing the desired output schema"),
+			mcp.MaxLength(maxExtractSchemaJSONBytes),
+		),
+		mcp.WithString("engine",
+			mcp.Description("Extraction engine: auto (compiled first, optional LLM fallback), compiled (deterministic only), or llm (direct caller-funded LLM)"),
+			mcp.Enum("auto", "compiled", "llm"),
+			mcp.DefaultString("auto"),
+		),
+		mcp.WithString("llm_api_key",
+			mcp.Description("Optional caller-owned LLM credential. Required only when engine is llm; auto can use it for fallback."),
+			mcp.MaxLength(maxExtractLLMCredentialBytes),
+		),
+		mcp.WithString("llm_model",
+			mcp.Description("LLM model for llm or auto fallback (default: gpt-4o-mini)"),
+			mcp.MaxLength(maxExtractLLMModelBytes),
+		),
+		mcp.WithString("llm_base_url",
+			mcp.Description("OpenAI-compatible base URL for llm or auto fallback (default: https://api.openai.com/v1)"),
+			mcp.MaxLength(maxExtractLLMBaseURLBytes),
 		),
 		mcp.WithSchemaAdditionalProperties(false),
 		mcp.WithReadOnlyHintAnnotation(false),
@@ -216,29 +248,7 @@ func main() {
 	)
 	s.AddTool(mapSiteTool, handleMapSite(apiURL, apiKey))
 
-	// extract_data tool
-	extractDataTool := mcp.NewTool("extract_data",
-		mcp.WithDescription("Scrape a web page and extract structured data using an LLM. Requires a JSON schema describing the desired output and an LLM API key."),
-		mcp.WithString("url",
-			mcp.Required(),
-			mcp.Description("The URL of the web page to scrape"),
-		),
-		mcp.WithString("schema",
-			mcp.Required(),
-			mcp.Description("JSON schema string describing the desired output structure"),
-		),
-		mcp.WithString("llm_api_key",
-			mcp.Required(),
-			mcp.Description("API key for the LLM service (OpenAI-compatible)"),
-		),
-		mcp.WithString("llm_model",
-			mcp.Description("LLM model to use (default: 'gpt-4o-mini')"),
-		),
-		mcp.WithString("llm_base_url",
-			mcp.Description("Base URL for the LLM API (default: 'https://api.openai.com/v1'). Supports any OpenAI-compatible API."),
-		),
-	)
-	s.AddTool(extractDataTool, handleExtractData(apiURL, apiKey))
+	s.AddTool(newExtractDataTool(), handleExtractData(apiURL, apiKey))
 
 	if err := server.ServeStdio(s); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
@@ -728,74 +738,333 @@ func handleMapSite(apiURL, apiKey string) server.ToolHandlerFunc {
 }
 
 func handleExtractData(apiURL, apiKey string) server.ToolHandlerFunc {
-	client := &http.Client{Timeout: 120 * time.Second}
+	return handleExtractDataWithClient(newExtractHTTPClient(), apiURL, apiKey)
+}
 
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		url, err := request.RequireString("url")
-		if err != nil {
-			return mcp.NewToolResultError("url is required"), nil
-		}
-
-		schemaStr, err := request.RequireString("schema")
-		if err != nil {
-			return mcp.NewToolResultError("schema is required"), nil
-		}
-
-		llmAPIKey, err := request.RequireString("llm_api_key")
-		if err != nil {
-			return mcp.NewToolResultError("llm_api_key is required"), nil
-		}
-
-		// Validate schema is valid JSON.
-		var schemaJSON json.RawMessage
-		if err := json.Unmarshal([]byte(schemaStr), &schemaJSON); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("schema must be valid JSON: %v", err)), nil
-		}
-
-		payload := map[string]interface{}{
-			"url":         url,
-			"schema":      schemaJSON,
-			"llm_api_key": llmAPIKey,
-		}
-
-		if llmModel := request.GetString("llm_model", ""); llmModel != "" {
-			payload["llm_model"] = llmModel
-		}
-		if llmBaseURL := request.GetString("llm_base_url", ""); llmBaseURL != "" {
-			payload["llm_base_url"] = llmBaseURL
-		}
-
-		respBody, err := apiPost(ctx, client, apiURL, apiKey, "/api/v1/extract", payload)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("extract request failed: %v", err)), nil
-		}
-
-		var extResp extractResponse
-		if err := json.Unmarshal(respBody, &extResp); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("failed to parse extract response: %v", err)), nil
-		}
-
-		if !extResp.Success {
-			errMsg := "extraction failed"
-			if extResp.Error != nil {
-				errMsg = fmt.Sprintf("[%s] %s", extResp.Error.Code, extResp.Error.Message)
-			}
-			return mcp.NewToolResultError(errMsg), nil
-		}
-
-		// Format the extracted data as pretty JSON.
-		var prettyData bytes.Buffer
-		if err := json.Indent(&prettyData, extResp.Data, "", "  "); err != nil {
-			// Fall back to raw JSON.
-			prettyData.Write(extResp.Data)
-		}
-
-		var result string
-		if extResp.Metadata != nil {
-			result = fmt.Sprintf("Source: %s\nTitle: %s\n\n", extResp.Metadata.SourceURL, extResp.Metadata.Title)
-		}
-		result += "Extracted Data:\n" + prettyData.String()
-
-		return mcp.NewToolResultText(result), nil
+func newExtractHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 120 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
+}
+
+func handleExtractDataWithClient(client *http.Client, apiURL, apiKey string) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		arguments := request.GetArguments()
+		if err := validateExtractArguments(arguments); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		url, err := requiredExtractString(arguments, "url")
+		if err != nil || strings.TrimSpace(url) == "" {
+			return mcp.NewToolResultError("url is required and must be a non-empty string"), nil
+		}
+		if len(url) > maxVerifyURLBytes {
+			return mcp.NewToolResultError("url exceeds the 16384-byte limit"), nil
+		}
+		url = strings.TrimSpace(url)
+		parsedURL, err := urlpkg.ParseRequestURI(url)
+		if err != nil || parsedURL.Host == "" || parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+			return mcp.NewToolResultError("url must be an absolute http or https URL"), nil
+		}
+
+		schemaString, err := requiredExtractString(arguments, "schema")
+		if err != nil {
+			return mcp.NewToolResultError("schema is required and must be a JSON string"), nil
+		}
+		schemaJSON, err := decodeExtractSchema(schemaString)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("schema must be one valid JSON schema: %v", err)), nil
+		}
+
+		engine, err := optionalExtractString(arguments, "engine")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if engine == "" {
+			engine = "auto"
+		}
+		switch engine {
+		case "auto", "compiled", "llm":
+		default:
+			return mcp.NewToolResultError("engine must be auto, compiled, or llm"), nil
+		}
+
+		llmAPIKey, err := optionalExtractString(arguments, "llm_api_key")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		llmModel, err := optionalExtractString(arguments, "llm_model")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		llmBaseURL, err := optionalExtractString(arguments, "llm_base_url")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if len(llmAPIKey) > maxExtractLLMCredentialBytes {
+			return mcp.NewToolResultError("llm_api_key exceeds the 16384-byte limit"), nil
+		}
+		if len(llmModel) > maxExtractLLMModelBytes {
+			return mcp.NewToolResultError("llm_model exceeds the 256-byte limit"), nil
+		}
+		if len(llmBaseURL) > maxExtractLLMBaseURLBytes {
+			return mcp.NewToolResultError("llm_base_url exceeds the 16384-byte limit"), nil
+		}
+		if engine == "llm" && strings.TrimSpace(llmAPIKey) == "" {
+			return mcp.NewToolResultError("llm_api_key is required when engine is llm"), nil
+		}
+		if engine != "compiled" && llmBaseURL != "" {
+			llmBaseURL, err = normalizeExtractLLMBaseURL(llmBaseURL)
+			if err != nil {
+				return mcp.NewToolResultError("llm_base_url must be an absolute http or https URL without credentials, query, or fragment"), nil
+			}
+		}
+
+		payload := models.ExtractRequest{
+			URL:    url,
+			Schema: append(json.RawMessage(nil), schemaJSON...),
+			Engine: engine,
+		}
+		if engine != "compiled" {
+			payload.LLMAPIKey = llmAPIKey
+			payload.LLMModel = llmModel
+			payload.LLMBaseURL = llmBaseURL
+		}
+
+		apiResponse, err := apiPostResponse(ctx, client, apiURL, apiKey, "/api/v1/extract", payload)
+		if err != nil {
+			message := redactExtractSecrets(fmt.Sprintf("extract request failed: %v", err), apiKey, llmAPIKey)
+			return mcp.NewToolResultError(message), nil
+		}
+
+		if apiResponse.StatusCode < http.StatusOK || apiResponse.StatusCode >= http.StatusMultipleChoices {
+			message := extractAPIError(apiResponse.StatusCode, apiResponse.Body)
+			return mcp.NewToolResultError(redactExtractSecrets(message, apiKey, llmAPIKey)), nil
+		}
+
+		extractResponse, err := decodeExtractResponse(apiResponse.Body)
+		if err != nil {
+			message := redactExtractSecrets(fmt.Sprintf("failed to parse extract response: %v", err), apiKey, llmAPIKey)
+			return mcp.NewToolResultError(message), nil
+		}
+		if !extractResponse.Success {
+			message := extractResponseError(extractResponse, apiResponse.StatusCode)
+			return mcp.NewToolResultError(redactExtractSecrets(message, apiKey, llmAPIKey)), nil
+		}
+
+		pretty, err := json.MarshalIndent(extractResponse, "", "  ")
+		if err != nil {
+			message := redactExtractSecrets(fmt.Sprintf("failed to format extract response: %v", err), apiKey, llmAPIKey)
+			return mcp.NewToolResultError(message), nil
+		}
+
+		return mcp.NewToolResultStructured(extractResponse, string(pretty)), nil
+	}
+}
+
+var extractArgumentNames = map[string]struct{}{
+	"url": {}, "schema": {}, "engine": {}, "llm_api_key": {}, "llm_model": {}, "llm_base_url": {},
+}
+
+func validateExtractArguments(arguments map[string]any) error {
+	unknown := make([]string, 0)
+	for name := range arguments {
+		if _, ok := extractArgumentNames[name]; !ok {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	return fmt.Errorf("unsupported extract_data argument %q", unknown[0])
+}
+
+func requiredExtractString(arguments map[string]any, name string) (string, error) {
+	value, ok := arguments[name]
+	if !ok {
+		return "", fmt.Errorf("%s is required", name)
+	}
+	result, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be a string", name)
+	}
+	return result, nil
+}
+
+func optionalExtractString(arguments map[string]any, name string) (string, error) {
+	value, ok := arguments[name]
+	if !ok {
+		return "", nil
+	}
+	result, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be a string", name)
+	}
+	return result, nil
+}
+
+func normalizeExtractLLMBaseURL(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	parsed, err := urlpkg.Parse(trimmed)
+	validScheme := err == nil && (strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https"))
+	if err != nil || !parsed.IsAbs() || parsed.Opaque != "" || parsed.Host == "" || parsed.Hostname() == "" ||
+		!validScheme || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" ||
+		strings.HasSuffix(parsed.Host, ":") {
+		return "", fmt.Errorf("invalid LLM base URL")
+	}
+	if port := parsed.Port(); port != "" {
+		numericPort, err := strconv.Atoi(port)
+		if err != nil || numericPort < 1 || numericPort > 65535 {
+			return "", fmt.Errorf("invalid LLM base URL")
+		}
+	}
+	return trimmed, nil
+}
+
+func decodeExtractSchema(raw string) (json.RawMessage, error) {
+	if len(raw) > maxExtractSchemaJSONBytes {
+		return nil, fmt.Errorf("schema exceeds %d-byte limit", maxExtractSchemaJSONBytes)
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+
+	var schema json.RawMessage
+	if err := decoder.Decode(&schema); err != nil {
+		return nil, err
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return nil, err
+	}
+	normalized, err := llm.NormalizeSchema(schema)
+	if err != nil {
+		return nil, err
+	}
+	if err := llm.ValidateSchema(normalized); err != nil {
+		return nil, err
+	}
+	return append(json.RawMessage(nil), schema...), nil
+}
+
+func decodeExtractResponse(body []byte) (models.ExtractResponse, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+
+	var response *models.ExtractResponse
+	if err := decoder.Decode(&response); err != nil {
+		return models.ExtractResponse{}, err
+	}
+	if response == nil {
+		return models.ExtractResponse{}, fmt.Errorf("response must be a JSON object")
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return models.ExtractResponse{}, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
+		return models.ExtractResponse{}, fmt.Errorf("response must be a JSON object")
+	}
+	if err := requirePresentJSONFields(fields, "response", "success", "metadata", "tokens", "timing"); err != nil {
+		return models.ExtractResponse{}, err
+	}
+	if err := requireNestedJSONFields(fields["metadata"], "metadata", "title", "source_url"); err != nil {
+		return models.ExtractResponse{}, err
+	}
+	if err := requireNestedJSONFields(fields["tokens"], "tokens", "original_estimate", "cleaned_estimate", "savings_percent"); err != nil {
+		return models.ExtractResponse{}, err
+	}
+	if err := requireNestedJSONFields(fields["timing"], "timing", "total_ms", "navigation_ms", "cleaning_ms", "extraction_ms"); err != nil {
+		return models.ExtractResponse{}, err
+	}
+	if response.Success {
+		if err := requirePresentJSONFields(fields, "response", "data"); err != nil {
+			return models.ExtractResponse{}, err
+		}
+		if len(response.Data) == 0 || !json.Valid(response.Data) {
+			return models.ExtractResponse{}, fmt.Errorf("successful response is missing valid data")
+		}
+		if response.Error != nil {
+			return models.ExtractResponse{}, fmt.Errorf("successful response must not contain an error")
+		}
+	} else if response.Error == nil {
+		return models.ExtractResponse{}, fmt.Errorf("unsuccessful response is missing an error")
+	}
+	if response.Error != nil {
+		if err := requireNestedJSONFields(fields["error"], "error", "code", "message"); err != nil {
+			return models.ExtractResponse{}, err
+		}
+	}
+	if response.Extractor != nil {
+		if err := requireNestedJSONFields(fields["extractor"], "extractor", "id", "version", "compiled_at", "validation", "mode"); err != nil {
+			return models.ExtractResponse{}, err
+		}
+		metadata := response.Extractor
+		if strings.TrimSpace(metadata.ID) == "" || metadata.Version <= 0 || metadata.CompiledAt.IsZero() ||
+			metadata.Validation < 0 || metadata.Validation > 1 || metadata.Mode != "compiled" {
+			return models.ExtractResponse{}, fmt.Errorf("response contains invalid extractor metadata")
+		}
+	}
+	return *response, nil
+}
+
+func requirePresentJSONFields(fields map[string]json.RawMessage, objectName string, names ...string) error {
+	for _, name := range names {
+		value, ok := fields[name]
+		if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return fmt.Errorf("%s is missing required field %q", objectName, name)
+		}
+	}
+	return nil
+}
+
+func requireNestedJSONFields(raw json.RawMessage, objectName string, names ...string) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return fmt.Errorf("%s must be a JSON object", objectName)
+	}
+	return requirePresentJSONFields(fields, objectName, names...)
+}
+
+func extractAPIError(statusCode int, body []byte) string {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	var response *struct {
+		Error *models.ErrorDetail `json:"error"`
+	}
+	if err := decoder.Decode(&response); err == nil && response != nil && requireJSONEOF(decoder) == nil {
+		return formatExtractError(response.Error, statusCode)
+	}
+	return fmt.Sprintf("extraction failed (HTTP %d)", statusCode)
+}
+
+func extractResponseError(response models.ExtractResponse, statusCode int) string {
+	return formatExtractError(response.Error, statusCode)
+}
+
+func formatExtractError(detail *models.ErrorDetail, statusCode int) string {
+	if detail != nil {
+		code := strings.TrimSpace(detail.Code)
+		message := strings.TrimSpace(detail.Message)
+		switch {
+		case code != "" && message != "":
+			return fmt.Sprintf("[%s] %s", code, message)
+		case message != "":
+			return message
+		case code != "":
+			return fmt.Sprintf("[%s] extraction failed (HTTP %d)", code, statusCode)
+		}
+	}
+	return fmt.Sprintf("extraction failed (HTTP %d)", statusCode)
+}
+
+func redactExtractSecrets(message string, secrets ...string) string {
+	for _, secret := range secrets {
+		secret = strings.TrimSpace(secret)
+		if secret != "" {
+			message = strings.ReplaceAll(message, secret, "[REDACTED]")
+		}
+	}
+	return message
 }
