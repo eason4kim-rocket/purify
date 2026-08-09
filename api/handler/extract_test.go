@@ -1,161 +1,186 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"reflect"
 	"testing"
-	"time"
 
-	"github.com/use-agent/purify/evidence"
-	"github.com/use-agent/purify/llm"
+	"github.com/gin-gonic/gin"
 	"github.com/use-agent/purify/models"
-	"github.com/use-agent/purify/receipts"
 )
 
-type fakeStructuredExtractor struct {
-	initial     json.RawMessage
-	repaired    json.RawMessage
-	extracts    int
-	repairs     int
-	initialUse  *models.LLMUsage
-	repairedUse *models.LLMUsage
-}
+func TestExtractDelegatesToServiceAndPreservesResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	wantResponse := &models.ExtractResponse{
+		Success:    true,
+		Data:       json.RawMessage(`{"count":3}`),
+		SnapshotID: "sha256:abc",
+		Timing:     models.ExtractTimingInfo{TotalMs: 12, NavigationMs: 5, CleaningMs: 3, ExtractionMs: 4},
+	}
+	service := &recordingExtractService{response: wantResponse}
+	router := gin.New()
+	router.POST("/extract", Extract(service))
+	body := `{
+		"url":"https://example.test/page",
+		"schema":{"type":"object"},
+		"llm_api_key":"secret",
+		"extract_mode":"pruning",
+		"evidence":true
+	}`
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/extract", bytes.NewBufferString(body))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
 
-func (f *fakeStructuredExtractor) Extract(context.Context, string, json.RawMessage, llm.ExtractParams) (*llm.ExtractResult, error) {
-	f.extracts++
-	return &llm.ExtractResult{Data: f.initial, Usage: f.initialUse}, nil
-}
-
-func (f *fakeStructuredExtractor) ExtractWithRepair(context.Context, string, json.RawMessage, json.RawMessage, []llm.Violation, llm.ExtractParams) (*llm.ExtractResult, error) {
-	f.repairs++
-	return &llm.ExtractResult{Data: f.repaired, Usage: f.repairedUse}, nil
-}
-
-func TestExtractWithValidationDoesNotRepairValidOutput(t *testing.T) {
-	client := &fakeStructuredExtractor{initial: json.RawMessage(`{"count":3}`)}
-	result, violations, err := extractWithValidation(context.Background(), client, "content", numberSchema(), llm.ExtractParams{})
-	if err != nil {
-		t.Fatalf("extractWithValidation() error = %v", err)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body)
 	}
-	if string(result.Data) != `{"count":3}` || len(violations) != 0 {
-		t.Fatalf("result = %s, violations = %#v", result.Data, violations)
+	if service.calls != 1 || service.request == nil || service.request.URL != "https://example.test/page" || service.request.ExtractMode != "pruning" || !service.request.Evidence {
+		t.Fatalf("service call = %d, request = %#v", service.calls, service.request)
 	}
-	if client.extracts != 1 || client.repairs != 0 {
-		t.Fatalf("calls = extract:%d repair:%d, want 1/0", client.extracts, client.repairs)
+	var got models.ExtractResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
 	}
-}
-
-func TestExtractWithValidationRepairsAtMostOnce(t *testing.T) {
-	client := &fakeStructuredExtractor{
-		initial:     json.RawMessage(`{"count":"three"}`),
-		repaired:    json.RawMessage(`{"count":3}`),
-		initialUse:  &models.LLMUsage{PromptTokens: 2, CompletionTokens: 1, TotalTokens: 3},
-		repairedUse: &models.LLMUsage{PromptTokens: 4, CompletionTokens: 2, TotalTokens: 6},
-	}
-	result, violations, err := extractWithValidation(context.Background(), client, "content", numberSchema(), llm.ExtractParams{})
-	if err != nil {
-		t.Fatalf("extractWithValidation() error = %v", err)
-	}
-	if len(violations) != 0 || string(result.Data) != `{"count":3}` {
-		t.Fatalf("result = %s, violations = %#v", result.Data, violations)
-	}
-	if client.extracts != 1 || client.repairs != 1 {
-		t.Fatalf("calls = extract:%d repair:%d, want 1/1", client.extracts, client.repairs)
-	}
-	if result.Usage == nil || result.Usage.TotalTokens != 9 {
-		t.Fatalf("usage = %#v, want accumulated total 9", result.Usage)
+	if !reflect.DeepEqual(got, *wantResponse) {
+		t.Fatalf("response = %#v, want %#v", got, *wantResponse)
 	}
 }
 
-func TestExtractWithValidationReturnsPartialAfterFailedRepair(t *testing.T) {
-	client := &fakeStructuredExtractor{
-		initial:  json.RawMessage(`{"count":"three"}`),
-		repaired: json.RawMessage(`{"count":"still three"}`),
-	}
-	result, violations, err := extractWithValidation(context.Background(), client, "content", numberSchema(), llm.ExtractParams{})
-	if err != nil {
-		t.Fatalf("extractWithValidation() error = %v", err)
-	}
-	if result == nil || len(violations) == 0 {
-		t.Fatalf("result = %#v, violations = %#v, want partial data and violations", result, violations)
-	}
-	if client.extracts != 1 || client.repairs != 1 {
-		t.Fatalf("calls = extract:%d repair:%d, want bounded 1/1", client.extracts, client.repairs)
-	}
-}
+func TestExtractRejectsBindingErrorsWithoutCallingService(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &recordingExtractService{}
+	router := gin.New()
+	router.POST("/extract", Extract(service))
 
-func numberSchema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{"count":{"type":"integer"}},"required":["count"],"additionalProperties":false}`)
-}
-
-type recordingReceiptSigner struct {
-	payloads []receipts.Payload
-}
-
-func (signer *recordingReceiptSigner) Sign(payload receipts.Payload) (string, error) {
-	signer.payloads = append(signer.payloads, payload)
-	return "signed:" + payload.Path, nil
-}
-
-func TestSignFieldReceiptsPreservesLeafClaims(t *testing.T) {
-	fetchedAt := time.Date(2026, time.August, 9, 8, 0, 0, 0, time.UTC)
-	issuedAt := fetchedAt.Add(time.Minute)
-	basis := models.EvidenceBasis{
-		"active": {Quote: "true", Method: evidence.MethodExact, SnapshotID: "sha256:abc", FetchedAt: fetchedAt},
-		"name":   {Quote: "Ada", Method: evidence.MethodExact, SnapshotID: "sha256:abc", FetchedAt: fetchedAt},
-		"price":  {Quote: "$29.99", Method: evidence.MethodNormalized, SnapshotID: "sha256:abc", FetchedAt: fetchedAt},
-	}
-	signer := &recordingReceiptSigner{}
-	tokens, err := signFieldReceipts(
-		json.RawMessage(`{"price":29.99,"active":true,"name":"Ada"}`),
-		basis,
-		"https://example.com/final",
-		issuedAt,
-		signer,
-	)
-	if err != nil {
-		t.Fatalf("signFieldReceipts() error = %v", err)
-	}
-	for _, path := range []string{"active", "name", "price"} {
-		if tokens[path] != "signed:"+path {
-			t.Fatalf("token %q = %q", path, tokens[path])
+	for _, body := range []string{
+		`{`,
+		`{"url":"not-a-url","schema":{},"llm_api_key":"secret"}`,
+		`{"url":"https://example.test","schema":{}}`,
+		`{"url":"https://example.test","schema":{},"llm_api_key":"secret","timeout":121}`,
+	} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/extract", bytes.NewBufferString(body))
+		request.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("body %s status = %d, response = %s", body, recorder.Code, recorder.Body)
 		}
 	}
-	if len(signer.payloads) != 3 {
-		t.Fatalf("signed payloads = %d, want 3", len(signer.payloads))
-	}
-	wantValues := map[string]string{"active": "true", "name": `"Ada"`, "price": "29.99"}
-	for index, payload := range signer.payloads {
-		if index > 0 && signer.payloads[index-1].Path > payload.Path {
-			t.Fatalf("payload order is not deterministic: %#v", signer.payloads)
-		}
-		if payload.URL != "https://example.com/final" || !payload.IssuedAt.Equal(issuedAt) || string(payload.Value) != wantValues[payload.Path] || payload.Anchor != basis[payload.Path] {
-			t.Fatalf("payload %q = %#v", payload.Path, payload)
-		}
+	if service.calls != 0 {
+		t.Fatalf("service calls = %d, want 0", service.calls)
 	}
 }
 
-func TestSignFieldReceiptsRejectsPathMismatch(t *testing.T) {
-	_, err := signFieldReceipts(
-		json.RawMessage(`{"name":"Ada"}`),
-		models.EvidenceBasis{"other": {Method: evidence.MethodUnlocated}},
-		"https://example.com",
-		time.Now(),
-		&recordingReceiptSigner{},
-	)
-	if err == nil {
-		t.Fatal("signFieldReceipts() accepted mismatched evidence paths")
+func TestExtractMapsWrappedDomainErrorsAndTiming(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	timing := models.ExtractTimingInfo{TotalMs: 44, NavigationMs: 20, CleaningMs: 10, ExtractionMs: 14}
+	service := &recordingExtractService{err: &timedExtractError{
+		cause:  models.NewScrapeError(models.ErrCodeLLMRateLimited, "slow down", nil),
+		timing: timing,
+	}}
+	router := gin.New()
+	router.POST("/extract", Extract(service))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/extract", bytes.NewBufferString(
+		`{"url":"https://example.test","schema":{},"llm_api_key":"secret"}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body)
 	}
-	if got := fmt.Sprint(err); got == "" {
-		t.Fatal("signFieldReceipts() returned an empty error")
+	var response models.ExtractResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Success || response.Error == nil || response.Error.Code != models.ErrCodeLLMRateLimited || response.Timing != timing {
+		t.Fatalf("response = %#v", response)
 	}
 }
 
-func TestEvidenceUnavailableMapsToServiceUnavailable(t *testing.T) {
-	errorValue := models.NewScrapeError(models.ErrCodeEvidenceUnavailable, "snapshot storage disabled", nil)
-	if got := mapExtractErrorToStatus(errorValue); got != http.StatusServiceUnavailable {
-		t.Fatalf("mapExtractErrorToStatus() = %d, want %d", got, http.StatusServiceUnavailable)
+func TestExtractFailsClosedForUnavailableOrEmptyService(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		name    string
+		handler gin.HandlerFunc
+	}{
+		{name: "nil service", handler: Extract(nil)},
+		{name: "nil response", handler: Extract(&recordingExtractService{})},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			router := gin.New()
+			router.POST("/extract", test.handler)
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/extract", bytes.NewBufferString(
+				`{"url":"https://example.test","schema":{},"llm_api_key":"secret"}`,
+			))
+			request.Header.Set("Content-Type", "application/json")
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body)
+			}
+		})
 	}
 }
+
+func TestMapExtractErrorToStatus(t *testing.T) {
+	tests := map[string]int{
+		models.ErrCodeTimeout:             http.StatusGatewayTimeout,
+		models.ErrCodeNavigation:          http.StatusBadGateway,
+		models.ErrCodeInvalidInput:        http.StatusBadRequest,
+		models.ErrCodeRateLimited:         http.StatusTooManyRequests,
+		models.ErrCodeLLMRateLimited:      http.StatusTooManyRequests,
+		models.ErrCodeUnauthorized:        http.StatusUnauthorized,
+		models.ErrCodeLLMAuthFailure:      http.StatusUnauthorized,
+		models.ErrCodeLLMFailure:          http.StatusBadGateway,
+		models.ErrCodeEvidenceUnavailable: http.StatusServiceUnavailable,
+		models.ErrCodeInternal:            http.StatusInternalServerError,
+	}
+	for code, want := range tests {
+		if got := mapExtractErrorToStatus(models.NewScrapeError(code, "test", nil)); got != want {
+			t.Fatalf("code %q status = %d, want %d", code, got, want)
+		}
+	}
+	if got := mapExtractErrorToStatus(nil); got != http.StatusInternalServerError {
+		t.Fatalf("nil error status = %d", got)
+	}
+}
+
+type recordingExtractService struct {
+	response *models.ExtractResponse
+	err      error
+	calls    int
+	request  *models.ExtractRequest
+}
+
+func (service *recordingExtractService) Extract(_ context.Context, request *models.ExtractRequest) (*models.ExtractResponse, error) {
+	service.calls++
+	if request != nil {
+		copy := *request
+		copy.Schema = append(json.RawMessage(nil), request.Schema...)
+		service.request = &copy
+	}
+	return service.response, service.err
+}
+
+type timedExtractError struct {
+	cause  error
+	timing models.ExtractTimingInfo
+}
+
+func (e *timedExtractError) Error() string { return e.cause.Error() }
+func (e *timedExtractError) Unwrap() error { return e.cause }
+func (e *timedExtractError) ExtractTiming() models.ExtractTimingInfo {
+	return e.timing
+}
+
+var _ error = (*timedExtractError)(nil)
+var _ interface {
+	ExtractTiming() models.ExtractTimingInfo
+} = (*timedExtractError)(nil)

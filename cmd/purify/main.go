@@ -16,6 +16,7 @@ import (
 	"github.com/use-agent/purify/cleaner"
 	"github.com/use-agent/purify/config"
 	"github.com/use-agent/purify/engine"
+	extractdomain "github.com/use-agent/purify/extract"
 	"github.com/use-agent/purify/jobs"
 	"github.com/use-agent/purify/llm"
 	"github.com/use-agent/purify/receipts"
@@ -109,10 +110,15 @@ func main() {
 
 	// ── 4e. Initialise LLM client ───────────────────────────────────
 	llmClient := llm.NewClient(nil)
+	extractService, err := extractdomain.NewService(scrapeService, llmClient, receiptSigner, extractdomain.Config{})
+	if err != nil {
+		slog.Error("failed to initialise extract service", "error", err)
+		os.Exit(1)
+	}
 
 	// ── 5. Setup router ─────────────────────────────────────────────
 	startTime := time.Now()
-	router := api.NewRouter(sc, cl, llmClient, receiptSigner, cfg, cc, startTime, scrapeService, batchService)
+	router := api.NewRouter(sc, cl, extractService, receiptSigner, cfg, cc, startTime, scrapeService, batchService)
 
 	// ── 6. Start HTTP server ────────────────────────────────────────
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -178,7 +184,7 @@ func newCanonicalScrapeService(sc *scraper.Scraper, cl *cleaner.Cleaner, cc *cac
 		httpEngine := engine.NewHTTPEngine(cfg.Browser.DefaultProxy)
 		backends = []engine.Engine{httpEngine, rodEngine, stealthEngine}
 
-		// Batch/Crawl/Extract still call Scraper.DoScrape during their staged
+		// Crawl and Map still call Scraper.DoScrape during their staged
 		// migration. Keep their dispatcher configured until those adapters move
 		// to the canonical service as well.
 		memory := engine.NewDomainMemory(24 * time.Hour)

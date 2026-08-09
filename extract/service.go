@@ -72,6 +72,15 @@ func (e *OperationError) Unwrap() error {
 	return e.Cause
 }
 
+// ExtractTiming lets transport adapters recover phase timing without depending
+// on this concrete error type.
+func (e *OperationError) ExtractTiming() models.ExtractTimingInfo {
+	if e == nil {
+		return models.ExtractTimingInfo{}
+	}
+	return e.Timing
+}
+
 // TimingFromError returns phase timing attached by Service.
 func TimingFromError(err error) (models.ExtractTimingInfo, bool) {
 	var operationError *OperationError
@@ -168,11 +177,17 @@ func (s *Service) fetchArtifact(ctx context.Context, request *models.ScrapeReque
 		return nil, models.NewScrapeError(models.ErrCodeInternal, "canonical scrape returned an empty result", nil)
 	}
 	if !result.Response.Success {
+		code := models.ErrCodeNavigation
 		message := "canonical scrape returned an unsuccessful response"
-		if result.Response.Error != nil && result.Response.Error.Message != "" {
-			message = result.Response.Error.Message
+		if result.Response.Error != nil {
+			if result.Response.Error.Code != "" {
+				code = result.Response.Error.Code
+			}
+			if result.Response.Error.Message != "" {
+				message = result.Response.Error.Message
+			}
 		}
-		return nil, models.NewScrapeError(models.ErrCodeNavigation, message, nil)
+		return nil, models.NewScrapeError(code, message, nil)
 	}
 	return &Artifact{Public: result.Response, Source: result.Source}, nil
 }
@@ -434,6 +449,11 @@ func cloneLLMUsage(usage *models.LLMUsage) *models.LLMUsage {
 func (s *Service) operationError(cause error, startedAt time.Time, timing models.ExtractTimingInfo) error {
 	if cause == nil {
 		cause = models.NewScrapeError(models.ErrCodeInternal, "unknown extraction failure", nil)
+	} else if errors.Is(cause, context.DeadlineExceeded) || errors.Is(cause, context.Canceled) {
+		var scrapeError *models.ScrapeError
+		if !errors.As(cause, &scrapeError) {
+			cause = models.NewScrapeError(models.ErrCodeTimeout, "extract request deadline exceeded", cause)
+		}
 	}
 	timing.TotalMs = elapsedMilliseconds(startedAt, s.now())
 	return &OperationError{Cause: cause, Timing: timing}

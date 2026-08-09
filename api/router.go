@@ -9,7 +9,6 @@ import (
 	"github.com/use-agent/purify/cache"
 	"github.com/use-agent/purify/cleaner"
 	"github.com/use-agent/purify/config"
-	"github.com/use-agent/purify/llm"
 	"github.com/use-agent/purify/receipts"
 	"github.com/use-agent/purify/scraper"
 )
@@ -22,7 +21,7 @@ import (
 //	API:     Auth (if enabled) → RateLimit
 //
 // Health and receipt verification endpoints are intentionally outside auth.
-func NewRouter(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient *llm.Client, receiptSigner *receipts.Signer, cfg *config.Config, cc *cache.Cache, startTime time.Time, scrapeRunner handler.ScrapeRunner, batchService handler.BatchService) *gin.Engine {
+func NewRouter(sc *scraper.Scraper, cl *cleaner.Cleaner, extractService handler.ExtractService, receiptSigner *receipts.Signer, cfg *config.Config, cc *cache.Cache, startTime time.Time, scrapeRunner handler.ScrapeRunner, batchService handler.BatchService) *gin.Engine {
 	gin.SetMode(cfg.Server.Mode)
 
 	r := gin.New()
@@ -49,7 +48,7 @@ func NewRouter(sc *scraper.Scraper, cl *cleaner.Cleaner, llmClient *llm.Client, 
 	protected.POST("/scrape", handler.Scrape(scrapeRunner))
 
 	// Extract (structured extraction via LLM)
-	protected.POST("/extract", handler.Extract(sc, cl, llmClient, receiptSigner))
+	protected.POST("/extract", handler.Extract(extractService))
 
 	// Batch
 	protected.POST("/batch/scrape", handler.PostBatch(batchService))

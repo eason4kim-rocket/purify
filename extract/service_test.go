@@ -251,6 +251,7 @@ func TestServiceValidationAndCancellationAvoidExternalCalls(t *testing.T) {
 				if !errors.Is(err, context.Canceled) {
 					t.Fatalf("error = %v, want context.Canceled", err)
 				}
+				assertScrapeErrorCode(t, err, models.ErrCodeTimeout)
 			} else {
 				assertScrapeErrorCode(t, err, models.ErrCodeInvalidInput)
 			}
