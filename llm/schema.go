@@ -2,12 +2,15 @@ package llm
 
 import (
 	"bytes"
+	"container/list"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
+	"sync"
 
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/use-agent/purify/models"
@@ -17,6 +20,63 @@ import (
 // API models can expose violations without introducing a models -> llm import
 // cycle.
 type Violation = models.SchemaViolation
+
+const (
+	// The cache is deliberately bounded by both item count and the canonical
+	// schema bytes represented by its keys. Compiled schemas are immutable
+	// after construction and jsonschema.Schema.Validate allocates per-call
+	// validator state, so a cached schema can be shared by concurrent callers.
+	schemaCacheMaxEntries     = 128
+	schemaCacheMaxBytes       = 8 << 20
+	schemaCacheMaxSchemaBytes = 512 << 10
+)
+
+type schemaCompileFunc func(json.RawMessage) (*jsonschema.Schema, error)
+
+type schemaCacheEntry struct {
+	key      string
+	bytes    int
+	compiled *jsonschema.Schema
+}
+
+type schemaCompileFlight struct {
+	done     chan struct{}
+	compiled *jsonschema.Schema
+	err      error
+}
+
+// compiledSchemaCache is a success-only LRU. Failed compilations are shared
+// only while they are in flight; retaining them would let arbitrary invalid
+// request schemas consume the cache indefinitely.
+type compiledSchemaCache struct {
+	mu             sync.Mutex
+	maxEntries     int
+	maxBytes       int
+	maxSchemaBytes int
+	bytes          int
+	entries        map[string]*list.Element
+	lru            list.List
+	inflight       map[string]*schemaCompileFlight
+	compile        schemaCompileFunc
+}
+
+var schemaCache = newCompiledSchemaCache(
+	schemaCacheMaxEntries,
+	schemaCacheMaxBytes,
+	schemaCacheMaxSchemaBytes,
+	compileNormalizedSchema,
+)
+
+func newCompiledSchemaCache(maxEntries, maxBytes, maxSchemaBytes int, compile schemaCompileFunc) *compiledSchemaCache {
+	return &compiledSchemaCache{
+		maxEntries:     maxEntries,
+		maxBytes:       maxBytes,
+		maxSchemaBytes: maxSchemaBytes,
+		entries:        make(map[string]*list.Element),
+		inflight:       make(map[string]*schemaCompileFlight),
+		compile:        compile,
+	}
+}
 
 var schemaKeywords = map[string]struct{}{
 	"$anchor": {}, "$comment": {}, "$defs": {}, "$dynamicAnchor": {}, "$dynamicRef": {}, "$id": {}, "$ref": {}, "$schema": {}, "$vocabulary": {},
@@ -216,6 +276,96 @@ func compileSchema(raw json.RawMessage) (*jsonschema.Schema, error) {
 	if err != nil {
 		return nil, err
 	}
+	canonical, err := canonicalSchema(normalized)
+	if err != nil {
+		return nil, err
+	}
+	return schemaCache.get(canonical, normalized)
+}
+
+func canonicalSchema(normalized json.RawMessage) ([]byte, error) {
+	decoder := json.NewDecoder(bytes.NewReader(normalized))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, fmt.Errorf("parse normalized JSON schema: %w", err)
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("encode canonical JSON schema: %w", err)
+	}
+	return canonical, nil
+}
+
+func (c *compiledSchemaCache) get(canonical, normalized json.RawMessage) (*jsonschema.Schema, error) {
+	digest := sha256.Sum256(canonical)
+	key := string(digest[:])
+
+	c.mu.Lock()
+	if element, ok := c.entries[key]; ok {
+		c.lru.MoveToFront(element)
+		compiled := element.Value.(*schemaCacheEntry).compiled
+		c.mu.Unlock()
+		return compiled, nil
+	}
+	if flight, ok := c.inflight[key]; ok {
+		c.mu.Unlock()
+		<-flight.done
+		return flight.compiled, flight.err
+	}
+	// Bound coordination state as strictly as stored entries. When all flight
+	// slots are occupied, an unrelated schema compiles without joining the
+	// cache; an existing same-key flight above can still always be shared.
+	if c.maxEntries <= 0 || len(c.inflight) >= c.maxEntries {
+		c.mu.Unlock()
+		return c.compile(bytes.Clone(normalized))
+	}
+	flight := &schemaCompileFlight{done: make(chan struct{})}
+	c.inflight[key] = flight
+	c.mu.Unlock()
+
+	// NormalizeSchema and canonicalSchema allocate their own buffers. Clone
+	// once more at this boundary so a compiler implementation can never retain
+	// storage owned by a caller or by a temporary normalization buffer.
+	compiled, compileErr := c.compile(bytes.Clone(normalized))
+
+	c.mu.Lock()
+	flight.compiled = compiled
+	flight.err = compileErr
+	delete(c.inflight, key)
+	if compileErr == nil {
+		c.addLocked(key, len(canonical), compiled)
+	}
+	close(flight.done)
+	c.mu.Unlock()
+	return compiled, compileErr
+}
+
+func (c *compiledSchemaCache) addLocked(key string, schemaBytes int, compiled *jsonschema.Schema) {
+	entryBytes := len(key) + schemaBytes
+	if c.maxEntries <= 0 || c.maxBytes <= 0 || c.maxSchemaBytes <= 0 ||
+		schemaBytes > c.maxSchemaBytes || entryBytes > c.maxBytes {
+		return
+	}
+
+	entry := &schemaCacheEntry{key: key, bytes: entryBytes, compiled: compiled}
+	element := c.lru.PushFront(entry)
+	c.entries[key] = element
+	c.bytes += entryBytes
+
+	for len(c.entries) > c.maxEntries || c.bytes > c.maxBytes {
+		oldest := c.lru.Back()
+		if oldest == nil {
+			break
+		}
+		oldEntry := oldest.Value.(*schemaCacheEntry)
+		delete(c.entries, oldEntry.key)
+		c.bytes -= oldEntry.bytes
+		c.lru.Remove(oldest)
+	}
+}
+
+func compileNormalizedSchema(normalized json.RawMessage) (*jsonschema.Schema, error) {
 	schemaDoc, err := jsonschema.UnmarshalJSON(strings.NewReader(string(normalized)))
 	if err != nil {
 		return nil, fmt.Errorf("parse JSON schema: %w", err)
