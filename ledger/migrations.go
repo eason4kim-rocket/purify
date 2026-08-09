@@ -379,4 +379,142 @@ var migrations = []string{
 	BEGIN
 		SELECT RAISE(ABORT, 'compiler sample last_seen_at cannot move backward');
 	END;`,
+	`CREATE TABLE compiler_attempts (
+		host TEXT NOT NULL CHECK (
+			typeof(host) = 'text' AND length(host) BETWEEN 1 AND 253 AND
+			host = lower(host) AND host = trim(host)
+		),
+		schema_hash TEXT NOT NULL CHECK (
+			typeof(schema_hash) = 'text' AND length(schema_hash) = 64 AND
+			schema_hash NOT GLOB '*[^0-9a-f]*'
+		),
+		content_profile TEXT NOT NULL CHECK (
+			typeof(content_profile) = 'text' AND
+			content_profile = 'extract-default-v1'
+		),
+		template_cluster_id TEXT NOT NULL CHECK (
+			typeof(template_cluster_id) = 'text' AND
+			length(template_cluster_id) = 64 AND
+			template_cluster_id NOT GLOB '*[^0-9a-f]*'
+		),
+		cluster_simhash BLOB NOT NULL CHECK (
+			typeof(cluster_simhash) = 'blob' AND length(cluster_simhash) = 8 AND
+			cluster_simhash <> zeroblob(8)
+		),
+		attempted_revision TEXT NOT NULL DEFAULT '' CHECK (
+			attempted_revision = '' OR (
+				length(attempted_revision) = 64 AND
+				attempted_revision NOT GLOB '*[^0-9a-f]*'
+			)
+		),
+		outcome TEXT NOT NULL DEFAULT '' CHECK (
+			outcome IN ('', 'success', 'weak', 'no_candidate', 'transient')
+		),
+		reason TEXT NOT NULL DEFAULT '' CHECK (
+			reason IN (
+				'', 'compiled', 'validation_below_threshold',
+				'samples_unavailable', 'sample_provenance_mismatch',
+				'sample_fingerprint_mismatch', 'no_extractor_candidate',
+				'catalog_unavailable', 'snapshot_unavailable', 'compile_failed',
+				'save_failed', 'task_timeout', 'task_canceled', 'panic_recovered'
+			)
+		),
+		cooldown_until TEXT CHECK (
+			cooldown_until IS NULL OR (
+				typeof(cooldown_until) = 'text' AND length(cooldown_until) = 30 AND
+				substr(cooldown_until, 5, 1) = '-' AND substr(cooldown_until, 8, 1) = '-' AND
+				substr(cooldown_until, 11, 1) = 'T' AND substr(cooldown_until, 14, 1) = ':' AND
+				substr(cooldown_until, 17, 1) = ':' AND substr(cooldown_until, 20, 1) = '.' AND
+				substr(cooldown_until, 30, 1) = 'Z' AND julianday(cooldown_until) IS NOT NULL
+			)
+		),
+		lease_id TEXT CHECK (
+			lease_id IS NULL OR (
+				length(lease_id) = 36 AND
+				substr(lease_id, 9, 1) = '-' AND substr(lease_id, 14, 1) = '-' AND
+				substr(lease_id, 19, 1) = '-' AND substr(lease_id, 24, 1) = '-' AND
+				length(replace(lease_id, '-', '')) = 32 AND
+				lease_id NOT GLOB '*[^0-9a-f-]*'
+			)
+		),
+		lease_revision TEXT CHECK (
+			lease_revision IS NULL OR (
+				length(lease_revision) = 64 AND
+				lease_revision NOT GLOB '*[^0-9a-f]*'
+			)
+		),
+		lease_until TEXT CHECK (
+			lease_until IS NULL OR (
+				typeof(lease_until) = 'text' AND length(lease_until) = 30 AND
+				substr(lease_until, 5, 1) = '-' AND substr(lease_until, 8, 1) = '-' AND
+				substr(lease_until, 11, 1) = 'T' AND substr(lease_until, 14, 1) = ':' AND
+				substr(lease_until, 17, 1) = ':' AND substr(lease_until, 20, 1) = '.' AND
+				substr(lease_until, 30, 1) = 'Z' AND julianday(lease_until) IS NOT NULL
+			)
+		),
+		created_at TEXT NOT NULL CHECK (
+			typeof(created_at) = 'text' AND length(created_at) = 30 AND
+			substr(created_at, 5, 1) = '-' AND substr(created_at, 8, 1) = '-' AND
+			substr(created_at, 11, 1) = 'T' AND substr(created_at, 14, 1) = ':' AND
+			substr(created_at, 17, 1) = ':' AND substr(created_at, 20, 1) = '.' AND
+			substr(created_at, 30, 1) = 'Z' AND julianday(created_at) IS NOT NULL
+		),
+		updated_at TEXT NOT NULL CHECK (
+			typeof(updated_at) = 'text' AND length(updated_at) = 30 AND
+			substr(updated_at, 5, 1) = '-' AND substr(updated_at, 8, 1) = '-' AND
+			substr(updated_at, 11, 1) = 'T' AND substr(updated_at, 14, 1) = ':' AND
+			substr(updated_at, 17, 1) = ':' AND substr(updated_at, 20, 1) = '.' AND
+			substr(updated_at, 30, 1) = 'Z' AND julianday(updated_at) IS NOT NULL
+		),
+		CHECK (updated_at >= created_at),
+		CHECK (cooldown_until IS NULL OR cooldown_until > updated_at),
+		CHECK (lease_until IS NULL OR lease_until > updated_at),
+		CHECK (
+			(outcome = '' AND attempted_revision = '' AND reason = '' AND cooldown_until IS NULL) OR
+			(outcome = 'success' AND attempted_revision <> '' AND reason = 'compiled' AND cooldown_until IS NULL) OR
+			(outcome = 'weak' AND attempted_revision <> '' AND reason = 'validation_below_threshold' AND cooldown_until IS NOT NULL) OR
+			(outcome = 'no_candidate' AND attempted_revision <> '' AND reason IN (
+				'samples_unavailable', 'sample_provenance_mismatch',
+				'sample_fingerprint_mismatch', 'no_extractor_candidate'
+			) AND cooldown_until IS NOT NULL) OR
+			(outcome = 'transient' AND attempted_revision <> '' AND reason IN (
+				'catalog_unavailable', 'snapshot_unavailable', 'compile_failed',
+				'save_failed', 'task_timeout', 'task_canceled', 'panic_recovered'
+			) AND cooldown_until IS NOT NULL)
+		),
+		CHECK (
+			(lease_id IS NULL AND lease_revision IS NULL AND lease_until IS NULL) OR
+			(lease_id IS NOT NULL AND lease_revision IS NOT NULL AND lease_until IS NOT NULL)
+		),
+		PRIMARY KEY (host, schema_hash, content_profile, template_cluster_id)
+	) STRICT, WITHOUT ROWID;
+
+	CREATE INDEX idx_compiler_attempts_cooldown
+		ON compiler_attempts(cooldown_until, updated_at)
+		WHERE cooldown_until IS NOT NULL;
+	CREATE INDEX idx_compiler_attempts_lease
+		ON compiler_attempts(lease_until, updated_at)
+		WHERE lease_until IS NOT NULL;
+	CREATE INDEX idx_compiler_attempts_updated
+		ON compiler_attempts(updated_at, host, schema_hash, content_profile, template_cluster_id);
+
+	CREATE TRIGGER trg_compiler_attempts_identity_immutable
+	BEFORE UPDATE ON compiler_attempts
+	WHEN
+		OLD.host IS NOT NEW.host OR
+		OLD.schema_hash IS NOT NEW.schema_hash OR
+		OLD.content_profile IS NOT NEW.content_profile OR
+		OLD.template_cluster_id IS NOT NEW.template_cluster_id OR
+		OLD.cluster_simhash IS NOT NEW.cluster_simhash OR
+		OLD.created_at IS NOT NEW.created_at
+	BEGIN
+		SELECT RAISE(ABORT, 'compiler attempt identity is immutable');
+	END;
+
+	CREATE TRIGGER trg_compiler_attempts_updated_monotonic
+	BEFORE UPDATE OF updated_at ON compiler_attempts
+	WHEN NEW.updated_at < OLD.updated_at
+	BEGIN
+		SELECT RAISE(ABORT, 'compiler attempt updated_at cannot move backward');
+	END;`,
 }

@@ -6,6 +6,7 @@ package snapshot
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -264,11 +265,24 @@ func (s *Store) Observations(id ID) ([]Meta, error) {
 // materializes the complete history. The callback runs synchronously while the
 // Store read lock is held; it should be fast and must not re-enter this Store.
 func (s *Store) HasObservation(id ID, match func(Meta) bool) (bool, error) {
+	return s.HasObservationContext(context.Background(), id, match)
+}
+
+// HasObservationContext is the cancellation-aware form of HasObservation.
+// It checks ctx throughout append-log scanning, torn-tail discovery, and the
+// legacy sidecar token stream without truncating provenance history.
+func (s *Store) HasObservationContext(ctx context.Context, id ID, match func(Meta) bool) (bool, error) {
 	if s == nil {
 		return false, errors.New("snapshot store is nil")
 	}
+	if ctx == nil {
+		return false, errors.New("snapshot observation context is nil")
+	}
 	if match == nil {
 		return false, errors.New("snapshot observation matcher is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	_, _, metaPath, err := s.paths(id)
 	if err != nil {
@@ -280,17 +294,17 @@ func (s *Store) HasObservation(id ID, match func(Meta) bool) (bool, error) {
 	defer s.mu.RUnlock()
 	digest, _ := digestFromID(id)
 	if _, err := os.Stat(observationsPath); err == nil {
-		if _, _, err := scanSidecar(metaPath, id, digest, nil); err != nil {
+		if _, _, err := scanSidecarContext(ctx, metaPath, id, digest, nil); err != nil {
 			return false, err
 		}
-		return visitObservationLog(observationsPath, func(meta Meta) (bool, error) {
+		return visitObservationLogContext(ctx, observationsPath, func(meta Meta) (bool, error) {
 			return match(meta), nil
 		})
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return false, fmt.Errorf("inspect snapshot observations: %w", err)
 	}
 
-	_, found, err := scanSidecar(metaPath, id, digest, func(meta Meta) (bool, error) {
+	_, found, err := scanSidecarContext(ctx, metaPath, id, digest, func(meta Meta) (bool, error) {
 		return match(meta), nil
 	})
 	return found, err
@@ -446,17 +460,27 @@ func appendObservation(path string, meta Meta) (retErr error) {
 }
 
 func visitObservationLog(path string, visit observationVisitor) (bool, error) {
+	return visitObservationLogContext(context.Background(), path, visit)
+}
+
+func visitObservationLogContext(ctx context.Context, path string, visit observationVisitor) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return false, fmt.Errorf("read snapshot observations: %w", err)
 	}
 	defer file.Close()
-	completeSize, _, err := completeObservationLogSize(file)
+	completeSize, _, err := completeObservationLogSizeContext(ctx, file)
 	if err != nil {
 		return false, fmt.Errorf("inspect snapshot observations: %w", err)
 	}
-	decoder := json.NewDecoder(io.LimitReader(file, completeSize))
+	decoder := json.NewDecoder(contextReader{ctx: ctx, reader: io.LimitReader(file, completeSize)})
 	for {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		var meta Meta
 		if err := decoder.Decode(&meta); errors.Is(err, io.EOF) {
 			return false, nil
@@ -465,6 +489,9 @@ func visitObservationLog(path string, visit observationVisitor) (bool, error) {
 		}
 		stop, err := visit(meta)
 		if err != nil {
+			return false, err
+		}
+		if err := ctx.Err(); err != nil {
 			return false, err
 		}
 		if stop {
@@ -477,6 +504,13 @@ func visitObservationLog(path string, visit observationVisitor) (bool, error) {
 // newline-delimited record. A torn final append is uncommitted and is ignored by
 // readers, then truncated by the next writer without scanning older history.
 func completeObservationLogSize(file *os.File) (complete, actual int64, err error) {
+	return completeObservationLogSizeContext(context.Background(), file)
+}
+
+func completeObservationLogSizeContext(ctx context.Context, file *os.File) (complete, actual int64, err error) {
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
 	info, err := file.Stat()
 	if err != nil {
 		return 0, 0, err
@@ -486,7 +520,13 @@ func completeObservationLogSize(file *os.File) (complete, actual int64, err erro
 		return 0, 0, nil
 	}
 	var last [1]byte
+	if err := ctx.Err(); err != nil {
+		return 0, actual, err
+	}
 	if _, err := file.ReadAt(last[:], actual-1); err != nil {
+		return 0, actual, err
+	}
+	if err := ctx.Err(); err != nil {
 		return 0, actual, err
 	}
 	if last[0] == '\n' {
@@ -496,6 +536,9 @@ func completeObservationLogSize(file *os.File) (complete, actual int64, err erro
 	const searchBlockBytes = 32 << 10
 	buffer := make([]byte, searchBlockBytes)
 	for end := actual; end > 0; {
+		if err := ctx.Err(); err != nil {
+			return 0, actual, err
+		}
 		start := end - int64(len(buffer))
 		if start < 0 {
 			start = 0
@@ -504,6 +547,9 @@ func completeObservationLogSize(file *os.File) (complete, actual int64, err erro
 		n, readErr := file.ReadAt(buffer[:length], start)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return 0, actual, readErr
+		}
+		if err := ctx.Err(); err != nil {
+			return 0, actual, err
 		}
 		if index := bytes.LastIndexByte(buffer[:n], '\n'); index >= 0 {
 			return start + int64(index) + 1, actual, nil
@@ -514,12 +560,19 @@ func completeObservationLogSize(file *os.File) (complete, actual int64, err erro
 }
 
 func scanSidecar(path string, expectedID ID, expectedDigest string, visit observationVisitor) (scannedSidecar, bool, error) {
+	return scanSidecarContext(context.Background(), path, expectedID, expectedDigest, visit)
+}
+
+func scanSidecarContext(ctx context.Context, path string, expectedID ID, expectedDigest string, visit observationVisitor) (scannedSidecar, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return scannedSidecar{}, false, err
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return scannedSidecar{}, false, fmt.Errorf("read snapshot metadata: %w", err)
 	}
 	defer file.Close()
-	decoder := json.NewDecoder(file)
+	decoder := json.NewDecoder(contextReader{ctx: ctx, reader: file})
 	opening, err := decoder.Token()
 	if err != nil {
 		return scannedSidecar{}, false, fmt.Errorf("decode snapshot metadata: %w", err)
@@ -533,6 +586,9 @@ func scanSidecar(path string, expectedID ID, expectedDigest string, visit observ
 	seenID := false
 	seenDigest := false
 	for decoder.More() {
+		if err := ctx.Err(); err != nil {
+			return scannedSidecar{}, false, err
+		}
 		rawKey, err := decoder.Token()
 		if err != nil {
 			return scannedSidecar{}, false, fmt.Errorf("decode snapshot metadata: %w", err)
@@ -587,6 +643,9 @@ func scanSidecar(path string, expectedID ID, expectedDigest string, visit observ
 				return scannedSidecar{}, false, errors.New("decode snapshot observations: value must be an array")
 			}
 			for decoder.More() {
+				if err := ctx.Err(); err != nil {
+					return scannedSidecar{}, false, err
+				}
 				record.ObservationCount++
 				var meta Meta
 				if err := decoder.Decode(&meta); err != nil {
@@ -609,10 +668,13 @@ func scanSidecar(path string, expectedID ID, expectedDigest string, visit observ
 				return scannedSidecar{}, false, errors.New("decode snapshot observations: unterminated array")
 			}
 		default:
-			if err := skipJSONValue(decoder); err != nil {
+			if err := skipJSONValueContext(ctx, decoder); err != nil {
 				return scannedSidecar{}, false, fmt.Errorf("decode snapshot metadata field %q: %w", key, err)
 			}
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return scannedSidecar{}, false, err
 	}
 	closing, err := decoder.Token()
 	if err != nil {
@@ -634,6 +696,13 @@ func scanSidecar(path string, expectedID ID, expectedDigest string, visit observ
 }
 
 func skipJSONValue(decoder *json.Decoder) error {
+	return skipJSONValueContext(context.Background(), decoder)
+}
+
+func skipJSONValueContext(ctx context.Context, decoder *json.Decoder) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	token, err := decoder.Token()
 	if err != nil {
 		return err
@@ -644,6 +713,9 @@ func skipJSONValue(decoder *json.Decoder) error {
 	}
 	depth := 1
 	for depth > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		token, err := decoder.Token()
 		if err != nil {
 			return err
@@ -660,6 +732,22 @@ func skipJSONValue(decoder *json.Decoder) error {
 		}
 	}
 	return nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (reader contextReader) Read(buffer []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := reader.reader.Read(buffer)
+	if contextErr := reader.ctx.Err(); contextErr != nil {
+		return n, contextErr
+	}
+	return n, err
 }
 
 func (s *Store) paths(id ID) (dir, blobPath, metaPath string, err error) {

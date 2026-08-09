@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -240,6 +241,137 @@ func TestStoreHasObservationStreamsAndValidatesIdentity(t *testing.T) {
 	if found, err := store.HasObservation(id, func(Meta) bool { called = true; return true }); found || err == nil || called {
 		t.Fatalf("HasObservation(corrupt SHA) = (%v, %v), callback=%v", found, err, called)
 	}
+}
+
+func TestStoreHasObservationContextCancelsLargeLogAndReleasesLock(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	html := []byte("context observation content")
+	initial := Meta{URL: "https://initial.example", FetchedAt: time.Unix(1, 0).UTC(), StatusCode: 200}
+	id, err := store.Put(html, initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, metaPath, err := store.paths(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.OpenFile(observationLogPath(metaPath), os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoder := json.NewEncoder(log)
+	other := Meta{URL: "https://other.example", FetchedAt: time.Unix(2, 0).UTC(), StatusCode: 200}
+	for range 20_000 {
+		if err := encoder.Encode(other); err != nil {
+			_ = log.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	visited := 0
+	found, err := store.HasObservationContext(ctx, id, func(Meta) bool {
+		visited++
+		if visited == 100 {
+			cancel()
+		}
+		return false
+	})
+	if found || !errors.Is(err, context.Canceled) || visited > 101 {
+		t.Fatalf("canceled lookup = found %v err %v visited %d", found, err, visited)
+	}
+
+	// Cancellation returns after releasing RLock, so a writer cannot remain
+	// blocked behind the abandoned scan.
+	written := make(chan error, 1)
+	go func() {
+		_, err := store.Put(html, Meta{URL: "https://writer.example", FetchedAt: time.Unix(3, 0).UTC(), StatusCode: 201})
+		written <- err
+	}()
+	select {
+	case err := <-written:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Put remained blocked after canceled observation scan")
+	}
+}
+
+func TestStoreHasObservationContextCancelsTornTailAndLegacySidecar(t *testing.T) {
+	t.Run("torn tail reverse scan", func(t *testing.T) {
+		store, err := NewStore(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		id, err := store.Put([]byte("torn context"), Meta{URL: "https://example.com", StatusCode: 200})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, metaPath, _ := store.paths(id)
+		if err := os.WriteFile(observationLogPath(metaPath), bytes.Repeat([]byte{'x'}, 32<<20), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		defer cancel()
+		started := time.Now()
+		found, err := store.HasObservationContext(ctx, id, func(Meta) bool { return false })
+		if found || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("torn-tail lookup = %v/%v", found, err)
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("torn-tail cancellation took %v", elapsed)
+		}
+	})
+
+	t.Run("legacy token stream", func(t *testing.T) {
+		store, err := NewStore(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		html := []byte("legacy context")
+		id, err := store.Put(html, Meta{URL: "https://example.com", StatusCode: 200})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, metaPath, _ := store.paths(id)
+		if err := os.Remove(observationLogPath(metaPath)); err != nil {
+			t.Fatal(err)
+		}
+		digest, _ := digestFromID(id)
+		legacy := make([]Meta, 20_000)
+		for index := range legacy {
+			legacy[index] = Meta{URL: "https://legacy.example", FetchedAt: time.Unix(int64(index), 0).UTC(), StatusCode: 200}
+		}
+		encoded, err := json.Marshal(sidecar{ID: id, SHA256: digest, Meta: legacy[len(legacy)-1], Observations: legacy})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(metaPath, encoded, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		visited := 0
+		found, err := store.HasObservationContext(ctx, id, func(Meta) bool {
+			visited++
+			if visited == 100 {
+				cancel()
+			}
+			return false
+		})
+		if found || !errors.Is(err, context.Canceled) || visited > 101 {
+			t.Fatalf("legacy cancellation = %v/%v visited=%d", found, err, visited)
+		}
+	})
 }
 
 func TestStoreMigratesLegacyObservationArrayToAppendOnlyLog(t *testing.T) {
