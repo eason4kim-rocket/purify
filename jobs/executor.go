@@ -27,8 +27,11 @@ var (
 // Task is a unit of work accepted by an Executor.
 //
 // The supplied context inherits the context passed to Submit. It is also
-// canceled when the executor closes. Tasks must return when that context is
-// canceled so Close can wait for all workers to exit.
+// canceled when the executor closes. Every task accepted by Submit is invoked
+// exactly once, including when its context is canceled while queued or the
+// executor closes. Tasks must inspect the context before expensive work and
+// return when it is canceled so they can settle their caller and Close can wait
+// for all workers to exit.
 type Task func(context.Context)
 
 type submission struct {
@@ -77,8 +80,9 @@ func NewExecutor(workerCount, queueCapacity int) (*Executor, error) {
 
 // Submit adds task to the global queue without blocking. It returns a stable
 // sentinel when shutdown has begun, the caller is already canceled, or the
-// queue is full. A task accepted immediately before concurrent shutdown may
-// return nil from Submit and will then be canceled by Close.
+// queue is full. A nil return transfers ownership of task to the executor: its
+// closure will be invoked exactly once. A task accepted immediately before
+// concurrent shutdown will be invoked with a context canceled by Close.
 func (e *Executor) Submit(ctx context.Context, task Task) error {
 	if e == nil {
 		return ErrClosed
@@ -108,9 +112,10 @@ func (e *Executor) Submit(ctx context.Context, task Task) error {
 	}
 }
 
-// Close prevents new submissions, cancels queued and running work, and waits
-// for every worker to exit. It is safe to call repeatedly or concurrently.
-// Tasks must cooperate with context cancellation for Close to return.
+// Close prevents new submissions, cancels queued and running work, invokes all
+// accepted queued tasks with canceled contexts, and waits for every worker to
+// exit. It is safe to call repeatedly or concurrently. Tasks must cooperate
+// with context cancellation for Close to return.
 func (e *Executor) Close() {
 	if e == nil {
 		return
@@ -131,9 +136,6 @@ func (e *Executor) work() {
 	defer e.workers.Done()
 
 	for queued := range e.queue {
-		if e.ctx.Err() != nil || queued.ctx.Err() != nil {
-			continue
-		}
 		e.run(queued)
 	}
 }
@@ -145,6 +147,12 @@ func (e *Executor) run(queued submission) {
 		cancelTask()
 		close(shutdownRelayed)
 	})
+	// AfterFunc schedules its callback asynchronously when e.ctx is already
+	// canceled. Reflect that state before invoking a task drained during Close,
+	// so settlement code observes cancellation on its first context check.
+	if e.ctx.Err() != nil {
+		cancelTask()
+	}
 
 	defer func() {
 		if !stopShutdownRelay() {

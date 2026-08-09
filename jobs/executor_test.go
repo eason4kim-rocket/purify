@@ -232,7 +232,7 @@ func TestExecutorPropagatesCallerCancellation(t *testing.T) {
 	}
 }
 
-func TestExecutorSkipsCanceledQueuedTask(t *testing.T) {
+func TestExecutorInvokesCanceledQueuedTaskExactlyOnce(t *testing.T) {
 	executor := newTestExecutor(t, 1, 2)
 	release := make(chan struct{})
 	var closeRelease sync.Once
@@ -248,9 +248,11 @@ func TestExecutorSkipsCanceledQueuedTask(t *testing.T) {
 	receive(t, started, "queue blocker start")
 
 	queuedCtx, cancelQueued := context.WithCancel(context.Background())
-	var canceledTaskRan atomic.Bool
-	if err := executor.Submit(queuedCtx, func(context.Context) {
-		canceledTaskRan.Store(true)
+	canceledTaskDone := make(chan error, 1)
+	var canceledTaskCalls atomic.Int32
+	if err := executor.Submit(queuedCtx, func(ctx context.Context) {
+		canceledTaskCalls.Add(1)
+		canceledTaskDone <- ctx.Err()
 	}); err != nil {
 		t.Fatalf("Submit(canceled queued task) error = %v", err)
 	}
@@ -263,9 +265,12 @@ func TestExecutorSkipsCanceledQueuedTask(t *testing.T) {
 
 	cancelQueued()
 	closeRelease.Do(func() { close(release) })
+	if err := receive(t, canceledTaskDone, "canceled queued task settlement"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled queued task context error = %v, want %v", err, context.Canceled)
+	}
 	receive(t, markerDone, "marker completion")
-	if canceledTaskRan.Load() {
-		t.Fatal("task ran after its queued submission context was canceled")
+	if got := canceledTaskCalls.Load(); got != 1 {
+		t.Fatalf("canceled queued task calls = %d, want 1", got)
 	}
 }
 
@@ -287,10 +292,12 @@ func TestExecutorCloseCancelsRunningAndQueuedWork(t *testing.T) {
 		receive(t, started, "running task start")
 	}
 
-	var queuedRan atomic.Int32
+	queuedSettled := make(chan error, 2)
+	var queuedCalls atomic.Int32
 	for range 2 {
-		if err := executor.Submit(context.Background(), func(context.Context) {
-			queuedRan.Add(1)
+		if err := executor.Submit(context.Background(), func(ctx context.Context) {
+			queuedCalls.Add(1)
+			queuedSettled <- ctx.Err()
 		}); err != nil {
 			t.Fatalf("Submit(queued task) error = %v", err)
 		}
@@ -302,8 +309,13 @@ func TestExecutorCloseCancelsRunningAndQueuedWork(t *testing.T) {
 			t.Fatalf("shutdown task error = %v, want %v", err, context.Canceled)
 		}
 	}
-	if got := queuedRan.Load(); got != 0 {
-		t.Fatalf("queued tasks run during shutdown = %d, want 0", got)
+	for range 2 {
+		if err := receive(t, queuedSettled, "queued shutdown settlement"); !errors.Is(err, context.Canceled) {
+			t.Fatalf("queued shutdown context error = %v, want %v", err, context.Canceled)
+		}
+	}
+	if got := queuedCalls.Load(); got != 2 {
+		t.Fatalf("queued shutdown task calls = %d, want 2", got)
 	}
 	if err := executor.Submit(context.Background(), func(context.Context) {}); err != ErrClosed {
 		t.Fatalf("Submit(after Close) error = %v, want exact sentinel %v", err, ErrClosed)
@@ -357,16 +369,23 @@ func TestExecutorConcurrentCloseAndSubmit(t *testing.T) {
 		}
 
 		start := make(chan struct{})
-		results := make(chan error, submitters)
+		type submitResult struct {
+			index int
+			err   error
+		}
+		results := make(chan submitResult, submitters)
+		invocations := make([]atomic.Int32, submitters)
 		var calls sync.WaitGroup
-		for range submitters {
+		for index := range submitters {
 			calls.Add(1)
 			go func() {
 				defer calls.Done()
 				<-start
-				results <- executor.Submit(context.Background(), func(ctx context.Context) {
+				err := executor.Submit(context.Background(), func(ctx context.Context) {
+					invocations[index].Add(1)
 					<-ctx.Done()
 				})
+				results <- submitResult{index: index, err: err}
 			}()
 		}
 
@@ -382,8 +401,22 @@ func TestExecutorConcurrentCloseAndSubmit(t *testing.T) {
 		close(results)
 
 		for result := range results {
-			if result != nil && result != ErrClosed && result != ErrQueueFull {
-				t.Fatalf("iteration %d: Submit() error = %v", iteration, result)
+			if result.err != nil && result.err != ErrClosed && result.err != ErrQueueFull {
+				t.Fatalf("iteration %d: Submit() error = %v", iteration, result.err)
+			}
+			wantCalls := int32(0)
+			if result.err == nil {
+				wantCalls = 1
+			}
+			if got := invocations[result.index].Load(); got != wantCalls {
+				t.Fatalf(
+					"iteration %d: submission %d calls = %d, want %d for error %v",
+					iteration,
+					result.index,
+					got,
+					wantCalls,
+					result.err,
+				)
 			}
 		}
 		if err := executor.Submit(context.Background(), func(context.Context) {}); err != ErrClosed {
