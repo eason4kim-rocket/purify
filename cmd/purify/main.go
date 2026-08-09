@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,6 +30,13 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		slog.Error("purify stopped with an error", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	// ── 1. Load configuration ───────────────────────────────────────
 	cfg := config.Load()
 
@@ -43,30 +52,25 @@ func main() {
 	// ── 2a. Initialise durable receipt signing identity ─────────────
 	receiptPrivateKey, receiptKID, err := receipts.LoadOrCreateKey(cfg.Storage)
 	if err != nil {
-		slog.Error("failed to initialise receipt signing key", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("initialise receipt signing key: %w", err)
 	}
 	receiptSigner, err := receipts.NewSigner(receiptPrivateKey)
 	if err != nil {
-		slog.Error("failed to initialise receipt signer", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("initialise receipt signer: %w", err)
 	}
 	slog.Info("receipt signing enabled", "kid", receiptKID)
 
 	// ── 3. Initialise scraper (launches browser) ────────────────────
 	sc, err := scraper.NewScraper(cfg.Browser, cfg.Scraper)
 	if err != nil {
-		slog.Error("failed to initialise scraper", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("initialise scraper: %w", err)
 	}
 	defer sc.Close()
 
 	// ── 3a. Initialise the content-addressed snapshot store ─────────
 	snapshotStore, err := openSnapshotStore(cfg.Storage)
 	if err != nil {
-		slog.Error("failed to initialise snapshot store", "error", err)
-		sc.Close()
-		os.Exit(1)
+		return fmt.Errorf("initialise snapshot store: %w", err)
 	}
 	if snapshotStore != nil {
 		defer snapshotStore.Close()
@@ -86,8 +90,7 @@ func main() {
 	// ── 4c. Initialise the canonical ordered scrape service ─────────
 	scrapeService, err := newCanonicalScrapeService(sc, cl, cc, cfg)
 	if err != nil {
-		slog.Error("failed to initialise canonical scrape service", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("initialise canonical scrape service: %w", err)
 	}
 
 	// ── 4d. Initialise process-wide bounded background work ─────────
@@ -97,43 +100,32 @@ func main() {
 	}
 	jobExecutor, err := jobs.NewExecutor(jobWorkers, 500)
 	if err != nil {
-		slog.Error("failed to initialise background job executor", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("initialise background job executor: %w", err)
 	}
 	defer jobExecutor.Close()
 
 	batchService, err := batch.NewService(scrapeService, jobExecutor, batch.Config{})
 	if err != nil {
-		slog.Error("failed to initialise batch service", "error", err)
-		jobExecutor.Close()
-		os.Exit(1)
+		return fmt.Errorf("initialise batch service: %w", err)
 	}
 	defer batchService.Close()
 
 	crawlService, err := crawldomain.NewService(scrapeService, jobExecutor, crawldomain.Config{})
 	if err != nil {
-		slog.Error("failed to initialise crawl service", "error", err)
-		batchService.Close()
-		jobExecutor.Close()
-		os.Exit(1)
+		return fmt.Errorf("initialise crawl service: %w", err)
 	}
 	defer crawlService.Close()
 
 	mapService, err := discovery.NewService(discovery.Config{})
 	if err != nil {
-		slog.Error("failed to initialise map service", "error", err)
-		crawlService.Close()
-		batchService.Close()
-		jobExecutor.Close()
-		os.Exit(1)
+		return fmt.Errorf("initialise map service: %w", err)
 	}
 
 	// ── 4e. Initialise LLM client ───────────────────────────────────
 	llmClient := llm.NewClient(nil)
 	extractService, err := extractdomain.NewService(scrapeService, llmClient, receiptSigner, extractdomain.Config{})
 	if err != nil {
-		slog.Error("failed to initialise extract service", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("initialise extract service: %w", err)
 	}
 
 	// ── 5. Setup router ─────────────────────────────────────────────
@@ -147,32 +139,103 @@ func main() {
 		Handler: router,
 	}
 
-	go func() {
-		slog.Info("HTTP server listening", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("HTTP server error", "error", err)
-			os.Exit(1)
-		}
-	}()
-
 	// ── 7. Graceful shutdown ────────────────────────────────────────
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-quit
-	slog.Info("shutdown signal received", "signal", sig.String())
+	defer signal.Stop(quit)
 
-	// Give in-flight requests 5 seconds to complete.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		slog.Error("HTTP server forced shutdown", "error", err)
-	} else {
-		slog.Info("HTTP server drained gracefully")
+	if err := listenAndServeUntilShutdown(srv, quit, 5*time.Second); err != nil {
+		return err
 	}
 
 	// sc.Close() runs via defer — drains page pool and kills Chrome.
 	slog.Info("purify stopped")
+	return nil
+}
+
+// listenAndServeUntilShutdown binds synchronously so a listen failure returns
+// through run and all already-registered resource defers are honored.
+func listenAndServeUntilShutdown(server *http.Server, quit <-chan os.Signal, shutdownTimeout time.Duration) error {
+	if server == nil {
+		return errors.New("HTTP server is nil")
+	}
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", server.Addr, err)
+	}
+	defer listener.Close()
+
+	slog.Info("HTTP server listening", "addr", listener.Addr().String())
+	return serveUntilShutdown(server, listener, quit, shutdownTimeout)
+}
+
+// serveUntilShutdown returns unexpected Serve failures to its caller. Once a
+// shutdown signal arrives, it first drains active requests and then force
+// closes the server if the drain deadline expires or Shutdown otherwise fails.
+func serveUntilShutdown(server *http.Server, listener net.Listener, quit <-chan os.Signal, shutdownTimeout time.Duration) error {
+	if server == nil {
+		return errors.New("HTTP server is nil")
+	}
+	if listener == nil {
+		return errors.New("HTTP listener is nil")
+	}
+
+	serveErrors := make(chan error, 1)
+	go func() {
+		serveErrors <- server.Serve(listener)
+	}()
+
+	select {
+	case err := <-serveErrors:
+		return normalizeServeError(err)
+	case sig, ok := <-quit:
+		if !ok {
+			closeErr := server.Close()
+			return errors.Join(
+				errors.New("shutdown signal channel closed"),
+				wrapError("force close HTTP server", closeErr),
+			)
+		}
+		signalName := "unknown"
+		if sig != nil {
+			signalName = sig.String()
+		}
+		slog.Info("shutdown signal received", "signal", signalName)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	shutdownErr := server.Shutdown(shutdownCtx)
+	cancel()
+	if shutdownErr != nil {
+		slog.Error("HTTP server graceful shutdown failed; forcing close", "error", shutdownErr)
+		closeErr := server.Close()
+		serveErr := normalizeServeError(<-serveErrors)
+		return errors.Join(
+			fmt.Errorf("drain HTTP server: %w", shutdownErr),
+			wrapError("force close HTTP server", closeErr),
+			serveErr,
+		)
+	}
+
+	if err := normalizeServeError(<-serveErrors); err != nil {
+		return err
+	}
+	slog.Info("HTTP server drained gracefully")
+	return nil
+}
+
+func normalizeServeError(err error) error {
+	if err == nil || errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return fmt.Errorf("serve HTTP: %w", err)
+}
+
+func wrapError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", operation, err)
 }
 
 func newCanonicalScrapeService(sc *scraper.Scraper, cl *cleaner.Cleaner, cc *cache.Cache, cfg *config.Config) (*scrape.Service, error) {
