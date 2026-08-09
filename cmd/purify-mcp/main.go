@@ -13,7 +13,19 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/use-agent/purify/models"
 )
+
+const (
+	maxAPIResponseBytes      int64 = 32 << 20
+	maxVerifyURLBytes              = 16 << 10
+	maxVerifyClaimsJSONBytes       = 512 << 10
+)
+
+type apiHTTPResponse struct {
+	StatusCode int
+	Body       []byte
+}
 
 // scrapeRequest mirrors the Purify API request model.
 type scrapeRequest struct {
@@ -101,6 +113,25 @@ type extractResponse struct {
 	} `json:"error"`
 }
 
+func newVerifyFactTool() mcp.Tool {
+	return mcp.NewTool("verify_fact",
+		mcp.WithDescription("Revisit a web page and verify evidence-backed claims, returning confirmed, changed, or gone for each claim."),
+		mcp.WithString("url",
+			mcp.Required(),
+			mcp.Description("The source URL containing the facts to verify"),
+		),
+		mcp.WithString("claims",
+			mcp.Required(),
+			mcp.Description("A non-empty JSON array of evidence-backed Purify claims"),
+		),
+		mcp.WithSchemaAdditionalProperties(false),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
+	)
+}
+
 func main() {
 	apiURL := os.Getenv("PURIFY_API_URL")
 	if apiURL == "" {
@@ -135,6 +166,7 @@ func main() {
 	)
 
 	s.AddTool(scrapeURLTool, handleScrapeURL(apiURL, apiKey))
+	s.AddTool(newVerifyFactTool(), handleVerifyFact(apiURL, apiKey))
 
 	// batch_scrape tool
 	batchScrapeTool := mcp.NewTool("batch_scrape",
@@ -214,27 +246,44 @@ func main() {
 	}
 }
 
-// apiPost sends a POST request to the Purify API and returns the response body.
-func apiPost(ctx context.Context, client *http.Client, apiURL, apiKey, path string, payload interface{}) ([]byte, error) {
+// apiPostResponse sends a POST request to the Purify API and retains the HTTP
+// status while bounding the response body read.
+func apiPostResponse(ctx context.Context, client *http.Client, apiURL, apiKey, path string, payload interface{}) (apiHTTPResponse, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
+		return apiHTTPResponse{}, fmt.Errorf("marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return apiHTTPResponse{}, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", apiKey)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("API request failed: %w", err)
+		return apiHTTPResponse{}, fmt.Errorf("API request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	return io.ReadAll(resp.Body)
+	result := apiHTTPResponse{StatusCode: resp.StatusCode}
+	result.Body, err = io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseBytes+1))
+	if err != nil {
+		return result, fmt.Errorf("read API response: %w", err)
+	}
+	if int64(len(result.Body)) > maxAPIResponseBytes {
+		result.Body = nil
+		return result, fmt.Errorf("API response exceeds %d-byte limit", maxAPIResponseBytes)
+	}
+
+	return result, nil
+}
+
+// apiPost preserves the body-only behavior used by the existing MCP tools.
+func apiPost(ctx context.Context, client *http.Client, apiURL, apiKey, path string, payload interface{}) ([]byte, error) {
+	resp, err := apiPostResponse(ctx, client, apiURL, apiKey, path, payload)
+	return resp.Body, err
 }
 
 // pollJobCompletion polls a job endpoint until status is no longer "processing" or context is cancelled.
@@ -349,6 +398,140 @@ func handleScrapeURL(apiURL, apiKey string) server.ToolHandlerFunc {
 
 		return mcp.NewToolResultText(result), nil
 	}
+}
+
+func handleVerifyFact(apiURL, apiKey string) server.ToolHandlerFunc {
+	return handleVerifyFactWithClient(&http.Client{Timeout: 120 * time.Second}, apiURL, apiKey)
+}
+
+func handleVerifyFactWithClient(client *http.Client, apiURL, apiKey string) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		url, err := request.RequireString("url")
+		if err != nil || strings.TrimSpace(url) == "" || len(url) > maxVerifyURLBytes {
+			return mcp.NewToolResultError("url is required and must be a non-empty string"), nil
+		}
+
+		claimsJSON, err := request.RequireString("claims")
+		if err != nil {
+			return mcp.NewToolResultError("claims is required and must be a JSON array string"), nil
+		}
+		claims, err := decodeVerifyClaims(claimsJSON)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("claims must be one non-empty JSON array: %v", err)), nil
+		}
+
+		apiResp, err := apiPostResponse(ctx, client, apiURL, apiKey, "/api/v1/verify", models.VerifyRequest{
+			URL:    url,
+			Claims: claims,
+		})
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("verify request failed: %v", err)), nil
+		}
+
+		if apiResp.StatusCode < http.StatusOK || apiResp.StatusCode >= http.StatusMultipleChoices {
+			return mcp.NewToolResultError(verifyAPIError(apiResp.StatusCode, apiResp.Body)), nil
+		}
+
+		verifyResp, err := decodeVerifyResponse(apiResp.Body)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("failed to parse verify response: %v", err)), nil
+		}
+		pretty, err := json.MarshalIndent(verifyResp, "", "  ")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("failed to format verify response: %v", err)), nil
+		}
+
+		return mcp.NewToolResultStructured(verifyResp, string(pretty)), nil
+	}
+}
+
+func decodeVerifyClaims(raw string) ([]models.Claim, error) {
+	if len(raw) > maxVerifyClaimsJSONBytes {
+		return nil, fmt.Errorf("array exceeds %d-byte limit", maxVerifyClaimsJSONBytes)
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+
+	var claims []models.Claim
+	if err := decoder.Decode(&claims); err != nil {
+		return nil, err
+	}
+	if len(claims) == 0 {
+		return nil, fmt.Errorf("array must contain at least one claim")
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return nil, err
+	}
+
+	return claims, nil
+}
+
+func decodeVerifyResponse(body []byte) (models.VerifyResponse, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+
+	var response *models.VerifyResponse
+	if err := decoder.Decode(&response); err != nil {
+		return models.VerifyResponse{}, err
+	}
+	if response == nil {
+		return models.VerifyResponse{}, fmt.Errorf("response must be a JSON object")
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return models.VerifyResponse{}, err
+	}
+	if err := validateVerifyResponse(*response); err != nil {
+		return models.VerifyResponse{}, err
+	}
+
+	return *response, nil
+}
+
+func validateVerifyResponse(response models.VerifyResponse) error {
+	if response.VerificationID == "" || response.URL == "" || response.FinalURL == "" ||
+		response.StatusCode < 100 || response.StatusCode > 599 || len(response.Results) == 0 ||
+		response.VerifiedAt.IsZero() {
+		return fmt.Errorf("response is missing required verification fields")
+	}
+	for _, result := range response.Results {
+		if result.Path == "" {
+			return fmt.Errorf("response contains a result without a path")
+		}
+		switch result.Status {
+		case models.VerifyStatusConfirmed, models.VerifyStatusChanged, models.VerifyStatusGone:
+		default:
+			return fmt.Errorf("response contains an invalid claim status")
+		}
+	}
+	return nil
+}
+
+func requireJSONEOF(decoder *json.Decoder) error {
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values are not allowed")
+		}
+		return fmt.Errorf("invalid trailing data: %w", err)
+	}
+	return nil
+}
+
+func verifyAPIError(statusCode int, body []byte) string {
+	var response models.VerifyErrorResponse
+	if err := json.Unmarshal(body, &response); err == nil && response.Error != nil {
+		code := strings.TrimSpace(response.Error.Code)
+		message := strings.TrimSpace(response.Error.Message)
+		switch {
+		case code != "" && message != "":
+			return fmt.Sprintf("[%s] %s", code, message)
+		case message != "":
+			return message
+		case code != "":
+			return fmt.Sprintf("[%s] verification failed (HTTP %d)", code, statusCode)
+		}
+	}
+	return fmt.Sprintf("verification failed (HTTP %d)", statusCode)
 }
 
 func handleBatchScrape(apiURL, apiKey string) server.ToolHandlerFunc {
