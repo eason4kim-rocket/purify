@@ -134,6 +134,10 @@ func (service *Service) Answer(ctx context.Context, request *models.AnswerReques
 		Engine:   "auto",
 		Evidence: true,
 		Timeout:  prepared.timeoutSeconds,
+		// The fact subject doubles as the expected entity: when the server
+		// has entity attribution enabled, sources about a different entity
+		// are excluded from consensus before they can support a belief.
+		ExpectedSubject: &models.SubjectSpec{Name: prepared.subject, Hint: prepared.predicate},
 	}
 	extractResponse, extractErr := service.extractor.ExtractMulti(answerCtx, extractRequest)
 	if err := answerCtx.Err(); err != nil {
@@ -144,7 +148,13 @@ func (service *Service) Answer(ctx context.Context, request *models.AnswerReques
 		if extractErr == nil || scrapeErrorCode(extractErr) != models.ErrCodeNoValidSource {
 			return nil, answerFailed("answer extraction returned inconsistent no-source results")
 		}
-		response := unknownResponse(models.AnswerUnknownNoValidSources, prepared.minimum, nil, nil)
+		reason := models.AnswerUnknownNoValidSources
+		if countEntityMismatchSources(extractResponse.Sources) > 0 {
+			// Pages were found and extracted; they were about the wrong
+			// entity. That is the honest reason the answer is unknown.
+			reason = models.AnswerUnknownEntityMismatch
+		}
+		response := unknownResponse(reason, prepared.minimum, nil, nil)
 		if err := answerCtx.Err(); err != nil {
 			return nil, answerTimeout()
 		}
@@ -177,6 +187,16 @@ func (service *Service) Answer(ctx context.Context, request *models.AnswerReques
 		return nil, err
 	}
 	if decision.reason != "" {
+		if decision.reason == models.AnswerUnknownInsufficient &&
+			countEntityMismatchSources(extractResponse.Sources) > 0 {
+			// The support shortfall exists because wrong-entity sources were
+			// excluded from consensus; report the exclusion, not a generic
+			// shortage.
+			decision.reason = models.AnswerUnknownEntityMismatch
+			if decision.closest != nil {
+				decision.closest.Note = "insufficient independent roots after entity mismatch exclusions"
+			}
+		}
 		response := unknownResponse(decision.reason, prepared.minimum, decision.closest, decision.conflicts)
 		if err := answerCtx.Err(); err != nil {
 			return nil, answerTimeout()
@@ -187,7 +207,14 @@ func (service *Service) Answer(ctx context.Context, request *models.AnswerReques
 		return nil, answerTimeout()
 	}
 
-	belief, err := service.buildBelief(answerCtx, decision.value, decision.agreement, decision.supports, allowedSupports)
+	belief, err := service.buildBelief(
+		answerCtx,
+		decision.value,
+		decision.agreement,
+		decision.supports,
+		allowedSupports,
+		entityVerdictsBySource(extractResponse.Sources),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -289,7 +316,8 @@ func validateAnswerProjection(ctx context.Context, response *models.AnswerRespon
 				len(item.Root) == 0 || len(item.Root) > models.MaxSearchDomainBytes ||
 				item.Quote == "" || len(item.Quote) > maximumAnswerQuoteBytes || len(item.Selector) > maximumAnswerSelector ||
 				!validSnapshotID(item.SnapshotID) || !validAnchorMethod(item.Method) ||
-				!validText(item.Quote) || !validText(item.Selector) {
+				!validText(item.Quote) || !validText(item.Selector) ||
+				!validEntityVerdictProjection(item.EntityVerdict) {
 				return answerFailed("answer evidence projection is invalid")
 			}
 			canonical, parsed, err := publicnet.NormalizeHTTPURL(item.URL, nil, false)
@@ -356,6 +384,28 @@ func validateAnswerProjection(ctx context.Context, response *models.AnswerRespon
 				}
 				if bytes.Equal(canonicalConflicts[index], closestValue) {
 					return answerFailed("insufficient answer repeats its closest value as a conflict")
+				}
+			}
+		case models.AnswerUnknownEntityMismatch:
+			// Two honest shapes: every source was about the wrong entity (no
+			// candidate survives), or exclusions left a shortfall with a
+			// closest candidate exactly like the insufficient case.
+			if response.Closest == nil {
+				if len(response.Conflicts) != 0 {
+					return answerFailed("answer unknown reason has stray candidate data")
+				}
+				break
+			}
+			if len(response.Conflicts)+1 > models.MaxExtractSources ||
+				response.Closest.IndependentRoots > models.MaxExtractSources-conflictPages {
+				return answerFailed("entity-mismatch answer response candidates are invalid")
+			}
+			for index, conflict := range response.Conflicts {
+				if conflict.Agreement.IndependentRoots >= response.Closest.IndependentRoots {
+					return answerFailed("entity-mismatch answer response exposes a non-losing conflict")
+				}
+				if bytes.Equal(canonicalConflicts[index], closestValue) {
+					return answerFailed("entity-mismatch answer repeats its closest value as a conflict")
 				}
 			}
 		case models.AnswerUnknownConflict:
@@ -429,10 +479,54 @@ func validateProjectedConflictTie(
 	return nil
 }
 
+// countEntityMismatchSources counts sources excluded from consensus because
+// they were judged to be about a different entity than the fact subject.
+func countEntityMismatchSources(summaries []models.MultiExtractSource) int {
+	count := 0
+	for _, summary := range summaries {
+		if summary.Status == models.MultiExtractSourceStatusEntityMismatch {
+			count++
+		}
+	}
+	return count
+}
+
+// entityVerdictsBySource maps each valid source's final URL to its
+// attribution verdict for evidence annotation. Only the verdicts that can
+// legitimately support a belief are carried; anything else is dropped rather
+// than trusted.
+func entityVerdictsBySource(summaries []models.MultiExtractSource) map[string]string {
+	verdicts := make(map[string]string, len(summaries))
+	for _, summary := range summaries {
+		if !summary.Success || summary.Entity == nil {
+			continue
+		}
+		verdict := summary.Entity.Verdict
+		if verdict != models.EntityVerdictMatch && verdict != models.EntityVerdictUncertain {
+			continue
+		}
+		key := summary.FinalURL
+		if key == "" {
+			key = summary.URL
+		}
+		verdicts[key] = verdict
+	}
+	return verdicts
+}
+
+func validEntityVerdictProjection(verdict string) bool {
+	switch verdict {
+	case "", models.EntityVerdictMatch, models.EntityVerdictUncertain:
+		return true
+	default:
+		return false
+	}
+}
+
 func validUnknownReason(reason models.AnswerUnknownReason) bool {
 	switch reason {
 	case models.AnswerUnknownNoSearchResults, models.AnswerUnknownNoValidSources, models.AnswerUnknownMissingValue,
-		models.AnswerUnknownInsufficient, models.AnswerUnknownConflict:
+		models.AnswerUnknownInsufficient, models.AnswerUnknownConflict, models.AnswerUnknownEntityMismatch:
 		return true
 	default:
 		return false
@@ -935,6 +1029,7 @@ func (service *Service) buildBelief(
 	agreement models.MultiExtractAgreement,
 	supports []models.MultiExtractSupport,
 	allowedSupports map[string]string,
+	entityVerdicts map[string]string,
 ) (*models.AnswerBelief, error) {
 	asOf, err := normalizePublicTime(service.now())
 	if err != nil {
@@ -965,7 +1060,8 @@ func (service *Service) buildBelief(
 		if _, duplicate := receipts[canonical]; duplicate {
 			return nil, answerFailed("answer consensus support is duplicated")
 		}
-		added := len(canonical) + len(support.Root) + len(anchor.Quote) + len(anchor.Selector) + len(anchor.SnapshotID) + len(support.Receipt)
+		entityVerdict := entityVerdicts[canonical]
+		added := len(canonical) + len(support.Root) + len(anchor.Quote) + len(anchor.Selector) + len(anchor.SnapshotID) + len(support.Receipt) + len(entityVerdict)
 		if added > maximumAnswerOutput-budget {
 			return nil, answerFailed("answer response exceeds its output budget")
 		}
@@ -978,14 +1074,15 @@ func (service *Service) buildBelief(
 			return nil, answerFailed("answer evidence time is after belief observation")
 		}
 		evidenceItems = append(evidenceItems, models.AnswerEvidence{
-			URL:        strings.Clone(canonical),
-			Root:       strings.Clone(support.Root),
-			Quote:      strings.Clone(anchor.Quote),
-			TextRange:  anchor.TextRange,
-			Selector:   strings.Clone(anchor.Selector),
-			Method:     evidence.Method(strings.Clone(string(anchor.Method))),
-			SnapshotID: strings.Clone(anchor.SnapshotID),
-			FetchedAt:  fetchedAt,
+			URL:           strings.Clone(canonical),
+			Root:          strings.Clone(support.Root),
+			Quote:         strings.Clone(anchor.Quote),
+			TextRange:     anchor.TextRange,
+			Selector:      strings.Clone(anchor.Selector),
+			Method:        evidence.Method(strings.Clone(string(anchor.Method))),
+			SnapshotID:    strings.Clone(anchor.SnapshotID),
+			FetchedAt:     fetchedAt,
+			EntityVerdict: strings.Clone(entityVerdict),
 		})
 		receipts[strings.Clone(canonical)] = strings.Clone(support.Receipt)
 	}
