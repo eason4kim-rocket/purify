@@ -1,0 +1,13 @@
+{"doc":"companies/apple-inc","subject":"apple bank","reply":{"answer":"different","quote":"Apple Inc. trades on Nasdaq under the ticker AAPL."}}
+{"doc":"companies/apple-bank","subject":"apple inc","reply":{"answer":"different","quote":"Apple Bank offers savings accounts, mortgages, and small business lending."}}
+{"doc":"drugs/metformin","subject":"metformin er","reply":{"answer":"different","quote":"This page covers the immediate-release tablet; typical starting dosage is 500 mg twice daily with meals."}}
+{"doc":"drugs/metformin","subject":"metformin hydrochloride","reply":{"answer":"same","quote":null}}
+{"doc":"drugs/atorvastatin","subject":"simvastatin","reply":{"answer":"different","quote":"Atorvastatin is marketed as Lipitor."}}
+{"doc":"products/iphone-15-pro","subject":"iphone 15","reply":{"answer":"different","quote":"The Pro model adds a customizable Action button that the standard iPhone 15 does not include."}}
+{"doc":"products/redmi-note-13","subject":"红米 note 13 pro","reply":{"answer":"different","quote":"红米 Note 13 Pro 采用曲面屏设计，与标准版定位不同。"}}
+{"doc":"people/michael-jordan","subject":"michael b jordan","reply":{"answer":"different","quote":"Michael Jordan, often called MJ, won six NBA championships with the Chicago Bulls."}}
+{"doc":"people/tim-cook","subject":"timothy cook","reply":{"answer":"same","quote":null}}
+{"doc":"places/hubei","subject":"湖北省","reply":{"answer":"same","quote":null}}
+{"doc":"places/hubei","subject":"湖南","reply":{"answer":"different","quote":"湖北与湖南以洞庭湖南北相望，两省经济往来密切。"}}
+{"doc":"events/wwdc-2026","subject":"wwdc 2025","reply":{"answer":"different","quote":"WWDC 2026 is Apple's Worldwide Developers Conference held in June 2026."}}
+{"doc":"events/cop31","subject":"cop30","reply":{"answer":"different","quote":"COP31 follows the agreements reached at COP30 in Belém and focuses on implementation."}}

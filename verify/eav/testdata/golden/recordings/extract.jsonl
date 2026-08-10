@@ -1,0 +1,12 @@
+{"doc":"companies/apple-inc","reply":{"primary":{"name":"Apple Inc.","kind":"organization","aliases":["AAPL"],"quote":"Apple Inc. designs and sells consumer electronics, software, and services."},"reason_if_none":null}}
+{"doc":"companies/apple-bank","reply":{"primary":{"name":"Apple Bank","kind":"organization","aliases":["Apple Bank for Savings"],"quote":"Apple Bank was founded in 1863 and operates branch locations across the five boroughs."},"reason_if_none":null}}
+{"doc":"drugs/metformin","reply":{"primary":{"name":"Metformin","kind":"substance","aliases":["Glucophage"],"quote":"Metformin is a first-line medication for the treatment of type 2 diabetes."},"reason_if_none":null}}
+{"doc":"drugs/atorvastatin","reply":{"primary":{"name":"Atorvastatin","kind":"substance","aliases":["Lipitor"],"quote":"Atorvastatin is a statin used to prevent cardiovascular disease and treat abnormal lipid levels."},"reason_if_none":null}}
+{"doc":"products/iphone-15-pro","reply":{"primary":{"name":"iPhone 15 Pro","kind":"product","aliases":["A3102"],"quote":"iPhone 15 Pro features a titanium frame and the A17 Pro chip."},"reason_if_none":null}}
+{"doc":"products/redmi-note-13","reply":{"primary":{"name":"红米 Note 13","kind":"product","aliases":["Redmi Note 13"],"quote":"红米 Note 13 搭载一亿像素主摄，提供多种配色。"},"reason_if_none":null}}
+{"doc":"people/michael-jordan","reply":{"primary":{"name":"Michael Jordan","kind":"person","aliases":["MJ"],"quote":"Michael Jordan, often called MJ, won six NBA championships with the Chicago Bulls."},"reason_if_none":null}}
+{"doc":"people/tim-cook","reply":{"primary":{"name":"Tim Cook","kind":"person","aliases":["Timothy Donald Cook"],"quote":"Tim Cook is the chief executive officer of Apple Inc."},"reason_if_none":null}}
+{"doc":"places/georgia-state","reply":{"primary":{"name":"Georgia","kind":"place","aliases":[],"quote":"Georgia is a state in the Southeastern United States."},"reason_if_none":null}}
+{"doc":"places/hubei","reply":{"primary":{"name":"湖北","kind":"place","aliases":["鄂"],"quote":"湖北位于中国中部，长江中游。"},"reason_if_none":null}}
+{"doc":"events/wwdc-2026","reply":{"primary":{"name":"WWDC 2026","kind":"event","aliases":["Worldwide Developers Conference"],"quote":"WWDC 2026 is Apple's Worldwide Developers Conference held in June 2026."},"reason_if_none":null}}
+{"doc":"events/cop31","reply":{"primary":{"name":"COP31","kind":"event","aliases":[],"quote":"COP31 is the 31st United Nations climate change conference."},"reason_if_none":null}}

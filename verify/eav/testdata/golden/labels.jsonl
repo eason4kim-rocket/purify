@@ -1,0 +1,48 @@
+{"subject":"Apple Inc.","doc":"companies/apple-inc","label":"match","domain":"companies"}
+{"subject":"AAPL","doc":"companies/apple-inc","label":"match","domain":"companies","note":"ticker alias"}
+{"subject":"Apple","doc":"companies/apple-inc","label":"match","domain":"companies","note":"legal suffix stripped"}
+{"subject":"Samsung Electronics","doc":"companies/apple-inc","label":"mismatch","domain":"companies"}
+{"subject":"Apple Bank","doc":"companies/apple-inc","label":"mismatch","domain":"companies","hard":true,"note":"confusable company name"}
+{"subject":"Apple Bank","doc":"companies/apple-bank","label":"match","domain":"companies"}
+{"subject":"Apple Bank for Savings","doc":"companies/apple-bank","label":"match","domain":"companies","note":"full legal name alias"}
+{"subject":"Apple Inc","doc":"companies/apple-bank","label":"mismatch","domain":"companies","hard":true,"note":"reverse of the apple-bank confusion"}
+{"subject":"Goldman Sachs","doc":"companies/apple-bank","label":"mismatch","domain":"companies"}
+{"subject":"Metformin","doc":"drugs/metformin","label":"match","domain":"drugs"}
+{"subject":"Glucophage","doc":"drugs/metformin","label":"match","domain":"drugs","note":"brand name alias"}
+{"subject":"Ibuprofen","doc":"drugs/metformin","label":"mismatch","domain":"drugs"}
+{"subject":"Metformin ER","doc":"drugs/metformin","label":"mismatch","domain":"drugs","hard":true,"note":"extended-release formulation; doc covers immediate-release"}
+{"subject":"Metformin hydrochloride","doc":"drugs/metformin","label":"match","domain":"drugs","hard":true,"note":"salt form of the same substance"}
+{"subject":"Atorvastatin","doc":"drugs/atorvastatin","label":"match","domain":"drugs"}
+{"subject":"Lipitor","doc":"drugs/atorvastatin","label":"match","domain":"drugs","note":"brand name alias"}
+{"subject":"Simvastatin","doc":"drugs/atorvastatin","label":"mismatch","domain":"drugs","hard":true,"note":"sibling statin, high lexical overlap"}
+{"subject":"Aspirin","doc":"drugs/atorvastatin","label":"mismatch","domain":"drugs"}
+{"subject":"iPhone 15 Pro","doc":"products/iphone-15-pro","label":"match","domain":"products"}
+{"subject":"A3102","doc":"products/iphone-15-pro","label":"match","domain":"products","note":"model number alias"}
+{"subject":"Galaxy S24 Ultra","doc":"products/iphone-15-pro","label":"mismatch","domain":"products"}
+{"subject":"iPhone 15","doc":"products/iphone-15-pro","label":"mismatch","domain":"products","hard":true,"note":"base model asked, Pro model documented"}
+{"subject":"红米 Note 13","doc":"products/redmi-note-13","label":"match","domain":"products"}
+{"subject":"Redmi Note 13","doc":"products/redmi-note-13","label":"match","domain":"products","note":"global name alias"}
+{"subject":"小米 14","doc":"products/redmi-note-13","label":"mismatch","domain":"products"}
+{"subject":"红米 Note 13 Pro","doc":"products/redmi-note-13","label":"mismatch","domain":"products","hard":true,"note":"sibling product line"}
+{"subject":"Michael Jordan","doc":"people/michael-jordan","label":"match","domain":"people"}
+{"subject":"MJ","doc":"people/michael-jordan","label":"match","domain":"people","note":"nickname alias"}
+{"subject":"Michael B. Jordan","doc":"people/michael-jordan","label":"mismatch","domain":"people","hard":true,"note":"actor vs basketball player"}
+{"subject":"LeBron James","doc":"people/michael-jordan","label":"mismatch","domain":"people"}
+{"subject":"Tim Cook","doc":"people/tim-cook","label":"match","domain":"people"}
+{"subject":"Timothy Donald Cook","doc":"people/tim-cook","label":"match","domain":"people","note":"full legal name alias"}
+{"subject":"Satya Nadella","doc":"people/tim-cook","label":"mismatch","domain":"people"}
+{"subject":"Timothy Cook","doc":"people/tim-cook","label":"match","domain":"people","hard":true,"note":"partial legal name, same person"}
+{"subject":"Georgia","doc":"places/georgia-state","label":"match","domain":"places"}
+{"subject":"Georgia","hint":"country in the Caucasus","doc":"places/georgia-state","label":"mismatch","domain":"places","hard":true,"waived":true,"note":"v1 known limit: homonym subjects match on surface; needs typed subjects"}
+{"subject":"Florida","doc":"places/georgia-state","label":"mismatch","domain":"places"}
+{"subject":"湖北","doc":"places/hubei","label":"match","domain":"places"}
+{"subject":"湖北省","doc":"places/hubei","label":"match","domain":"places","hard":true,"note":"administrative suffix form"}
+{"subject":"湖南","doc":"places/hubei","label":"mismatch","domain":"places","hard":true,"note":"one-character sibling province"}
+{"subject":"鄂","doc":"places/hubei","label":"match","domain":"places","hard":true,"note":"single-character abbreviation alias"}
+{"subject":"WWDC 2026","doc":"events/wwdc-2026","label":"match","domain":"events"}
+{"subject":"Worldwide Developers Conference","doc":"events/wwdc-2026","label":"match","domain":"events","note":"spelled-out alias"}
+{"subject":"WWDC 2025","doc":"events/wwdc-2026","label":"mismatch","domain":"events","hard":true,"note":"previous year edition"}
+{"subject":"Google I/O","doc":"events/wwdc-2026","label":"mismatch","domain":"events"}
+{"subject":"COP31","doc":"events/cop31","label":"match","domain":"events"}
+{"subject":"COP30","doc":"events/cop31","label":"mismatch","domain":"events","hard":true,"note":"previous conference, edit distance one"}
+{"subject":"G20 Summit","doc":"events/cop31","label":"mismatch","domain":"events"}
