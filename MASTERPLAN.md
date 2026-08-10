@@ -1149,7 +1149,7 @@ zkTLS（Reclaim/TLSNotary）定位一句话：**它证传输，我们证语义�
 
 ## 15. Phase 8 — EAV 实体归因校验（PLAN.md §6 步 2）
 
-> **状态**：executing — 2026-08-10 拆卡并开工。进度：E-1 ✅（`612fd50`）　E-2…E-6 ⬜。图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始 · ⟳ 与规划不同（以实码为准）。
+> **状态**：executing — 2026-08-10 拆卡并开工。进度：E-1 ✅（`612fd50`）　E-2 ✅（`b5be194`）　E-3…E-6 ⬜。图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始 · ⟳ 与规划不同（以实码为准）。
 > **上游依据**：PLAN.md §5.3（算法与验收）、§6 步 2（顺序）。**落点定案：新包 `verify/eav/`**——不做 evidence/ 扩展：evidence 管「值在哪」（定位），eav 管「这页在讲谁」（判断），职责不同。
 > **一句话**：抓 right-source-wrong-entity——系统如实引用了真实文档、每个字都锚得上，但文档说的是 B，你问的是 A。对幻觉检测、忠实度、引用核查全部隐形；Parallel Basis 结构上抓不到。
 
@@ -1371,9 +1371,9 @@ base* = StripLegalSuffix 后的形式
 **验收**：`go test -race ./verify/eav/` 绿；无 LLM、无网络。
 **提交**：`feat(eav): normalize and match entity surface forms`
 
-### 任务卡 E-2 · 候选板收割 ⬜
+### 任务卡 E-2 · 候选板收割 ✅
 
-**交付什么**：`slate.go` + 测试与 `testdata/harvest/*.html` 样张（电商 PDP、新闻文章、公司官网、Wikipedia、列表页各 ≥1）。
+**状态**：✅ 已提交 `b5be194 feat(eav): harvest deterministic entity candidates`。五类样张全等断言（整板逐项含 Signal/Quote）+ 不变量测试（锚定/去重/上限/确定性跑两遍）。基准 52µs/页（news 样张），验收 <5ms 余量两个量级。⟳ 与规划的差异：(a) Signal 字面量导出为包契约（`SignalTitle` 等，供 E-3 提示词与响应词表复用）；(b) title 分隔符在卡列三种之外补了带空格 em dash、全角｜、裸 `|` 与 `_`（中文门户标题惯例）；(c) 锚定检查加了 **ASCII 大小写不敏感回退并采纳文档原始大小写**——slug "framework-laptop-16" 由此还原成文档里的 "Framework Laptop 16"，非 ASCII 仍严格逐字；(d) JSON-LD 只沿 `@graph`/`mainEntity`/`about` 边走 + 根层 typed 节点，publisher/offers/itemListElement 永不漏进候选（列表页保证即由此而来），按命名键访问、不 range map，保确定性；(e) 词频信号实现为：拉丁大写词连跑（允许 of/de 类连接词与尾随数字，"Bank of America"/"iPhone 15" 存活，单词需 ≥3 次 + 停用词表，词组 ≥2 次）+ 中文 Han 2–6 字 n-gram（频次×长度计分、贪心去重叠、跳过法律后缀碎片）；(f) 超限字段视为缺席，不部分处理。
 **怎么做**：信号优先级 title 分段（按 ` | `、` – `、` - ` 剥站名）> h1 > og:title/og:site_name > JSON-LD（`mainEntity`/`about`/Product|Organization|Person 的 `name`，goquery 解析 `script[type="application/ld+json"]`，畸形 JSON 静默跳过）> URL slug 还原 > cleaned 头窗高频大写 n-gram/中文连续名词串。**每个候选的 Quote 必须逐字出现在 Title 或 Cleaned**（`strings.Contains` 级检查），不满足即丢弃；去重按 `Normalize` 后表面形合并、保留最高优先级 Signal；上限 `MaxCandidates`。
 **测试**：每类样张断言候选板含预期主实体表面形；列表页样张断言不产出唯一压倒性候选（为 Primary=nil 留通路）。
 **验收**：收割 P95 < 5ms/页（纯解析，无网络）。
