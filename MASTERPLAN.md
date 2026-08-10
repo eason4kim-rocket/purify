@@ -1149,7 +1149,7 @@ zkTLS（Reclaim/TLSNotary）定位一句话：**它证传输，我们证语义�
 
 ## 15. Phase 8 — EAV 实体归因校验（PLAN.md §6 步 2）
 
-> **状态**：planning — 2026-08-10 拆卡（E-1…E-6 全 ⬜）。图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始。
+> **状态**：executing — 2026-08-10 拆卡并开工。进度：E-1 ✅（`612fd50`）　E-2…E-6 ⬜。图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始 · ⟳ 与规划不同（以实码为准）。
 > **上游依据**：PLAN.md §5.3（算法与验收）、§6 步 2（顺序）。**落点定案：新包 `verify/eav/`**——不做 evidence/ 扩展：evidence 管「值在哪」（定位），eav 管「这页在讲谁」（判断），职责不同。
 > **一句话**：抓 right-source-wrong-entity——系统如实引用了真实文档、每个字都锚得上，但文档说的是 B，你问的是 A。对幻觉检测、忠实度、引用核查全部隐形；Parallel Basis 结构上抓不到。
 
@@ -1361,7 +1361,9 @@ base* = StripLegalSuffix 后的形式
 - 阈值常量集中在 `match.go` 顶部并写明「由 E-5 标注集校准，改动必须过 golden 门」。
 - 对抗样例进 E-1 表测试：Apple Inc/Apple Bank、AMD/ARM、Metformin/Metformin HCl ER、Georgia/Georgia、小米/红米、iPhone 15/iPhone 15 Pro。
 
-### 任务卡 E-1 · 核心类型 + 规范化 + 确定性比对 ⬜
+### 任务卡 E-1 · 核心类型 + 规范化 + 确定性比对 ✅
+
+**状态**：✅ 已提交 `612fd50 feat(eav): normalize and match entity surface forms`。⟳ 与规划的差异：(a) 边界接口（EntityExtractor/Referee）未随 `eav.go` 落地——按单关注原则归 E-3/E-4 的文件，E-1 只落数据类型/常量/错误；(b) 阶梯在 floor 前新增三个**只降不升**（只能把报警降为 uncertain、不能反向）的守卫：near-typo 编辑距离门（d≤2 才计相似度，长名不再靠稀释比率混进灰区）、initialism 守卫（"IBM" vs "International Business Machines" 永不确定性报警）、containment 守卫（子串关系进灰区，全 CJK 最短 2 字、其余 3 字）；(c) 超限输入（subject/实体/别名过长、别名数超上限）一律拒判为 uncertain，不做部分裁决。对抗样例实测：AMD/ARM、小米/红米、湖南/湖北、Metformin/Metformin HCl ER 全部落灰区；Apple Inc/Samsung Electronics、宁德时代/比亚迪等确凿异体落 floor 报警；Georgia/Georgia 同形异指按 v1 边界判 match（测试内注明）。
 
 **交付什么**：`eav.go` + `normalize.go` + `match.go` 与全部表驱动测试。§15.2 的类型/常量/错误 + §15.3 的阶梯语义。纯函数，零 IO，零新依赖。
 **怎么做**：法律后缀表覆盖 en（inc/corp/co/ltd/llc/plc/ag/gmbh/sa/nv/oyj）+ zh/ja（有限公司/股份有限公司/集团/株式会社/合同会社）；冠词只剥前导 "the "。规范化方向与 `evidence.normalizeText` 一致（宽度折叠、小写、空白折叠），但**保留字母数字外的内部符号语义**（"HCl ER" 的空格切词决定 token 差异可见）。
