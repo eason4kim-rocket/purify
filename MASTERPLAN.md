@@ -1149,7 +1149,7 @@ zkTLS（Reclaim/TLSNotary）定位一句话：**它证传输，我们证语义�
 
 ## 15. Phase 8 — EAV 实体归因校验（PLAN.md §6 步 2）
 
-> **状态**：executing — 2026-08-10 拆卡并开工。进度：E-1 ✅（`612fd50`）　E-2 ✅（`b5be194`）　E-3 ✅（`f2c6329`）　E-4 ✅（`e233bf6`）　E-5/E-6 ⬜。**判断内核收口：`NewJudge`/`JudgeDocument` 可用，等 E-5 标注集校准 + E-6 接线。** 图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始 · ⟳ 与规划不同（以实码为准）。
+> **状态**：executing — 2026-08-10 拆卡并开工。进度：E-1 ✅（`612fd50`）　E-2 ✅（`b5be194`）　E-3 ✅（`f2c6329`）　E-4 ✅（`e233bf6`）　E-5 ✅（`737a008`+`3eefe31`，种子集 48 行；扩容到 ≥300 行待联网跑构建器）　E-6 ⬜。图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始 · ⟳ 与规划不同（以实码为准）。
 > **上游依据**：PLAN.md §5.3（算法与验收）、§6 步 2（顺序）。**落点定案：新包 `verify/eav/`**——不做 evidence/ 扩展：evidence 管「值在哪」（定位），eav 管「这页在讲谁」（判断），职责不同。
 > **一句话**：抓 right-source-wrong-entity——系统如实引用了真实文档、每个字都锚得上，但文档说的是 B，你问的是 A。对幻觉检测、忠实度、引用核查全部隐形；Parallel Basis 结构上抓不到。
 
@@ -1393,9 +1393,9 @@ base* = StripLegalSuffix 后的形式
 **测试**：全路径表测试（fake extractor + fake referee 的笛卡尔组合）；ctx 取消在每个边界立即返回。
 **提交**：`feat(eav): judge subject attribution three ways`
 
-### 任务卡 E-5 · 跨域标注集 + 评测门 ⬜
+### 任务卡 E-5 · 跨域标注集 + 评测门 ✅（种子集）
 
-**交付什么**：`scripts/eavcorpus/`（构建器）+ `testdata/golden/*.jsonl`（≥300 行、6 域）+ `testdata/recordings/`（LLM 录制）+ `golden_test.go`（指标门）。
+**状态**：✅ 已提交 `737a008 chore(scripts): build eav corpus fixtures` + `3eefe31 test(eav): add cross-domain attribution golden set`。⟳ 与规划的差异与诚实边界：(a) **本次落地为 48 行手工种子集**（6 域 × 12 文档，同类扰动法配对：26 clean / 21 mismatch / 1 waived），≥300 行扩容用 `scripts/eavcorpus` 三模式（fetch 真实抓取+清洗+收割快照、pair 兄弟配对出草稿标签、record 真实 LLM 跑全链路并录制）在联网环境执行；(b) **种子录制是手工合成的「合格抽取器」回复**——它测的是给定合格抽取下确定性机器（阶梯+守卫+锚定闸+referee 协议）的 P/R/FP，真实 LLM 数字必须 `-mode record` 重录后再看；(c) 回放按 doc URL/主体键检索、不依赖 slate 哈希，离线跑的是**真正的 `JudgeDocument` 全链路**（收割在测试时对无 RawHTML 的快照重跑，抽取回放对键命中，缺录制 = 语料洞 = 测试失败）；(d) 新增 `waived` 行机制：同形异指已知限制（Georgia 州 vs 国）以 label=mismatch + waived=true 入库，**排除在门外但每次打印**——限制被执行地记录，而不是被撒谎地绕过；(e) referee 录制的 subject 键强制存 Normalize 形，loader 校验。**种子集实测：full 模式 P=1.000 / R=1.000 / FP=0 / U=0；确定性模式 P=1.000 / FP=0 / R=0.524（easy 切片 R=1.0，hard 切片 R=0、全 uncertain）——precision 由确定性内核扛、recall 由 referee 挣，正是设计形状。**
 **标注集怎么起（锁定方法：真实文档 × 同类扰动配对，不手写文档）**：
 1. **同类清单挖兄弟**：6 个域各取一份公开类目清单——公司（US+CN 上市公司名录）、药品（FDA/NMPA 常用药，对齐论文原始域）、产品（手机/相机型号）、人物（同名近名公众人物）、地名（Georgia/Jordan/湖南-湖北类）、事件（年度峰会/条约版本）。
 2. **真实抓取**：构建器用现有 scrape 栈每域抓 ~10–15 个真实页面，**fixture 存收割后快照**（`{url,title,cleaned≤8KB,slate}` JSONL），不存全 HTML——收割本身由 E-2 的 HTML 样张单测覆盖。
