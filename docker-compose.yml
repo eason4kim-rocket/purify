@@ -13,8 +13,12 @@ services:
       PURIFY_AUTH_ENABLED: "true"
       PURIFY_API_KEYS: "${PURIFY_API_KEYS}"
       # ── Rate limit ──
+      # Burst must cover the most expensive weighted request or its
+      # capability gate stays closed: search 22, answer 17, watch 1.
       PURIFY_RATE_RPS: "5"
-      PURIFY_RATE_BURST: "10"
+      PURIFY_RATE_BURST: "30"
+      # ── Search provider (empty leaves search/answer/watch disabled) ──
+      PURIFY_SEARCH_BRAVE_KEY: "${PURIFY_SEARCH_BRAVE_KEY:-}"
       # ── Logging ──
       PURIFY_LOG_LEVEL: info
       # ── Durable evidence storage ──
