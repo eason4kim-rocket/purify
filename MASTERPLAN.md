@@ -1149,7 +1149,7 @@ zkTLS（Reclaim/TLSNotary）定位一句话：**它证传输，我们证语义�
 
 ## 15. Phase 8 — EAV 实体归因校验（PLAN.md §6 步 2）
 
-> **状态**：executing — 2026-08-10 拆卡并开工。进度：E-1 ✅（`612fd50`）　E-2 ✅（`b5be194`）　E-3 ✅（`f2c6329`）　E-4…E-6 ⬜。图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始 · ⟳ 与规划不同（以实码为准）。
+> **状态**：executing — 2026-08-10 拆卡并开工。进度：E-1 ✅（`612fd50`）　E-2 ✅（`b5be194`）　E-3 ✅（`f2c6329`）　E-4 ✅（`e233bf6`）　E-5/E-6 ⬜。**判断内核收口：`NewJudge`/`JudgeDocument` 可用，等 E-5 标注集校准 + E-6 接线。** 图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始 · ⟳ 与规划不同（以实码为准）。
 > **上游依据**：PLAN.md §5.3（算法与验收）、§6 步 2（顺序）。**落点定案：新包 `verify/eav/`**——不做 evidence/ 扩展：evidence 管「值在哪」（定位），eav 管「这页在讲谁」（判断），职责不同。
 > **一句话**：抓 right-source-wrong-entity——系统如实引用了真实文档、每个字都锚得上，但文档说的是 B，你问的是 A。对幻觉检测、忠实度、引用核查全部隐形；Parallel Basis 结构上抓不到。
 
@@ -1386,9 +1386,9 @@ base* = StripLegalSuffix 后的形式
 **测试**：fake extractor 注入：合法输出通过；幻觉名（不在文档中）被锚定闸拦下；超限被拒；LLM error → Primary=nil 而非 error 上抛（error 只在 ctx 取消时上抛）。
 **提交**：`feat(eav): extract the primary document entity blind`
 
-### 任务卡 E-4 · Judge 编排 + referee 灰区裁决 ⬜
+### 任务卡 E-4 · Judge 编排 + referee 灰区裁决 ✅
 
-**交付什么**：`judge.go` + `referee.go`：`NewJudge`/`JudgeDocument` 按 §15.3 编排；referee strict schema（`{"answer":"same|different|unsure","quote"}`）与提示词常量（输入含 Subject.Hint 作消歧上下文）；`RefereeVerdict.Answer==Different` 时 `Quote` 必须锚回文档，锚不上 ⇒ 降级 unsure。
+**状态**：✅ 已提交 `e233bf6 feat(eav): judge subject attribution three ways`。误报纪律已断言写死（mismatch 仅出自 floor|referee；decided 裁决必带 Evidence）。⟳ 与规划的差异：(a) **decided 裁决的证据锚定失败 ⇒ 整体降级 uncertain**——不只 referee 的区分性 quote，ladder 命中的 match/mismatch 也一样（primary quote 理论上已过闸必锚上，此为防御性收口：无证据的裁决不出门）；(b) referee 只见头窗 + 已过闸实体（永不见 RawHTML），Hint 截断到 MaxHintBytes 后传入；错误三分与 extractor 相同（provider 错 → uncertain，ErrNotConfigured/ctx → 上抛）；(c) typed-nil referee 视为未配置而非信任（NewJudge 收编为 nil）；(d) 不可用输入（空/超限 subject、空/超限 Cleaned）在触达任何依赖**之前**判 uncertain，extractor 零调用（测试计数器作证）；(e) `DecodeRefereeReply` 未知 answer 值收敛为 unsure（只能朝不报警方向坍缩），大小写宽容；`BuildRefereeInput` 空段省略、确定性、全字段截断。Judgment 的 Anchor 不带 SnapshotID/FetchedAt——由接线层（E-6）用自己的观测盖章，已写进类型注释。
 **怎么做**：裁决优先级固定：盲抽取 Primary=nil ⇒ uncertain 直接返回；阶梯 1–4 命中即返回；灰区才碰 referee；referee nil/error/unsure ⇒ uncertain。`Judgment.Evidence` 在 match/mismatch 时必须存在（来自 Primary.Quote 或 referee 区分性 Quote 的锚点）。**误报纪律以断言写死在测试里：mismatch 只可能出自 Tier ∈ {floor, referee}。**
 **测试**：全路径表测试（fake extractor + fake referee 的笛卡尔组合）；ctx 取消在每个边界立即返回。
 **提交**：`feat(eav): judge subject attribution three ways`
