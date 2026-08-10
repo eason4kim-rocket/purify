@@ -1149,7 +1149,7 @@ zkTLS（Reclaim/TLSNotary）定位一句话：**它证传输，我们证语义�
 
 ## 15. Phase 8 — EAV 实体归因校验（PLAN.md §6 步 2）
 
-> **状态**：executing — 2026-08-10 拆卡并开工。进度：E-1 ✅（`612fd50`）　E-2 ✅（`b5be194`）　E-3…E-6 ⬜。图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始 · ⟳ 与规划不同（以实码为准）。
+> **状态**：executing — 2026-08-10 拆卡并开工。进度：E-1 ✅（`612fd50`）　E-2 ✅（`b5be194`）　E-3 ✅（`f2c6329`）　E-4…E-6 ⬜。图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始 · ⟳ 与规划不同（以实码为准）。
 > **上游依据**：PLAN.md §5.3（算法与验收）、§6 步 2（顺序）。**落点定案：新包 `verify/eav/`**——不做 evidence/ 扩展：evidence 管「值在哪」（定位），eav 管「这页在讲谁」（判断），职责不同。
 > **一句话**：抓 right-source-wrong-entity——系统如实引用了真实文档、每个字都锚得上，但文档说的是 B，你问的是 A。对幻觉检测、忠实度、引用核查全部隐形；Parallel Basis 结构上抓不到。
 
@@ -1379,9 +1379,9 @@ base* = StripLegalSuffix 后的形式
 **验收**：收割 P95 < 5ms/页（纯解析，无网络）。
 **提交**：`feat(eav): harvest deterministic entity candidates`
 
-### 任务卡 E-3 · 盲抽取边界 + 锚定校验 ⬜
+### 任务卡 E-3 · 盲抽取边界 + 锚定校验 ✅
 
-**交付什么**：`extract.go`：`EntityExtractor` 接口 + `AnchoredExtraction` 校验包装——不管 extractor 实现是什么，输出一律过三道闸：(1) `Primary.Name`/每个 `Alias`/`Quote` 长度与计数上限；(2) `Quote` 用 `evidence.AlignValue` 锚回 `Cleaned`，`unlocated` ⇒ 丢弃该实体；(3) Primary 被丢弃 ⇒ 整体降级为 `DocumentEntities{Primary: nil}`（→ uncertain），**绝不报错升级**。
+**状态**：✅ 已提交 `f2c6329 feat(eav): extract the primary document entity blind`。⟳ 与规划的差异：(a) 锚定闸比卡面更严——**Name 与每个 Alias 也必须落位**（Title∪Cleaned，ASCII 大小写不敏感、采纳文档原始大小写），不只 Quote：别名等值在 E-1 是 match 级信号，幻觉别名会把 mismatch 洗成 match，必须闸掉；(b) Quote 缺失时回退为已落位的 Name（Name 已锚定，回退不减弱保证），Quote 超限仍整体丢弃；锚定成功后采纳 `evidence` 返回的文档原文窗口（fuzzy 窗口超配额时保留原 Quote）；(c) 错误策略三分而非二分：provider/数据错误 → 降级空结果，`ErrNotConfigured`（含 typed-nil extractor）与 ctx 取消 → 上抛；(d) 短路不花钱：空候选板/空或超限 Cleaned 直接返回空结果、不调用 extractor；盲输入裁剪在边界强制执行（extractor 只见头窗、永不见 RawHTML、slate 截到上限），闸门则跑在**全量** Cleaned 上（测试用头窗外的 quote 锁死此语义）；(e) schema 里 quote 为必填字段（卡面草图漏写），`eav` 测试锁 schema maxItems==MaxAliases、enum==Kind 字面量；(f) 附带 `DecodeExtractionReply`（16KB 上限、null 宽容、尾垃圾拒收）与 `BuildExtractionInput`（确定性、URL/标题截断、结构性盲——没有 subject 参数可泄露），E-6 的 adapter 因此薄到只剩 llm 调用。
 **怎么做**：抽取输入只有 `Document`（头窗裁剪到 `MaxHeadWindowBytes`）+ 候选板。LLM 提示词模板与 strict JSON schema（`{"primary":{"name","kind","aliases"},"reason_if_none"}`，name 必须从候选板 Quote 中选）以常量形式放 `extract.go`，供接线层 adapter 复用——**adapter 本体（`llm.Client` 接线、BYOK/managed key、修复重试）在 E-6，不进本包**。
 **测试**：fake extractor 注入：合法输出通过；幻觉名（不在文档中）被锚定闸拦下；超限被拒；LLM error → Primary=nil 而非 error 上抛（error 只在 ctx 取消时上抛）。
 **提交**：`feat(eav): extract the primary document entity blind`
