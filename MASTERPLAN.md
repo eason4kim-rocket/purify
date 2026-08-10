@@ -1149,7 +1149,7 @@ zkTLS（Reclaim/TLSNotary）定位一句话：**它证传输，我们证语义�
 
 ## 15. Phase 8 — EAV 实体归因校验（PLAN.md §6 步 2）
 
-> **状态**：executing — 2026-08-10 拆卡并开工。进度：E-1 ✅（`612fd50`）　E-2 ✅（`b5be194`）　E-3 ✅（`f2c6329`）　E-4 ✅（`e233bf6`）　E-5 ✅（`737a008`+`3eefe31`，种子集 48 行；扩容到 ≥300 行待联网跑构建器）　E-6 ⬜。图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始 · ⟳ 与规划不同（以实码为准）。
+> **状态**：**Phase 8 代码收口（2026-08-11）**。进度：E-1 ✅（`612fd50`）　E-2 ✅（`b5be194`）　E-3 ✅（`f2c6329`）　E-4 ✅（`e233bf6`）　E-5 ✅（`737a008`+`3eefe31`，种子集 48 行）　E-6 ✅（`060ff7e`+`1384592`+`a979cb7`）。剩余非代码项：① 真实 LLM 重录 + 标注集扩容 ≥300 行（联网跑 `scripts/eavcorpus`）；② 真机冒烟（`PURIFY_EAV_ENABLED=1` + key，/extract expected_subject 与 /answer 全链路）；③ PLAN.md §6 步 3（N_eff v1）与步 4（重排焊接）在本相位之外。图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始 · ⟳ 与规划不同（以实码为准）。
 > **上游依据**：PLAN.md §5.3（算法与验收）、§6 步 2（顺序）。**落点定案：新包 `verify/eav/`**——不做 evidence/ 扩展：evidence 管「值在哪」（定位），eav 管「这页在讲谁」（判断），职责不同。
 > **一句话**：抓 right-source-wrong-entity——系统如实引用了真实文档、每个字都锚得上，但文档说的是 B，你问的是 A。对幻觉检测、忠实度、引用核查全部隐形；Parallel Basis 结构上抓不到。
 
@@ -1410,7 +1410,9 @@ base* = StripLegalSuffix 后的形式
 - 纯确定性模式（referee 关）单独跑：只门干净误报 < 0.02 与 P > 0.90，不门召回（灰区全 uncertain，召回天然低——这就是 referee 存在的证明）。
 **提交**：`test(eav): add cross-domain attribution golden set`（构建器另卡 `chore(scripts): build eav corpus fixtures`）
 
-### 任务卡 E-6 · 接线：/extract → /answer 消费 ⬜
+### 任务卡 E-6 · 接线：/extract → /answer 消费 ✅
+
+**状态**：✅ 三提交收口：`060ff7e feat(models)` + `1384592 feat(extract)` + `a979cb7 feat(answer)`。⟳ 与规划的关键差异（有意为之）：(a) **剔除点从 answer 的 allowedSupports 前移到 extract 的共识入口**——answer 的支持校验把「未知支持」视为硬错误，事后剔除会变成错误路径；在 `extractMultiSource` 成功收尾处判定、mismatch 源以新状态 `entity_mismatch`（+新错误码 `ENTITY_MISMATCH`）排除出 `valid` 集，共识从一开始就没见过错实体源，/extract 直接用户同样受益；判定失败/超时 → Entity=uncertain 且绝不 fail 源（20s 子超时）。(b) 缓存按**内容哈希**（URL+标题+头窗 sha256）而非 SnapshotID 落键——内容寻址语义相同、不污染 eav API；缓存在 cmd adapter（成功才缓存、取出深拷贝、LRU 双界）。(c) 配置为 `PURIFY_EAV_ENABLED/REFEREE_ENABLED/CACHE_ENTRIES` + `PURIFY_EAV_LLM_*` 独立三键，provider 校验与 compiler 共享抽出的助手，main 启动即验。(d) answer 消费三形态全测：剔除致短缺 → reason 覆写 `entity_mismatch`（closest 定长备注，实体名在逐源 Entity 字段里）；全军覆没 → NoValidSource 路径覆写；胜出证据逐条标注 `entity_verdict`（结构上只可能 match/uncertain——mismatch 进不了共识）。单源 /extract 显式拒收 expected_subject。投影校验器同步收编新 reason 与新字段。
 
 **交付什么**（三个单关注提交，全部 additive）：
 1. `feat(models): carry expected subject and entity attribution` —— `ExtractRequest.ExpectedSubject *SubjectSpec{Name,Hint}`（`json:"expected_subject,omitempty"`，Name 必填 ≤ MaxAnswerSubjectBytes）；`MultiExtractSource.Entity *EntityAttribution{Verdict,Name,Kind,Quote,Tier}`（omitempty）；`AnswerEvidence.EntityVerdict string`（omitempty）；新 unknown reason `AnswerUnknownEntityMismatch = "entity_mismatch"`。
