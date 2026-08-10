@@ -1,10 +1,12 @@
 services:
   purify:
     build: .
-    container_name: purify
+    # Both are parameterized so this stack can coexist with an unrelated
+    # purify deployment on the same host.
+    container_name: ${PURIFY_CONTAINER_NAME:-purify}
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${PURIFY_BIND_PORT:-8080}:8080"
     environment:
       # ── Server ──
       PURIFY_MODE: release
