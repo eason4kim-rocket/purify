@@ -1137,9 +1137,308 @@ zkTLS（Reclaim/TLSNotary）定位一句话：**它证传输，我们证语义�
 | W4–W6 | Phase 2 编译 | "透明确定性提取"（对标 deterministicJson 黑盒） | compiled P95<50ms、validation 亮牌 |
 | W7–W8 | Phase 3 自愈+共识 | n_eff 独立性计数 + 冲突暴露 | 回归晋级制生效 |
 | W9–W10 | Phase 4 搜索 | Verified Search（verify/去重/schema 三参数） | SEARCH.md DoD + 三参数验收 |
+| W11–W13 | Phase 8 EAV 实体归因（§15，PLAN.md §6 步 2） | right-source-wrong-entity 报警（Parallel 结构做不到的洞） | 跨域标注集 P>90% / R>90% / 干净误报<2% |
 | 2026 Q4 | Phase 5–6 | /answer（敢答 unknown）+ /watch + commons ≥30 垂类上线 | 形态 B 可复现；账本开始积累 |
 | 2027 Q1 | Phase 7 + 极限层前两件后续 | freshness SLA + 传播制图 v0 + 审计预览 | lease 默认携带；as_of 查询公开 |
 
 **第一行动（本周）**：开卡 P0-1 严格 schema 校验——它同时是当前 `/extract` 最大质量短板与整个证据体系的第一块砖。
 
 > **EN —** Ten weeks to ship tiers one through four milestone by milestone — receipts (W2), /verify (W3), transparent compiled extraction (W6), independence accounting (W8), verified search (W10) — then the north-star quarter (answers, watches, commons) and the 2027Q1 limit-tier openers. First action: task card P0-1, strict schema validation.
+
+---
+
+## 15. Phase 8 — EAV 实体归因校验（PLAN.md §6 步 2）
+
+> **状态**：planning — 2026-08-10 拆卡（E-1…E-6 全 ⬜）。图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始。
+> **上游依据**：PLAN.md §5.3（算法与验收）、§6 步 2（顺序）。**落点定案：新包 `verify/eav/`**——不做 evidence/ 扩展：evidence 管「值在哪」（定位），eav 管「这页在讲谁」（判断），职责不同。
+> **一句话**：抓 right-source-wrong-entity——系统如实引用了真实文档、每个字都锚得上，但文档说的是 B，你问的是 A。对幻觉检测、忠实度、引用核查全部隐形；Parallel Basis 结构上抓不到。
+
+### 15.0 设计定案（先读，防漂移）
+
+六条，全部有意为之：
+
+1. **盲抽取（blind extraction）**：主实体抽取的输入**永不包含查询实体**。先独立回答「这份文档在讲谁」，再比对「和问的是不是同一个」。抽取一旦被查询污染就是确认偏误——论文级 0% 干净误报做不到的根源。
+2. **三态裁决**：`entity_match / entity_mismatch / entity_uncertain`，与 verify 的 supported / refuted / unlocatable 同哲学：不确定就说不确定。**报警（mismatch）只能来自确凿证据**；抽不出主实体、锚不回原文、LLM 出错，一律 uncertain，绝不升级成报警。干净样本误报 < 2% 是硬门，这条纪律是达标前提。
+3. **抽取选型：候选板 + LLM 选择题（混合），不是纯 NER 也不是纯 LLM**：
+   - 纯 Go NER（jdkato/prose 一类）：英文单语、少维护、给的是 token span 不是「这页在讲谁」（aboutness）→ ❌。
+   - ONNX 多语 NER 模型：引入 cgo/onnxruntime 重依赖，违反「只加 3 个依赖」纪律，同样不解决 aboutness → ❌。
+   - 纯 LLM 自由生成：会幻觉出页面上不存在的实体名，不可锚定 → ❌。
+   - ✅ **确定性信号收割候选板**（title / h1 / og:* / JSON-LD mainEntity / URL slug / 词频，零成本、可单测）→ **LLM 在候选板内做选择题 + 定类型 + 合并别名**（strict JSON schema）→ **每个输出必须能用 `evidence.AlignValue` 锚回原文**，锚不上即丢弃。选择而非生成，幻觉面收敛到零，且与本仓「透明可校验提取」的 DNA 一致。
+4. **确定性比对阶梯先行，LLM referee 只管灰区**：exact / alias / 仅法律后缀差异 → match；相似度低于地板 → mismatch；**词形接近但未经别名验证的（Apple Inc vs Apple Bank、Metformin vs Metformin HCl ER、AMD vs ARM）才进 referee** 做同指裁决。referee 可关（关= 灰区一律 uncertain）——确定性内核先独立成立、独立测试。
+5. **文档级主实体，不做 claim 级**：v1 每个来源文档判一次主实体。/answer 是单事实×单文档，文档级≈claim 级；逐 anchor 上下文归因是后续精化，不进本相位。
+6. **公开契约只加不改**：请求侧可选 `expected_subject`，响应侧 `entity` 全部 `omitempty`（§13 纪律 7）。
+
+**诚实边界（不假装解决）**：同形异指（homonym——subject 字符串 "Georgia" 到底指州还是国）在纯字符串 subject 下不可判，v1 判 match；缓解靠 `Subject.Hint`（/answer 把 predicate 传进来给 referee 当消歧上下文），根治需要 FactSpec 类型化实体，记 backlog 不记本相位。
+
+> **EN —** Locked design: blind extraction (the query never contaminates entity extraction), three-state verdicts where alarms require hard evidence, a slate-then-LLM-choice extractor whose every output must re-anchor through evidence.AlignValue, a deterministic match ladder with an LLM referee only for the confusable gray zone, document-level primary entities, and strictly additive wire contracts. Honest limit: homonym subjects are out of scope in v1.
+
+### 15.1 包结构与依赖
+
+```text
+verify/eav/                  # package eav — 传输中立判断核心
+  eav.go                     # 包文档、资源上限、错误、核心类型
+  normalize.go               # 规范化：宽度折叠/大小写/标点/法律后缀/冠词
+  match.go                   # 确定性比对阶梯（纯函数，无 LLM）
+  slate.go                   # 候选板收割（title/h1/og/JSON-LD/slug/词频）
+  extract.go                 # EntityExtractor 盲抽取边界 + 锚定校验
+  referee.go                 # Referee 灰区同指裁决边界
+  judge.go                   # Judge 编排：收割→盲抽取→阶梯→referee→Judgment
+  *_test.go                  # 与实现文件一一对应的表驱动测试
+  testdata/
+    harvest/*.html           # 候选板收割用完整 HTML 样张（少量）
+    golden/*.jsonl           # 跨域标注集（收割后快照，不存全 HTML）
+    recordings/*.json        # LLM 录制回放（离线评测全链路）
+scripts/eavcorpus/           # 标注集构建器（E-5，独立 main，不进生产二进制）
+```
+
+**依赖方向（锁定）**：`eav` 只依赖 `evidence`（锚定）、`goquery/cascadia`（已有依赖，读 og/JSON-LD）与标准库。**不依赖 `llm` / `models` / `verify` / `consensus`**——LLM 适配器与 wire 类型都在接线层（E-6），方向同 `compiler.TruthExtractor`：密钥、provider、修复、HTTP 全在调用方 adapter。
+
+### 15.2 核心类型与接口签名（`eav.go`，E-1 落地）
+
+```go
+// 资源上限（沿用各包 Max* 惯例；Subject 上限与 models.MaxAnswerSubjectBytes 数值对齐但不引包）
+const (
+    MaxSubjectBytes    = 1200      // 300 runes × 4
+    MaxHintBytes       = 512       // 与 MaxAnswerPredicateBytes 对齐
+    MaxDocumentBytes   = 4 << 20   // 与 verify.maximumPageBytes 对齐
+    MaxHeadWindowBytes = 8 << 10   // 送 LLM 的头窗：title + cleaned 前缀
+    MaxCandidates      = 24        // 候选板上限
+    MaxAliases         = 8
+    MaxSecondary       = 8
+    MaxEntityBytes     = 512       // 单个实体表面形上限
+    MaxQuoteBytes      = 1 << 10
+)
+
+var (
+    ErrInvalidInput  = errors.New("eav: invalid input")
+    ErrNotConfigured = errors.New("eav: judge is not configured")
+)
+
+// Kind 是开放网络的粗粒度实体类型。
+type Kind string
+const (
+    KindOrganization Kind = "organization"
+    KindPerson       Kind = "person"
+    KindProduct      Kind = "product"
+    KindPlace        Kind = "place"
+    KindEvent        Kind = "event"
+    KindWork         Kind = "work"      // 论文/影视/书目等作品
+    KindSubstance    Kind = "substance" // 药品/化学品——论文原始域
+    KindOther        Kind = "other"
+)
+
+// Subject 是查询侧实体。Hint 是可选消歧上下文（/answer 传 predicate），
+// 只进 referee 提示，绝不进盲抽取。
+type Subject struct {
+    Name string
+    Hint string
+}
+
+// Document 是一份待判文档。Cleaned 必填；RawHTML 供候选板读 og/JSON-LD，可空。
+type Document struct {
+    URL     string
+    Title   string
+    Cleaned string
+    RawHTML string
+}
+
+// Candidate 是候选板一项。Quote 必须逐字出现在 Title/Cleaned 中。
+type Candidate struct {
+    Surface string
+    Signal  string // "title" | "h1" | "og:title" | "og:site_name" | "jsonld" | "slug" | "frequency"
+    Quote   string
+}
+
+// Entity 是文档主实体及其同文档别名（ticker、简称、曾用名）。
+type Entity struct {
+    Name    string
+    Kind    Kind
+    Aliases []string
+    Quote   string // 证明主实体身份的最短原文引用
+}
+
+// DocumentEntities 是盲抽取结果。Primary 为 nil = 无法确定唯一主实体
+// （列表页/比较页/论坛聚合），这是合法输出而非错误。
+type DocumentEntities struct {
+    Primary   *Entity
+    Secondary []Entity
+}
+
+// Verdict 三态。报警只有 entity_mismatch 一种。
+type Verdict string
+const (
+    VerdictMatch     Verdict = "entity_match"
+    VerdictMismatch  Verdict = "entity_mismatch"
+    VerdictUncertain Verdict = "entity_uncertain"
+)
+
+// MatchTier 记录裁决在哪一级达成，供响应与评测分层。
+type MatchTier string
+const (
+    TierExact   MatchTier = "exact"
+    TierAlias   MatchTier = "alias"
+    TierSuffix  MatchTier = "suffix"  // 仅法律后缀/冠词差异
+    TierFloor   MatchTier = "floor"   // 相似度低于地板 → mismatch
+    TierReferee MatchTier = "referee" // 灰区同指裁决
+    TierNone    MatchTier = ""        // uncertain
+)
+
+// MatchResult 是确定性阶梯（不含 referee）的输出。
+type MatchResult struct {
+    Verdict    Verdict
+    Tier       MatchTier
+    Similarity float64 // 诊断用；契约以 Verdict 为准
+}
+
+// Judgment 是完整裁决。Evidence 是 DocEntity.Quote 在 Cleaned 中的锚点
+// （复用 evidence.AlignValue），mismatch/match 时必非 unlocated。
+type Judgment struct {
+    Verdict    Verdict
+    Tier       MatchTier
+    Subject    string           // 规范化后的查询实体
+    DocEntity  *Entity          // uncertain 时可为 nil
+    Evidence   *evidence.Anchor
+    Similarity float64
+}
+
+// ── 边界接口（传输中立，adapter 归接线层）─────────────────────────────
+
+// EntityExtractor 是盲抽取边界：输入永不包含 Subject。
+type EntityExtractor interface {
+    ExtractEntities(ctx context.Context, doc Document, slate []Candidate) (DocumentEntities, error)
+}
+type EntityExtractorFunc func(context.Context, Document, []Candidate) (DocumentEntities, error)
+
+// Referee 对灰区做同指裁决。Different 必须携带区分性原文引用。
+type Referee interface {
+    SameReferent(ctx context.Context, subject Subject, entity Entity, doc Document) (RefereeVerdict, error)
+}
+type RefereeAnswer string
+const (
+    RefereeSame      RefereeAnswer = "same"
+    RefereeDifferent RefereeAnswer = "different"
+    RefereeUnsure    RefereeAnswer = "unsure"
+)
+type RefereeVerdict struct {
+    Answer RefereeAnswer
+    Quote  string // Answer==Different 时必填，且必须锚回文档
+}
+
+// ── 纯函数层（E-1/E-2，无 LLM，全部可独立单测）────────────────────────
+
+func Normalize(surface string) string                    // 宽度折叠/小写/标点/空白，方向同 evidence.normalizeText
+func StripLegalSuffix(normalized string) (string, bool)  // inc/corp/ltd/gmbh/株式会社/有限公司…
+func Match(subject Subject, entity Entity) MatchResult   // 确定性阶梯
+func HarvestCandidates(doc Document) []Candidate         // 候选板收割
+
+// ── 编排（E-4）───────────────────────────────────────────────────────
+
+type Config struct {
+    Extractor EntityExtractor
+    Referee   Referee // 可为 nil：灰区一律 uncertain
+}
+func NewJudge(config Config) (*Judge, error)
+func (j *Judge) JudgeDocument(ctx context.Context, subject Subject, doc Document) (Judgment, error)
+```
+
+### 15.3 确定性比对阶梯（`match.go` 语义，E-1 的测试即规格）
+
+```text
+n(s)  = Normalize(subject.Name)
+n(e)  = Normalize(entity.Name)，别名同样规范化
+base* = StripLegalSuffix 后的形式
+
+1. n(s) == n(e)                                → match / exact
+2. n(s) == 任一 n(alias)                        → match / alias
+3. base(s) == base(e) 且余量仅为法律后缀/冠词      → match / suffix
+   （"apple inc" vs "apple" ✓；"apple bank" vs "apple" ✗——余量 "bank" 不在后缀白名单）
+4. sim(s,e) < simFloor(=0.30)                  → mismatch / floor   ← 唯一的确定性报警出口
+5. 其余（灰区：词形接近但非别名验证）              → referee 开：same→match、different→mismatch、unsure→uncertain
+                                                  referee 关：uncertain
+```
+
+- `sim` = token 集 Jaccard 与字符 trigram Jaccard 取大者（trigram 覆盖中文等无空格文本）；两者都在规范化形式上算。
+- 阈值常量集中在 `match.go` 顶部并写明「由 E-5 标注集校准，改动必须过 golden 门」。
+- 对抗样例进 E-1 表测试：Apple Inc/Apple Bank、AMD/ARM、Metformin/Metformin HCl ER、Georgia/Georgia、小米/红米、iPhone 15/iPhone 15 Pro。
+
+### 任务卡 E-1 · 核心类型 + 规范化 + 确定性比对 ⬜
+
+**交付什么**：`eav.go` + `normalize.go` + `match.go` 与全部表驱动测试。§15.2 的类型/常量/错误 + §15.3 的阶梯语义。纯函数，零 IO，零新依赖。
+**怎么做**：法律后缀表覆盖 en（inc/corp/co/ltd/llc/plc/ag/gmbh/sa/nv/oyj）+ zh/ja（有限公司/股份有限公司/集团/株式会社/合同会社）；冠词只剥前导 "the "。规范化方向与 `evidence.normalizeText` 一致（宽度折叠、小写、空白折叠），但**保留字母数字外的内部符号语义**（"HCl ER" 的空格切词决定 token 差异可见）。
+**测试**：每一级阶梯至少 4 正 4 反；对抗样例全绿；`Normalize` 幂等性（`Normalize(Normalize(x))==Normalize(x)`）。
+**验收**：`go test -race ./verify/eav/` 绿；无 LLM、无网络。
+**提交**：`feat(eav): normalize and match entity surface forms`
+
+### 任务卡 E-2 · 候选板收割 ⬜
+
+**交付什么**：`slate.go` + 测试与 `testdata/harvest/*.html` 样张（电商 PDP、新闻文章、公司官网、Wikipedia、列表页各 ≥1）。
+**怎么做**：信号优先级 title 分段（按 ` | `、` – `、` - ` 剥站名）> h1 > og:title/og:site_name > JSON-LD（`mainEntity`/`about`/Product|Organization|Person 的 `name`，goquery 解析 `script[type="application/ld+json"]`，畸形 JSON 静默跳过）> URL slug 还原 > cleaned 头窗高频大写 n-gram/中文连续名词串。**每个候选的 Quote 必须逐字出现在 Title 或 Cleaned**（`strings.Contains` 级检查），不满足即丢弃；去重按 `Normalize` 后表面形合并、保留最高优先级 Signal；上限 `MaxCandidates`。
+**测试**：每类样张断言候选板含预期主实体表面形；列表页样张断言不产出唯一压倒性候选（为 Primary=nil 留通路）。
+**验收**：收割 P95 < 5ms/页（纯解析，无网络）。
+**提交**：`feat(eav): harvest deterministic entity candidates`
+
+### 任务卡 E-3 · 盲抽取边界 + 锚定校验 ⬜
+
+**交付什么**：`extract.go`：`EntityExtractor` 接口 + `AnchoredExtraction` 校验包装——不管 extractor 实现是什么，输出一律过三道闸：(1) `Primary.Name`/每个 `Alias`/`Quote` 长度与计数上限；(2) `Quote` 用 `evidence.AlignValue` 锚回 `Cleaned`，`unlocated` ⇒ 丢弃该实体；(3) Primary 被丢弃 ⇒ 整体降级为 `DocumentEntities{Primary: nil}`（→ uncertain），**绝不报错升级**。
+**怎么做**：抽取输入只有 `Document`（头窗裁剪到 `MaxHeadWindowBytes`）+ 候选板。LLM 提示词模板与 strict JSON schema（`{"primary":{"name","kind","aliases"},"reason_if_none"}`，name 必须从候选板 Quote 中选）以常量形式放 `extract.go`，供接线层 adapter 复用——**adapter 本体（`llm.Client` 接线、BYOK/managed key、修复重试）在 E-6，不进本包**。
+**测试**：fake extractor 注入：合法输出通过；幻觉名（不在文档中）被锚定闸拦下；超限被拒；LLM error → Primary=nil 而非 error 上抛（error 只在 ctx 取消时上抛）。
+**提交**：`feat(eav): extract the primary document entity blind`
+
+### 任务卡 E-4 · Judge 编排 + referee 灰区裁决 ⬜
+
+**交付什么**：`judge.go` + `referee.go`：`NewJudge`/`JudgeDocument` 按 §15.3 编排；referee strict schema（`{"answer":"same|different|unsure","quote"}`）与提示词常量（输入含 Subject.Hint 作消歧上下文）；`RefereeVerdict.Answer==Different` 时 `Quote` 必须锚回文档，锚不上 ⇒ 降级 unsure。
+**怎么做**：裁决优先级固定：盲抽取 Primary=nil ⇒ uncertain 直接返回；阶梯 1–4 命中即返回；灰区才碰 referee；referee nil/error/unsure ⇒ uncertain。`Judgment.Evidence` 在 match/mismatch 时必须存在（来自 Primary.Quote 或 referee 区分性 Quote 的锚点）。**误报纪律以断言写死在测试里：mismatch 只可能出自 Tier ∈ {floor, referee}。**
+**测试**：全路径表测试（fake extractor + fake referee 的笛卡尔组合）；ctx 取消在每个边界立即返回。
+**提交**：`feat(eav): judge subject attribution three ways`
+
+### 任务卡 E-5 · 跨域标注集 + 评测门 ⬜
+
+**交付什么**：`scripts/eavcorpus/`（构建器）+ `testdata/golden/*.jsonl`（≥300 行、6 域）+ `testdata/recordings/`（LLM 录制）+ `golden_test.go`（指标门）。
+**标注集怎么起（锁定方法：真实文档 × 同类扰动配对，不手写文档）**：
+1. **同类清单挖兄弟**：6 个域各取一份公开类目清单——公司（US+CN 上市公司名录）、药品（FDA/NMPA 常用药，对齐论文原始域）、产品（手机/相机型号）、人物（同名近名公众人物）、地名（Georgia/Jordan/湖南-湖北类）、事件（年度峰会/条约版本）。
+2. **真实抓取**：构建器用现有 scrape 栈每域抓 ~10–15 个真实页面，**fixture 存收割后快照**（`{url,title,cleaned≤8KB,slate}` JSONL），不存全 HTML——收割本身由 E-2 的 HTML 样张单测覆盖。
+3. **程序化配对**：正例 =（A 的页, subject=A）与（A 的页, subject=A 的别名/ticker/简称）；负例 =（B 的页, subject=A），其中 B 为 A 的同类兄弟；**hard 负例** = 兄弟中 `Normalize` 后编辑距离 ≤0.35 或 token 重叠 ≥0.5 的词形混淆对（AMD/ARM 类），打 `hard:true`。
+4. **人工审计**：随机 10% + 全部 hard 对逐行过目改标；行 schema `{subject,hint?,doc_ref,label:"match|mismatch",hard,domain,note}`。
+5. **LLM 录制回放**：录制 adapter 把（提示词 sha256 → 响应）写入 `recordings/`；golden 测试用回放 fake 跑**全链路**（收割→盲抽取→阶梯→referee），离线、确定性、免 key；重录用 `PURIFY_EAV_RECORD=1` + BYOK env 手动触发。
+**指标定义（写进 `golden_test.go`，即 PLAN.md §5.3 验收的可执行形式）**：
+- 报警精度 P = 判 mismatch 且标 mismatch / 判 mismatch，**门 > 0.90**
+- 报警召回 R = 判 mismatch 且标 mismatch / 标 mismatch（uncertain 计入漏报，从严），**门 > 0.90**（全链路回放模式）
+- 干净误报率 = 标 match 判 mismatch / 标 match，**门 < 0.02**
+- uncertain 率无门但必须打印（诚实成本可见）；另按 domain × hard 分层打印。
+- 纯确定性模式（referee 关）单独跑：只门干净误报 < 0.02 与 P > 0.90，不门召回（灰区全 uncertain，召回天然低——这就是 referee 存在的证明）。
+**提交**：`test(eav): add cross-domain attribution golden set`（构建器另卡 `chore(scripts): build eav corpus fixtures`）
+
+### 任务卡 E-6 · 接线：/extract → /answer 消费 ⬜
+
+**交付什么**（三个单关注提交，全部 additive）：
+1. `feat(models): carry expected subject and entity attribution` —— `ExtractRequest.ExpectedSubject *SubjectSpec{Name,Hint}`（`json:"expected_subject,omitempty"`，Name 必填 ≤ MaxAnswerSubjectBytes）；`MultiExtractSource.Entity *EntityAttribution{Verdict,Name,Kind,Quote,Tier}`（omitempty）；`AnswerEvidence.EntityVerdict string`（omitempty）；新 unknown reason `AnswerUnknownEntityMismatch = "entity_mismatch"`。
+2. `feat(extract): judge per-source entity attribution` —— 挂点 `extract/multi.go` `extractMultiSource`（per-source 成功抽取 + evidence 校验之后）：`ExpectedSubject` 非空且 EAV 启用时，用 Artifact 的 cleaned/raw/title 组 `eav.Document` 判一次，verdict 落 `MultiExtractSource.Entity`。生产 adapter 在此层落地：`llm.Client` + E-3 提示词常量 + managed key 注入（模式照 P2-4 `88c3471`）；**盲抽取结果按 SnapshotID 进程内 LRU 缓存**（内容寻址 ⇒ 键完美；bound 照 `llm.schemaCache` 双上限模式）；referee 依赖 subject 不缓存。config 新键照 §2.5 `envOr`：`PURIFY_EAV_ENABLED`（默认 false）、`PURIFY_EAV_REFEREE_ENABLED`（默认 true）、`PURIFY_EAV_CACHE_ENTRIES`（默认 128）。判定失败/超时 ⇒ 该源 Entity=uncertain，**绝不 fail 整个 extract**。
+3. `feat(answer): withhold beliefs on entity mismatch` —— `answer/service.go`：`extractRequest` 带上 `ExpectedSubject{Name: spec.Subject, Hint: spec.Predicate}`；在 `allowedConsensusSupports`（service.go:159）之后、`decide`（:175）之前，**从 allowed 集剔除 verdict==mismatch 的源**（错实体的支持不是支持）；uncertain 保留计数但在 `AnswerEvidence.EntityVerdict` 标注。剔除数 >0 且 decide 因此落 unknown/insufficient 时，reason 覆写为 `entity_mismatch`，closest.note 说明被剔除的实体名。
+**成本口径**：+1 次小 LLM 调用/源（头窗 ≤8KB ≈ ~2k tokens）+ 灰区才有的 referee 调用；8 源上限即最多 16 次；snapshot LRU 使 /watch 复访与重复源趋零成本。
+**测试**：extract 层 fake judge 注入验证 per-source verdict 落位与失败降级；answer 层表测试覆盖「剔除后仍 known / 剔除致 unknown(entity_mismatch) / 全 uncertain 不剔除」三形态。
+
+### 15.4 提交序列与依赖
+
+```text
+E-1  feat(eav): normalize and match entity surface forms      # 纯函数内核
+E-2  feat(eav): harvest deterministic entity candidates       # 依赖 E-1（Normalize 去重）
+E-3  feat(eav): extract the primary document entity blind     # 依赖 E-1/E-2 类型
+E-4  feat(eav): judge subject attribution three ways          # 依赖 E-1..E-3
+E-5a chore(scripts): build eav corpus fixtures                # 依赖 E-2（收割快照格式）
+E-5b test(eav): add cross-domain attribution golden set       # 依赖 E-4 + E-5a；P/R/FP 门从此生效
+E-6a feat(models): carry expected subject and entity attribution
+E-6b feat(extract): judge per-source entity attribution       # 依赖 E-4 + E-6a
+E-6c feat(answer): withhold beliefs on entity mismatch        # 依赖 E-6b
+```
+
+每张卡照 §13 纪律：测试先行、单关注提交、`go test -race ./...` + vet + build 全绿、公开契约 additive-only。E-5b 的 golden 门并入 §10 准确率 CI（那张待办卡落地时直接引用本门）。
+
+### 15.5 本相位非目标（防漂移）
+
+- ❌ claim 级逐 anchor 归因（v1 文档级）
+- ❌ 同形异指判别（记 backlog：FactSpec 类型化实体）
+- ❌ 裁决落 ledger 持久化 / 喂 L2 重排——那是 PLAN.md §6 步 4 的焊接工作，接口留好即可
+- ❌ /verify 端点带 expected_subject 复验（等步 4 一并考虑，避免 verify 包现在就依赖 eav）
+- ❌ 共指消解、跨文档实体图、知识库对齐（Wikidata linking）——全部 YAGNI，标注集证明需要再说
+
+> **EN —** Phase 8 lands EAV as `verify/eav/`: a pure normalize+match ladder (E-1), deterministic candidate harvesting (E-2), a blind anchored LLM extractor boundary (E-3), a three-verdict judge with a gray-zone referee (E-4), a 300+-row six-domain golden set built by sibling-category perturbation with recorded-LLM replay (E-5), and additive wiring through /extract into /answer where mismatched sources stop counting as support (E-6). Alarms only ever come from the similarity floor or the referee; everything unprovable stays uncertain.
