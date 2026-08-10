@@ -144,6 +144,12 @@ func Open(dataDir string) (*Store, error) {
 		return nil, fmt.Errorf("ledger: create data directory: %w", err)
 	}
 	dbPath := filepath.Join(dataDir, Filename)
+	// A relative path would become the file URI's authority component below
+	// and fail to open, so resolve it before deriving identity or the DSN.
+	dbPath, err := filepath.Abs(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("ledger: resolve data directory: %w", err)
+	}
 	releaseOpen := ledgerOpenCoordinator.lock(databaseIdentityPath(dbPath))
 	defer releaseOpen()
 
