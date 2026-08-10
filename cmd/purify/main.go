@@ -59,6 +59,9 @@ func run() error {
 	if err := config.ValidateCompilerConfig(cfg.Compiler, cfg.Storage.SnapshotEnabled); err != nil {
 		return fmt.Errorf("validate managed compiler configuration: %w", err)
 	}
+	if err := config.ValidateEAVConfig(cfg.EAV); err != nil {
+		return fmt.Errorf("validate entity attribution configuration: %w", err)
+	}
 	if err := validateManagedSearchConfig(cfg.Search); err != nil {
 		return fmt.Errorf("validate managed search configuration: %w", err)
 	}
@@ -278,10 +281,15 @@ func run() error {
 	}
 	defer requestLLMHTTPClient.CloseIdleConnections()
 	llmClient := llm.NewClient(requestLLMHTTPClient)
+	sourceJudge, err := newManagedSourceJudge(cfg.EAV, llmClient)
+	if err != nil {
+		return fmt.Errorf("initialise entity attribution: %w", err)
+	}
 	extractService, err := extractdomain.NewService(scrapeService, llmClient, receiptSigner, extractdomain.Config{
 		CompiledRepository: compilerBindings.compiledRepository,
 		CompileObserver:    compilerBindings.compileObserver,
 		SafeProxyURL:       safeProxyURL,
+		SourceJudge:        sourceJudge,
 	})
 	if err != nil {
 		return fmt.Errorf("initialise extract service: %w", err)
@@ -290,6 +298,9 @@ func run() error {
 		slog.Info("multi-source extraction enabled")
 	} else {
 		slog.Info("multi-source extraction disabled because snapshots are disabled")
+	}
+	if sourceJudge != nil {
+		slog.Info("entity attribution enabled")
 	}
 
 	// ── 4f. Initialise request-driven Search ────────────────────────

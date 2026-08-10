@@ -20,6 +20,13 @@ const maximumCompilerCredentialBytes = 16 << 10
 const maximumCompilerBaseURLBytes = 16 << 10
 
 var ErrInvalidCompilerConfig = errors.New("config: invalid managed compiler configuration")
+
+// ErrInvalidEAVConfig marks unusable entity-attribution settings.
+var ErrInvalidEAVConfig = errors.New("config: invalid entity attribution configuration")
+
+// maximumEAVCacheEntries bounds the in-process blind-extraction cache.
+const maximumEAVCacheEntries = 4096
+
 var ErrInvalidHealConfig = errors.New("config: invalid extractor heal configuration")
 
 // Config holds all application configuration.
@@ -35,6 +42,7 @@ type Config struct {
 	AdaptivePool AdaptivePoolConfig
 	Storage      StorageConfig
 	Compiler     CompilerConfig
+	EAV          EAVConfig
 	Heal         HealConfig
 	Search       SearchConfig
 }
@@ -47,6 +55,18 @@ type CompilerConfig struct {
 	APIKey  string
 	Model   string
 	BaseURL string
+}
+
+// EAVConfig controls process-owned entity-attribution judging for
+// multi-source extraction. The credential is used only by the managed judge
+// and is never a fallback for request-scoped extraction.
+type EAVConfig struct {
+	Enabled        bool
+	RefereeEnabled bool
+	CacheEntries   int
+	APIKey         string
+	Model          string
+	BaseURL        string
 }
 
 // HealConfig controls the optional process-owned lifecycle webhook emitted by
@@ -228,6 +248,14 @@ func Load() *Config {
 			Model:   envOr("PURIFY_COMPILER_MODEL", "gpt-4o-mini"),
 			BaseURL: envOr("PURIFY_COMPILER_BASE_URL", "https://api.openai.com/v1"),
 		},
+		EAV: EAVConfig{
+			Enabled:        envBoolOr("PURIFY_EAV_ENABLED", false),
+			RefereeEnabled: envBoolOr("PURIFY_EAV_REFEREE_ENABLED", true),
+			CacheEntries:   envIntOr("PURIFY_EAV_CACHE_ENTRIES", 128),
+			APIKey:         os.Getenv("PURIFY_EAV_LLM_API_KEY"),
+			Model:          envOr("PURIFY_EAV_LLM_MODEL", "gpt-4o-mini"),
+			BaseURL:        envOr("PURIFY_EAV_LLM_BASE_URL", "https://api.openai.com/v1"),
+		},
 		Heal: HealConfig{
 			WebhookURL:    os.Getenv("PURIFY_HEAL_WEBHOOK_URL"),
 			WebhookSecret: os.Getenv("PURIFY_HEAL_WEBHOOK_SECRET"),
@@ -273,44 +301,85 @@ func ValidateCompilerConfig(value CompilerConfig, snapshotEnabled bool) error {
 	if !value.Enabled {
 		return nil
 	}
-	if len(value.APIKey) > maximumCompilerCredentialBytes || strings.TrimSpace(value.APIKey) == "" {
-		return fmt.Errorf("%w: API key is invalid", ErrInvalidCompilerConfig)
+	if err := validateProviderCredential(value.APIKey); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidCompilerConfig, err)
 	}
 	if !snapshotEnabled {
 		return fmt.Errorf("%w: snapshots must be enabled", ErrInvalidCompilerConfig)
 	}
-
-	if len(value.Model) > maximumCompilerModelBytes {
-		return fmt.Errorf("%w: model is invalid", ErrInvalidCompilerConfig)
+	if err := validateProviderModel(value.Model); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidCompilerConfig, err)
 	}
-	model := strings.TrimSpace(value.Model)
+	if err := validateProviderBaseURL(value.BaseURL); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidCompilerConfig, err)
+	}
+	return nil
+}
+
+// ValidateEAVConfig rejects an enabled entity-attribution judge whose
+// provider settings or cache bound are unusable. Disabled configuration is
+// inert, including any stale provider variables left in the environment.
+func ValidateEAVConfig(value EAVConfig) error {
+	if !value.Enabled {
+		return nil
+	}
+	if err := validateProviderCredential(value.APIKey); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidEAVConfig, err)
+	}
+	if err := validateProviderModel(value.Model); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidEAVConfig, err)
+	}
+	if err := validateProviderBaseURL(value.BaseURL); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidEAVConfig, err)
+	}
+	if value.CacheEntries < 1 || value.CacheEntries > maximumEAVCacheEntries {
+		return fmt.Errorf("%w: cache entries must be between 1 and %d", ErrInvalidEAVConfig, maximumEAVCacheEntries)
+	}
+	return nil
+}
+
+func validateProviderCredential(apiKey string) error {
+	if len(apiKey) > maximumCompilerCredentialBytes || strings.TrimSpace(apiKey) == "" {
+		return errors.New("API key is invalid")
+	}
+	return nil
+}
+
+func validateProviderModel(rawModel string) error {
+	if len(rawModel) > maximumCompilerModelBytes {
+		return errors.New("model is invalid")
+	}
+	model := strings.TrimSpace(rawModel)
 	if model == "" || len(model) > maximumCompilerModelBytes {
-		return fmt.Errorf("%w: model is invalid", ErrInvalidCompilerConfig)
+		return errors.New("model is invalid")
 	}
 	for _, character := range model {
 		if unicode.IsControl(character) || unicode.IsSpace(character) {
-			return fmt.Errorf("%w: model is invalid", ErrInvalidCompilerConfig)
+			return errors.New("model is invalid")
 		}
 	}
+	return nil
+}
 
-	if len(value.BaseURL) > maximumCompilerBaseURLBytes {
-		return fmt.Errorf("%w: base URL is invalid", ErrInvalidCompilerConfig)
+func validateProviderBaseURL(rawBaseURL string) error {
+	if len(rawBaseURL) > maximumCompilerBaseURLBytes {
+		return errors.New("base URL is invalid")
 	}
-	baseURL := strings.TrimSpace(value.BaseURL)
+	baseURL := strings.TrimSpace(rawBaseURL)
 	parsed, err := url.Parse(baseURL)
 	validScheme := err == nil && (strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https"))
 	if err != nil || !parsed.IsAbs() || parsed.Opaque != "" || parsed.Host == "" || parsed.Hostname() == "" ||
 		!validScheme || parsed.User != nil ||
 		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return fmt.Errorf("%w: base URL is invalid", ErrInvalidCompilerConfig)
+		return errors.New("base URL is invalid")
 	}
 	if strings.HasSuffix(parsed.Host, ":") {
-		return fmt.Errorf("%w: base URL is invalid", ErrInvalidCompilerConfig)
+		return errors.New("base URL is invalid")
 	}
 	if port := parsed.Port(); port != "" {
 		numericPort, err := strconv.Atoi(port)
 		if err != nil || numericPort < 1 || numericPort > 65535 {
-			return fmt.Errorf("%w: base URL is invalid", ErrInvalidCompilerConfig)
+			return errors.New("base URL is invalid")
 		}
 	}
 	return nil

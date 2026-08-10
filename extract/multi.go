@@ -19,6 +19,7 @@ import (
 	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/publicnet"
 	"github.com/use-agent/purify/simhash"
+	"github.com/use-agent/purify/verify/eav"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -26,6 +27,10 @@ const (
 	defaultMultiSourceSlots = 4
 	maximumMultiSourceSlots = defaultMultiSourceSlots
 	maximumMultiTimeout     = 120
+	// sourceJudgeTimeout bounds one entity-attribution judgment so a slow
+	// judge can degrade one source to uncertain instead of stalling the
+	// whole multi-source request.
+	sourceJudgeTimeout = 20 * time.Second
 )
 
 type multiSourceOutcome struct {
@@ -502,6 +507,10 @@ func (s *Service) extractMultiSource(
 		}
 		return outcome
 	}
+	attribution := s.judgeSourceAttribution(ctx, prepared.ExpectedSubject, finalURL, artifact)
+	if applyEntityAttribution(&outcome.summary, attribution, finalURL, response.SnapshotID) {
+		return outcome
+	}
 	outcome.summary.Success = true
 	outcome.summary.Status = models.MultiExtractSourceStatusValid
 	outcome.summary.FinalURL = finalURL
@@ -509,6 +518,84 @@ func (s *Service) extractMultiSource(
 	outcome.fetchedAt = artifact.Source.FetchedAt
 	outcome.consensus = &candidate
 	return outcome
+}
+
+// judgeSourceAttribution judges one fully valid source document against the
+// request's expected subject. It never fails the source: a missing judge or
+// subject yields no attribution, and judge errors or timeouts degrade to an
+// uncertain attribution. Judging runs against the same artifact that
+// produced the source's evidence, so verdict quotes anchor in the content
+// the extraction consumed.
+func (s *Service) judgeSourceAttribution(
+	ctx context.Context,
+	spec *models.SubjectSpec,
+	finalURL string,
+	artifact *Artifact,
+) *models.EntityAttribution {
+	if s.sourceJudge == nil || spec == nil || artifact == nil || artifact.Public == nil || artifact.Source == nil {
+		return nil
+	}
+	judgeContext, cancel := context.WithTimeout(ctx, sourceJudgeTimeout)
+	defer cancel()
+	judgment, err := s.sourceJudge.JudgeDocument(
+		judgeContext,
+		eav.Subject{Name: spec.Name, Hint: spec.Hint},
+		eav.Document{
+			URL:     finalURL,
+			Title:   artifact.Public.Metadata.Title,
+			Cleaned: artifact.Public.Content,
+			RawHTML: artifact.Source.RawHTML,
+		},
+	)
+	if err != nil {
+		return &models.EntityAttribution{Verdict: models.EntityVerdictUncertain}
+	}
+	switch judgment.Verdict {
+	case eav.VerdictMatch, eav.VerdictMismatch, eav.VerdictUncertain:
+	default:
+		return &models.EntityAttribution{Verdict: models.EntityVerdictUncertain}
+	}
+	attribution := &models.EntityAttribution{
+		Verdict: string(judgment.Verdict),
+		Tier:    string(judgment.Tier),
+	}
+	if judgment.DocEntity != nil {
+		attribution.Name = judgment.DocEntity.Name
+		attribution.Kind = string(judgment.DocEntity.Kind)
+	}
+	if judgment.Evidence != nil {
+		attribution.Quote = judgment.Evidence.Quote
+	}
+	return attribution
+}
+
+// applyEntityAttribution attaches one attribution to a fully valid source
+// summary and reports whether the source must be excluded from consensus. A
+// support about the wrong entity is not support: the excluded source keeps
+// its metrics and snapshot identity for accounting, but never contributes a
+// consensus candidate.
+func applyEntityAttribution(
+	summary *models.MultiExtractSource,
+	attribution *models.EntityAttribution,
+	finalURL string,
+	snapshotID string,
+) bool {
+	if attribution == nil {
+		return false
+	}
+	summary.Entity = attribution
+	if attribution.Verdict != models.EntityVerdictMismatch {
+		return false
+	}
+	summary.Success = false
+	summary.Status = models.MultiExtractSourceStatusEntityMismatch
+	summary.FinalURL = finalURL
+	summary.SnapshotID = snapshotID
+	summary.Error = &models.ErrorDetail{
+		Code:    models.ErrCodeEntityMismatch,
+		Message: "source is about a different entity than the expected subject",
+	}
+	return true
 }
 
 func dedupeMultiFinalURLs(outcomes []multiSourceOutcome) {
@@ -892,6 +979,10 @@ func cloneMultiSourceSummary(input models.MultiExtractSource) models.MultiExtrac
 	if input.Error != nil {
 		detail := *input.Error
 		input.Error = &detail
+	}
+	if input.Entity != nil {
+		entity := *input.Entity
+		input.Entity = &entity
 	}
 	return input
 }

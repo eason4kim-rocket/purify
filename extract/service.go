@@ -26,6 +26,7 @@ import (
 	"github.com/use-agent/purify/receipts"
 	"github.com/use-agent/purify/scrape"
 	"github.com/use-agent/purify/scraper"
+	"github.com/use-agent/purify/verify/eav"
 )
 
 const (
@@ -72,6 +73,13 @@ type CompileObserver interface {
 	Observe(context.Context, compiler.PageKey, string, time.Time, json.RawMessage) error
 }
 
+// SourceJudge decides whether one fetched source document is about the
+// expected subject. eav.Judge satisfies it directly; provider configuration
+// and caching belong to the adapter supplied at the wiring layer.
+type SourceJudge interface {
+	JudgeDocument(ctx context.Context, subject eav.Subject, doc eav.Document) (eav.Judgment, error)
+}
+
 // Artifact keeps the public cleaned page and its selected raw source together.
 // Callers sharing one Artifact across content, verification, and structured
 // extraction consumers must treat it as read-only. Source may be nil only when
@@ -94,6 +102,9 @@ type Config struct {
 	// SourceSlots bounds source work across all concurrent multi requests made
 	// through this Service. Zero selects the default of four.
 	SourceSlots int
+	// SourceJudge enables per-source entity attribution for multi-source
+	// requests carrying an expected subject. Nil disables the capability.
+	SourceJudge SourceJudge
 }
 
 // OperationError preserves phase timing while retaining the domain cause for
@@ -150,6 +161,7 @@ type Service struct {
 	now              func() time.Time
 	safeProxyURL     string
 	sourceSlots      chan struct{}
+	sourceJudge      SourceJudge
 }
 
 // NewService constructs an extraction service. signer may be nil when evidence
@@ -173,6 +185,10 @@ func NewService(runner Runner, extractor StructuredExtractor, signer ReceiptSign
 	if isNilCompileObserver(compileObserver) {
 		compileObserver = nil
 	}
+	sourceJudge := cfg.SourceJudge
+	if isNilSourceJudge(sourceJudge) {
+		sourceJudge = nil
+	}
 	safeProxyURL, err := normalizeMultiSafeProxyURL(cfg.SafeProxyURL)
 	if err != nil {
 		return nil, err
@@ -193,6 +209,7 @@ func NewService(runner Runner, extractor StructuredExtractor, signer ReceiptSign
 		now:              now,
 		safeProxyURL:     safeProxyURL,
 		sourceSlots:      make(chan struct{}, sourceSlotCount),
+		sourceJudge:      sourceJudge,
 	}, nil
 }
 
@@ -201,6 +218,13 @@ func NewService(runner Runner, extractor StructuredExtractor, signer ReceiptSign
 // and evidence stay tied to one fresh raw source.
 func (s *Service) Extract(ctx context.Context, request *models.ExtractRequest) (*models.ExtractResponse, error) {
 	startedAt := s.now()
+	if request != nil && request.ExpectedSubject != nil {
+		return nil, s.operationError(
+			invalidExtractRequest("expected_subject requires multi-source extraction"),
+			startedAt,
+			models.ExtractTimingInfo{},
+		)
+	}
 	prepared, err := prepareRequest(request)
 	if err != nil {
 		return nil, s.operationError(err, startedAt, models.ExtractTimingInfo{})
@@ -729,6 +753,19 @@ func isNilCompileObserver(observer CompileObserver) bool {
 	}
 }
 
+func isNilSourceJudge(judge SourceJudge) bool {
+	if judge == nil {
+		return true
+	}
+	value := reflect.ValueOf(judge)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
 // observeCompilation runs after the response and its timing have been fully
 // assembled. Catalog admission is best-effort: neither an observer error nor a
 // panic may turn a successful customer extraction into a failure.
@@ -863,6 +900,21 @@ func prepareRequest(request *models.ExtractRequest) (*models.ExtractRequest, err
 	if request.WaitForNetworkIdle != nil {
 		value := *request.WaitForNetworkIdle
 		prepared.WaitForNetworkIdle = &value
+	}
+	if request.ExpectedSubject != nil {
+		spec := *request.ExpectedSubject
+		spec.Name = strings.TrimSpace(spec.Name)
+		spec.Hint = strings.TrimSpace(spec.Hint)
+		if spec.Name == "" {
+			return nil, invalidExtractRequest("expected_subject.name is required")
+		}
+		if err := validateExtractText("expected_subject.name", spec.Name, models.MaxAnswerSubjectBytes, false); err != nil {
+			return nil, err
+		}
+		if err := validateExtractText("expected_subject.hint", spec.Hint, models.MaxAnswerPredicateBytes, false); err != nil {
+			return nil, err
+		}
+		prepared.ExpectedSubject = &spec
 	}
 	prepared.URL = strings.TrimSpace(prepared.URL)
 	prepared.LLMModel = strings.TrimSpace(prepared.LLMModel)
