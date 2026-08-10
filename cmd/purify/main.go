@@ -118,6 +118,20 @@ func run() error {
 		return fmt.Errorf("initialise outbound network policy: %w", err)
 	}
 
+	// ── 3b-1. Start the one process-owned safe egress relay ─────────
+	// Verification revisit and multi-source extraction share this loopback
+	// SOCKS5 boundary; both capabilities follow the snapshot capability.
+	safeRelay, safeProxyURL, err := newManagedSafeRelay(snapshotStore, outboundPolicy)
+	if err != nil {
+		return fmt.Errorf("initialise safe egress relay: %w", err)
+	}
+	if safeRelay != nil {
+		defer safeRelay.Close()
+		slog.Info("safe egress relay enabled")
+	} else {
+		slog.Info("safe egress relay disabled because snapshots are disabled")
+	}
+
 	// ── 3c. Initialise request-driven baseline Search ────────────────
 	managedSearch, err := newManagedSearchRuntime(cfg, outboundPolicy)
 	if err != nil {
@@ -164,12 +178,6 @@ func run() error {
 	// ── 3f. Build a provenance-preserving verification service ──────
 	var verifyService handler.VerifyService
 	if snapshotStore != nil {
-		safeRelay, relayErr := proxy.StartDirectRelay(outboundPolicy.DialContext)
-		if relayErr != nil {
-			return fmt.Errorf("initialise safe browser relay: %w", relayErr)
-		}
-		defer safeRelay.Close()
-
 		rodFetch := newRodFetch(sc)
 		revisitService, revisitErr := revisit.New(revisit.Config{
 			Engines: []engine.Engine{
@@ -179,7 +187,7 @@ func run() error {
 			},
 			Finalizer:        sc,
 			Policy:           outboundPolicy,
-			SafeProxyURL:     "socks5://" + safeRelay.Addr(),
+			SafeProxyURL:     safeProxyURL,
 			Timeout:          verifyRevisitTimeout(cfg.Scraper),
 			MaximumBodyBytes: maximumVerifyObservationBodyBytes,
 		})
@@ -252,9 +260,15 @@ func run() error {
 	extractService, err := extractdomain.NewService(scrapeService, llmClient, receiptSigner, extractdomain.Config{
 		CompiledRepository: compilerBindings.compiledRepository,
 		CompileObserver:    compilerBindings.compileObserver,
+		SafeProxyURL:       safeProxyURL,
 	})
 	if err != nil {
 		return fmt.Errorf("initialise extract service: %w", err)
+	}
+	if safeProxyURL != "" {
+		slog.Info("multi-source extraction enabled")
+	} else {
+		slog.Info("multi-source extraction disabled because snapshots are disabled")
 	}
 
 	// ── 5. Setup router ─────────────────────────────────────────────
