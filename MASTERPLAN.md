@@ -706,21 +706,21 @@ go run ./scripts/benchmark/main.go compiled -runs 1000 -warmup 100
 
 **目标一句话**：漂移→影子重编译→快照回归→晋级或告警，闭环全程留痕；多源提取给出 N_eff 与带证据的冲突集。
 
-> **实况对齐 · 2026-08-10（Phase 3 WIP HEAD `43a1574`）** —— 本节已按提交与磁盘实况回写。图例：✅ 已提交并可用 · 🚧 核心已提交、生产接线未完成 · ⬜ 未开始 · ⟳ 与早期规划不同（以实际接口/状态机为准）。
-> 进度：P3-1 🚧　P3-2 ✅　P3-3 🚧。自愈候选/回放/worker/API 原语、consensus + materialization、REST `sources[]` 与 MCP `sources[]` 均已提交；**唯一未完成的 Phase 3 生产实现**是 `cmd/purify/main.go` 启动 self-heal runtime，并把一个 process-owned safe relay 同时注入 verify revisit 与 multi-source extract。该安全/生命周期接线尚未获得修改授权，因此不得把 Phase 3 或 P3-1/P3-3 伪标为完成。
+> **实况对齐 · 2026-08-10（第二次回写，HEAD `8565ac8`）** —— 图例：✅ 已提交并可用 · 🚧 部分 · ⬜ 未开始 · ⟳ 与早期规划不同（以实际接口/状态机为准）。
+> 进度：**P3-1 ✅　P3-2 ✅　P3-3 ✅，Phase 3 收口**。原待授权的生产 main 接线已获授权并完成：`3017c9e` 把一个 process-owned safe relay（`newManagedSafeRelay`，随 snapshot 能力启停）同时注入 verify revisit 与 `extract.Config.SafeProxyURL`（`sources[]` 点亮）；`e6fd741` 实例化 `managedHealRuntime`、注入 `POST /api/v1/extractors/:id/heal`、并用 `managedBackgroundLifecycle` 建立 drain 后 compiler→heal→outbox→relay 的显式 shutdown 顺序。
 
 ### 任务卡 P3-1 · 自愈：回归晋级制
 
 **交付什么** ⟳：实际拆成四层：`compiler/candidate.go` 将 synthesis 与 publication 分离并持久化 immutable candidate；`compiler/selfheal.go` 对 confirmed 历史做有界回放并原子晋级；`compiler/heal_worker.go` 轮询 durable run/回收过期 lease；`api/handler/extractor_heal.go` 提供只唤醒既有 run 的手动入口。`ledger` 的 subject-aware outbox 承载 `extractor.promoted|extractor.degraded`。
 
-**状态**：🚧 核心与接线原语已提交：`3590371`、`440bade`、`2f4f715`、`135dba1`。`cmd/purify/heal.go` 也已有 runtime/shared-relay helper 与生命周期测试；但 production `main.go` 尚未实例化 `managedHealRuntime`，`POST /api/v1/extractors/:id/heal` 当前由 nil service fail-closed 为 503，后台也没有实际运行的 heal worker。
+**状态**：✅ 核心 `3590371`、`440bade`、`2f4f715`、`135dba1`；生产接线 `e6fd741 feat(main): run production self-heal runtime`（worker 后台轮询、手动 heal 路由注入、显式 shutdown 顺序）。
 
 **验收标准**：
 - [x] 晋级门槛：candidate 对 exact stale revision 的 confirmed 历史重放，至少 1 fact 且 `matched/total ≥ 0.9`
 - [x] 回归不过或历史不足：run 进入 `degraded`，旧 stale revision 不被静默替换；invalid candidate 进入 `failed`
 - [x] 晋级在一个 `ledger.Update` 内完成：旧 stale revision→retired、新 revision=`source.version+1`→active、页面重绑、run terminal 与可选 outbox event 同事务提交
 - [x] durable lease、过期回收、terminal idempotency、手动 202 scheduling receipt 与 webhook outbox 已有测试
-- [ ] production main 启动 worker、注入 protected route service，并纳入明确 shutdown 顺序
+- [x] production main 启动 worker、注入 protected route service，并纳入明确 shutdown 顺序（`e6fd741`）
 
 ⟳ **真实流程不是 `Heal` 内再调用 LLM Compile**。合成结果先经 `SubmitCandidate` 作非破坏性 admission：新 exact cluster 可登记 v1 active；健康 active 保留；可归属 stale lineage 的 candidate 才创建/复用 immutable pending heal run；retired/ambiguous lineage 不复活。随后 Healer 只重放这份已冻结 candidate：
 
@@ -869,10 +869,11 @@ func MergeWithMaterialization([]SourceResult) (Result, Materialization, error)
 ✅ 135dba1  feat(compiler): schedule durable healing runs
 ✅ 31d44a7  feat(extract): multi-source consensus extraction
 ✅ 43a1574  feat(mcp): support multi-source consensus extraction
-🚧 —        production main self-heal + shared safe relay（待明确授权；尚无提交）
+✅ 3017c9e  feat(main): share one safe relay across verify and multi-source extract
+✅ e6fd741  feat(main): run production self-heal runtime
 ```
 
-> **EN — (Phase 3 WIP, HEAD `43a1574`)** The durable core is implemented: synthesis and publication are separated; immutable candidates replay bounded, provenance-checked confirmed history under reclaimable durable leases; ≥90% with at least one fact promotes atomically, while insufficient or failing replay degrades without a silent swap. Consensus derives eTLD+1/IP roots, collapses same-root or SimHash-distance≤3 sources into N_eff components, preserves every evidence-backed conflict, and materializes typed JSON only when topology and values are unambiguous. REST and MCP `sources[]` are committed with bounded fan-out, strict evidence/status/error contracts, credential separation, and fail-closed decoders. Phase 3 is **not complete**: production `main.go` still needs explicitly authorized wiring for the self-heal runtime and one shared safe relay, so P3-1 and P3-3 remain WIP.
+> **EN — (Phase 3 complete, HEAD `8565ac8`)** The durable core is implemented: synthesis and publication are separated; immutable candidates replay bounded, provenance-checked confirmed history under reclaimable durable leases; ≥90% with at least one fact promotes atomically, while insufficient or failing replay degrades without a silent swap. Consensus derives eTLD+1/IP roots, collapses same-root or SimHash-distance≤3 sources into N_eff components, preserves every evidence-backed conflict, and materializes typed JSON only when topology and values are unambiguous. REST and MCP `sources[]` ship with bounded fan-out, strict evidence/status/error contracts, credential separation, and fail-closed decoders. The previously pending production wiring landed: one snapshot-gated safe relay now feeds both verification revisit and multi-source extraction (`3017c9e`), and the self-heal worker runs in the production binary with an explicit post-drain shutdown order (`e6fd741`).
 
 ---
 
@@ -880,15 +881,20 @@ func MergeWithMaterialization([]SourceResult) (Result, Materialization, error)
 
 **目标一句话**：按 `SEARCH.md` M0–M4 落地 provider 中立的 Search，再叠三个别人没有的参数：`verify` / simhash 去重 / `schema`。
 
+> **实况对齐 · 2026-08-10（第二次回写，HEAD `8565ac8`）** —— 图例同前：✅ 已提交 · 🚧 部分 · ⟳ 与早期规划不同。
+> 进度：**P4-1 ✅　P4-2 ✅　P4-3 ✅，Phase 4 收口**。生产 enrichment 接线已完成：`4e32af4` 使 `main.go` 在 snapshot 能力可用时以 `WithEnrichment(extractService, receiptSigner)` 构造 Search，`verify`/`schema`/`include_content` 在生产二进制真实可用。全仓测试 + vet 通过；非测试代码零 "calibrated"。
+
 ### 任务卡 P4-1 · M0–M1：契约、服务、首个 provider
 
 **完成什么**：`SEARCH.md` 的请求/响应契约照建；provider 接口 + Brave 适配器。
 
 **交付什么**：`search/service.go`、`search/providers/brave.go`、`models/search.go`、`api/handler/search.go`、router 注册。
 
+**状态**：✅ 已提交 `130fee8`（models + provider 契约 + freshness/错误分类）、`19f61df`（Brave 适配器：专用 public-only transport、不跟随重定向、响应 2 MiB 上限 + 有界数组解码）、`a3f6622`（service + 归一化 + 60s/256 条/16 MiB baseline cache + simhash 连通分量去重）、`5460e70`（HTTP `POST /api/v1/search` + SearchAuth + 独立 capability 闸）、`27323ec`（生产 main 接线，`PURIFY_SEARCH_BRAVE_KEY`，request-driven 零后台工作）。⟳ 实际文件为 `search/brave.go`（非 `search/providers/`）；domain 过滤在 provider 响应后按 IDNA 规范化 + publicsuffix 校验执行，与 provider 语法解耦。
+
 **验收标准**（含 SEARCH.md 自带 DoD）：
-- [ ] 公开契约零 provider 痕迹；超时/取消/错误映射齐（429→`ErrCodeRateLimited`）
-- [ ] 默认测试套件不需要真实 key（provider 打桩）
+- [x] 公开契约零 provider 痕迹；超时/取消/错误映射齐（429→`ErrCodeRateLimited`）
+- [x] 默认测试套件不需要真实 key（provider 打桩）
 
 **实现参考**：
 
@@ -910,16 +916,33 @@ type Provider interface {
 2. simhash 去重——`Distance(title+snippet 指纹) ≤ 3` 视为同文只留一条；
 3. `schema: {...}`——逐结果走 extract（engine auto），搜索直接实体化。
 
+**状态**：✅ 代码与测试已提交 `d8acbb4`（`evidence.AlignValueContext` 可取消对齐）+ `1c43a37`（enrichment：top-5 并发实抓、snippet 对齐 → 签名收据、simhash 去重默认开启、schema 逐结果 `ExtractArtifact` 复用同一次 fetch、有界编码）；生产接线 `4e32af4 feat(search): enable production result enrichment`（enrichment 随 snapshot 能力启停；baseline-only 时重参数继续 fail-closed）。⟳ 与规划的差异：404/410 才剔除进 `dropped_stale`；对齐失败不剔除而是 `verified:false` + `verification_status:"mismatch"`（不销毁 baseline 信息）；去重在 limit 截断前对全 baseline 做传递闭包（连通分量取最早 provider 排名者）。
+
 **验收标准**：
-- [ ] verify:true 时响应每条含 `verified: true|false` 与 `receipt`；被剔除数量可见（`dropped_stale: n`）
-- [ ] 站群通稿在结果中只出现一次
-- [ ] schema 模式复用 compiler 缓存（同站二次搜索显著变快）
+- [x] verify:true 时响应每条含 `verified: true|false` 与 `receipt`；被剔除数量可见（`dropped_stale: n`）
+- [x] 站群通稿在结果中只出现一次
+- [ ] schema 模式复用 compiler 缓存（同站二次搜索显著变快）——接线已通，待真实流量实测后勾
 
 ### 任务卡 P4-3 · MCP `search_web`
 
 照 SEARCH.md M3：同一 Search 服务，不另写逻辑。
 
-**提交序列**：沿用 `SEARCH.md` 的 8-commit map，差异化三参数并入 `feat(search): verified results and dedup`、`feat(search): schema-shaped results` 两个增量 commit。
+**状态**：✅ 已提交 `1e047c2 feat(mcp): expose verified web search`。
+
+**提交序列**（实际）：
+
+```
+✅ b4c245e  refactor(extract): expose public-only reusable artifacts   # FetchPublicArtifact/ExtractArtifact 边界
+✅ 130fee8  feat(search): define request models and provider contract
+✅ 19f61df  feat(search): add brave provider adapter
+✅ a3f6622  feat(search): add search service and result normalization
+✅ 5460e70  feat(search): expose search HTTP endpoint
+✅ d8acbb4  refactor(evidence): add cancelable value alignment
+✅ 27323ec  feat(search): wire baseline provider runtime
+✅ 1c43a37  feat(search): enrich results with verified artifacts
+✅ 1e047c2  feat(mcp): expose verified web search
+✅ 4e32af4  feat(search): enable production result enrichment
+```
 
 > **EN —** Phase 4 executes SEARCH.md's M0–M4 (provider-neutral contract, Brave first, MCP `search_web`) and adds the three differentiators nobody ships: `verify:true` (re-fetch top-k, align the snippet claim, drop dead results, attach receipts), simhash dedup of syndicated copies, and `schema` for entity-shaped results reusing the compiled-extractor cache.
 
@@ -928,6 +951,11 @@ type Provider interface {
 ## 8. Phase 5–7 — 北极星：/answer、/watch、预测式新鲜度（2026Q4–2027Q1）
 
 **Gate**：Phase 0–4 全部验收 + 出现付费流量后启动。
+
+> **实况对齐 · 2026-08-10（第二次回写，HEAD `8565ac8`）** —— 实施已先于 Gate 启动（付费流量条件未满足即动工，属计划外提前；技术上依赖已就绪故无返工风险）。
+> **P5 /answer**：核心与传输面 ✅ —— `617f1e8`（ledger 批量钩子）、`6e3691e`（`answer/service.go`：search→multi-extract→consensus 组装；两形态契约照建——tie→`conflicting_independent_sources`、`independent_roots < min`→`insufficient_independent_sources`，两者都带 `closest`/`needs`；confidence 只用 low/medium/high 档位；响应带固定 24h `lease` 块，形态即 P7 契约）、`0a9c92d`（HTTP `POST /api/v1/answer` + AnswerAuth + capability 闸）、`86a5cd0`（MCP evidence-backed answers）、**`8565ac8`（生产 main 接线：search 与 multi-source 双能力可用时构造，否则 fail-closed）——P5 生产可用**。
+> **P6 /watch + facts**：核心已提交、HTTP 面在未提交 WIP —— `f848af6`（verify 对 gone verdict 也发 FactChange，含 `status`/`gone_scope`，不伪造替代证据）、`300e0bd`（`VerifyWithRecorder` 作用域事务记录器）、`174a911`（migration：双时态 `facts`（observed_at/valid_from/valid_to/superseded_by）+ `watches`（EWMA/lease/state 机），STRICT + 重 CHECK/触发器）、`b1ca162`（`watch/store.go`：lifecycle、keyset 分页、10k 活跃上限、3min 租约 claim）。原 WIP 已审查并落成提交：**`5a3dfee`（`watch/verification_recorder.go`：lease 绑定的原子 fact 物化，bootstrap/fact 双模式、幂等重放、EWMA 调度数学 0.3/0.7 + clamp 10m–7d；`watch/facts.go`：半开区间 as_of 查询 + 关系完整性校验）、`eff4047`（7 条路由：watch CRUD/pause/resume + `GET /api/v1/facts`，`WatchAuth` + router capability 闸）**。⬜ 唯一剩余实现：**scheduler**（30s tick：`ClaimDue` → bootstrap 用 Answer 取 baseline、fact 模式用开放 fact 的收据走 `VerifyWithRecorder`（receipt 形态 VerifyRequest）→ 失败 `ReleaseLease` 退避）；watch 服务 + scheduler 的 main 接线与 scheduler 同批落地（避免"能建 watch 但永不复验"的半成品面）；commons 冷启动 ≥30 条随 scheduler 上线执行。
+> **P7**：`lease` 响应块已随 P5 落地（固定 24h + 1 周半衰期提示）；自适应间隔与续租语义 ⬜。
 
 ### 任务卡 P5 · /answer 信念模式
 
