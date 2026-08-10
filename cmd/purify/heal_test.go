@@ -82,6 +82,7 @@ func TestManagedBackgroundLifecycleClosesInDependencyOrderOnce(t *testing.T) {
 	events := make([]string, 0, 5)
 	compilerFailure := errors.New("compiler close failure")
 	lifecycle := &managedBackgroundLifecycle{
+		watch:    &orderedManagedCloser{name: "watch", events: &events},
 		compiler: &orderedManagedCloser{name: "compiler", events: &events, err: compilerFailure},
 		heal:     &orderedManagedCloser{name: "heal", events: &events},
 		outbox:   &orderedManagedCloser{name: "outbox", events: &events},
@@ -95,7 +96,7 @@ func TestManagedBackgroundLifecycleClosesInDependencyOrderOnce(t *testing.T) {
 			t.Fatalf("Close %d = %v", index, err)
 		}
 	}
-	if got := strings.Join(events, ","); got != "compiler,heal,outbox,relay,outbox-http" {
+	if got := strings.Join(events, ","); got != "watch,compiler,heal,outbox,relay,outbox-http" {
 		t.Fatalf("close order = %s", got)
 	}
 	if err := (*managedBackgroundLifecycle)(nil).Close(); err != nil {

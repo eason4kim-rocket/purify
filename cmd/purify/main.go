@@ -195,6 +195,7 @@ func run() error {
 
 	// ── 3f. Build a provenance-preserving verification service ──────
 	var verifyService handler.VerifyService
+	var verifyRunner *verifydomain.Service
 	if snapshotStore != nil {
 		rodFetch := newRodFetch(sc)
 		revisitService, revisitErr := revisit.New(revisit.Config{
@@ -212,16 +213,18 @@ func run() error {
 		if revisitErr != nil {
 			return fmt.Errorf("initialise page revisit service: %w", revisitErr)
 		}
-		verifyService, err = verifydomain.NewService(verifydomain.Config{
+		verifyCore, verifyErr := verifydomain.NewService(verifydomain.Config{
 			Revisitor:          revisitService,
 			Snapshots:          snapshotStore,
 			Receipts:           receiptSigner,
 			Recorder:           ledgerStore,
 			ExtractorRevisions: compilerBindings.extractorRevisions,
 		})
-		if err != nil {
-			return fmt.Errorf("initialise fact verification service: %w", err)
+		if verifyErr != nil {
+			return fmt.Errorf("initialise fact verification service: %w", verifyErr)
 		}
+		verifyService = verifyCore
+		verifyRunner = verifyCore
 		slog.Info("fact verification enabled")
 	} else {
 		slog.Info("fact verification unavailable because snapshots are disabled")
@@ -317,15 +320,32 @@ func run() error {
 	// Answer composes fresh Search baselines with multi-source consensus
 	// extraction, so it requires both capabilities and fails closed otherwise.
 	var answerService handler.AnswerService
+	var answerCore *answerdomain.Service
 	if managedSearch != nil && safeProxyURL != "" {
 		composedAnswer, answerErr := answerdomain.NewService(managedSearch.service, extractService)
 		if answerErr != nil {
 			return fmt.Errorf("initialise answer service: %w", answerErr)
 		}
+		answerCore = composedAnswer
 		answerService = composedAnswer
 		slog.Info("answer enabled")
 	} else {
 		slog.Info("answer disabled without search and multi-source extraction")
+	}
+
+	// ── 4h. Run the durable watch store and scheduler ───────────────
+	// Watch follows verification and answer: the binary must never accept a
+	// watch it cannot bootstrap or revisit.
+	managedWatch, err := newManagedWatchRuntime(context.Background(), ledgerStore, verifyRunner, answerCore)
+	if err != nil {
+		return fmt.Errorf("initialise watch runtime: %w", err)
+	}
+	if managedWatch != nil {
+		defer managedWatch.Close()
+		backgroundLifecycle.watch = managedWatch
+		slog.Info("watch enabled")
+	} else {
+		slog.Info("watch disabled without verification and answer")
 	}
 
 	// ── 5. Setup router ─────────────────────────────────────────────
@@ -345,6 +365,7 @@ func run() error {
 		api.WithSearchService(managedSearchHandlerService(managedSearch)),
 		api.WithExtractorHealService(managedHealHandlerService(managedHeal)),
 		api.WithAnswerService(answerService),
+		api.WithWatchService(managedWatchHandlerService(managedWatch)),
 	)
 
 	// ── 6. Start HTTP server ────────────────────────────────────────

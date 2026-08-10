@@ -28,6 +28,7 @@ type managedBackgroundCloser interface {
 // order after the HTTP server has drained. Earlier per-resource defers remain
 // safe initialization-failure fallbacks because every component is idempotent.
 type managedBackgroundLifecycle struct {
+	watch       managedBackgroundCloser
 	compiler    managedBackgroundCloser
 	heal        managedBackgroundCloser
 	outbox      managedBackgroundCloser
@@ -44,7 +45,10 @@ func (lifecycle *managedBackgroundLifecycle) Close() error {
 	}
 	lifecycle.closeOnce.Do(func() {
 		var failures []error
+		// The watch scheduler stops first: its verifications ride the safe
+		// relay and record through the ledger the outbox worker also drains.
 		for _, closer := range []managedBackgroundCloser{
+			lifecycle.watch,
 			lifecycle.compiler,
 			lifecycle.heal,
 			lifecycle.outbox,
