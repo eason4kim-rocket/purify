@@ -79,14 +79,17 @@ type VerificationRecorder struct {
 	has    bool
 }
 
-// NewBootstrapVerificationRecorder binds a pending watch with no open fact to
-// one Answer-derived baseline. The baseline must be canonical and complete.
+// NewBootstrapVerificationRecorder binds a watch with no open fact to one
+// Answer-derived baseline: either a new pending watch or an active watch
+// whose previous fact closed gone and needs fresh evidence. The baseline must
+// be canonical and complete.
 func NewBootstrapVerificationRecorder(
 	store *Store,
 	claim Claim,
 	baseline VerificationBaseline,
 ) (*VerificationRecorder, error) {
-	if !validRecorderStore(store) || claim.Fact != nil || claim.Watch.State != StatePending ||
+	if !validRecorderStore(store) || claim.Fact != nil ||
+		claim.Watch.State != StatePending && claim.Watch.State != StateActive ||
 		!validClaimBinding(claim) {
 		return nil, ErrInvalidVerificationBinding
 	}
@@ -249,7 +252,8 @@ func (recorder *VerificationRecorder) materialize(
 	}
 	switch recorder.mode {
 	case verificationRecorderBootstrap:
-		if stored.Watch.State != StatePending || hasOpenFact || recorder.claim.Fact != nil {
+		if stored.Watch.State != StatePending && stored.Watch.State != StateActive ||
+			hasOpenFact || recorder.claim.Fact != nil {
 			return VerificationRecordResult{}, ErrVerificationMismatch
 		}
 	case verificationRecorderFact:
