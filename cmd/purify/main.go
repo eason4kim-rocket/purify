@@ -33,6 +33,7 @@ import (
 	"github.com/use-agent/purify/revisit"
 	"github.com/use-agent/purify/scrape"
 	"github.com/use-agent/purify/scraper"
+	searchdomain "github.com/use-agent/purify/search"
 	"github.com/use-agent/purify/snapshot"
 	verifydomain "github.com/use-agent/purify/verify"
 	"github.com/use-agent/purify/webhook"
@@ -130,18 +131,6 @@ func run() error {
 		slog.Info("safe egress relay enabled")
 	} else {
 		slog.Info("safe egress relay disabled because snapshots are disabled")
-	}
-
-	// ── 3c. Initialise request-driven baseline Search ────────────────
-	managedSearch, err := newManagedSearchRuntime(cfg, outboundPolicy)
-	if err != nil {
-		return fmt.Errorf("initialise managed search: %w", err)
-	}
-	if managedSearch != nil {
-		defer managedSearch.Close()
-		slog.Info("search configured")
-	} else {
-		slog.Info("search disabled")
 	}
 
 	// ── 3d. Initialise optional process-owned compiler synthesis ─────
@@ -297,6 +286,30 @@ func run() error {
 		slog.Info("multi-source extraction enabled")
 	} else {
 		slog.Info("multi-source extraction disabled because snapshots are disabled")
+	}
+
+	// ── 4f. Initialise request-driven Search ────────────────────────
+	// Enrichment reuses the extract service's public-only artifact boundary
+	// and follows the snapshot capability like every evidence-bearing path.
+	var searchArtifacts searchdomain.ArtifactService
+	var searchSigner searchdomain.ReceiptSigner
+	if snapshotStore != nil {
+		searchArtifacts = extractService
+		searchSigner = receiptSigner
+	}
+	managedSearch, err := newManagedSearchRuntime(cfg, outboundPolicy, searchArtifacts, searchSigner)
+	if err != nil {
+		return fmt.Errorf("initialise managed search: %w", err)
+	}
+	switch {
+	case managedSearch != nil && managedSearch.enriched:
+		defer managedSearch.Close()
+		slog.Info("search configured with verified enrichment")
+	case managedSearch != nil:
+		defer managedSearch.Close()
+		slog.Info("search configured without enrichment")
+	default:
+		slog.Info("search disabled")
 	}
 
 	// ── 5. Setup router ─────────────────────────────────────────────

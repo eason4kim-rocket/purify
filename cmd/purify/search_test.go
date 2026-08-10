@@ -12,7 +12,10 @@ import (
 
 	"github.com/use-agent/purify/api/handler"
 	"github.com/use-agent/purify/config"
+	"github.com/use-agent/purify/extract"
+	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/publicnet"
+	"github.com/use-agent/purify/receipts"
 )
 
 type recordingSearchResolver struct {
@@ -53,7 +56,7 @@ func TestNewManagedSearchRuntimeDisabledIsInert(t *testing.T) {
 		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
 		RateLimit: config.RateLimitConfig{Burst: handler.MaxSearchRequestCost},
 	}
-	runtime, err := newManagedSearchRuntime(cfg, nil)
+	runtime, err := newManagedSearchRuntime(cfg, nil, nil, nil)
 	if err != nil || runtime != nil {
 		t.Fatalf("disabled newManagedSearchRuntime() = %#v, %v", runtime, err)
 	}
@@ -85,7 +88,7 @@ func TestNewManagedSearchRuntimeRejectsInvalidConfigurationWithoutCredentialLeak
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			runtime, err := newManagedSearchRuntime(test.config, test.policy)
+			runtime, err := newManagedSearchRuntime(test.config, test.policy, nil, nil)
 			if runtime != nil || !errors.Is(err, errManagedSearchConfigInvalid) {
 				t.Fatalf("newManagedSearchRuntime() = %#v, %v", runtime, err)
 			}
@@ -135,7 +138,7 @@ func TestNewManagedSearchRuntimeUnsafeCapabilityGateIsInert(t *testing.T) {
 				Auth:      test.auth,
 				RateLimit: config.RateLimitConfig{Burst: test.burst},
 			}
-			runtime, err := newManagedSearchRuntime(cfg, nil)
+			runtime, err := newManagedSearchRuntime(cfg, nil, nil, nil)
 			if err != nil || runtime != nil {
 				t.Fatalf("unsafe newManagedSearchRuntime() = %#v, %v", runtime, err)
 			}
@@ -161,7 +164,7 @@ func TestManagedSearchRuntimeConstructsWithoutNetworkAndClosesConcurrently(t *te
 		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
 		RateLimit: config.RateLimitConfig{Burst: handler.MaxSearchRequestCost},
 	}
-	runtime, err := newManagedSearchRuntime(cfg, policy)
+	runtime, err := newManagedSearchRuntime(cfg, policy, nil, nil)
 	if err != nil {
 		t.Fatalf("newManagedSearchRuntime() error = %v", err)
 	}
@@ -185,4 +188,52 @@ func TestManagedSearchRuntimeConstructsWithoutNetworkAndClosesConcurrently(t *te
 	}
 	callers.Wait()
 	runtime.Close()
+}
+
+type stubSearchArtifactService struct{}
+
+func (stubSearchArtifactService) FetchPublicArtifact(context.Context, string) (*extract.Artifact, error) {
+	return nil, errors.New("unexpected construction fetch")
+}
+
+func (stubSearchArtifactService) ExtractArtifact(context.Context, *extract.Artifact, *models.ExtractRequest) (*models.ExtractResponse, error) {
+	return nil, errors.New("unexpected construction extraction")
+}
+
+type stubSearchReceiptSigner struct{}
+
+func (stubSearchReceiptSigner) Sign(receipts.Payload) (string, error) {
+	return "", errors.New("unexpected construction signing")
+}
+
+func TestManagedSearchRuntimeEnrichmentFollowsSuppliedDependencies(t *testing.T) {
+	policy := publicnet.NewPolicy(publicnet.Options{
+		Resolver: &recordingSearchResolver{},
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("unexpected Search construction dial")
+		},
+	})
+	cfg := &config.Config{
+		Search:    config.SearchConfig{BraveKey: "process-key"},
+		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+		RateLimit: config.RateLimitConfig{Burst: handler.MaxSearchRequestCost},
+	}
+
+	baseline, err := newManagedSearchRuntime(cfg, policy, nil, nil)
+	if err != nil || baseline == nil || baseline.enriched {
+		t.Fatalf("baseline runtime = %#v, %v", baseline, err)
+	}
+	baseline.Close()
+
+	partial, err := newManagedSearchRuntime(cfg, policy, stubSearchArtifactService{}, nil)
+	if err != nil || partial == nil || partial.enriched {
+		t.Fatalf("partial-dependency runtime = %#v, %v", partial, err)
+	}
+	partial.Close()
+
+	enriched, err := newManagedSearchRuntime(cfg, policy, stubSearchArtifactService{}, stubSearchReceiptSigner{})
+	if err != nil || enriched == nil || !enriched.enriched || enriched.service == nil {
+		t.Fatalf("enriched runtime = %#v, %v", enriched, err)
+	}
+	enriched.Close()
 }

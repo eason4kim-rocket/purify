@@ -19,6 +19,7 @@ var errManagedSearchConfigInvalid = errors.New("managed search configuration is 
 type managedSearchRuntime struct {
 	service   *searchdomain.Service
 	provider  *searchdomain.BraveProvider
+	enriched  bool
 	closeOnce sync.Once
 }
 
@@ -52,9 +53,15 @@ func managedSearchCapabilityEnabled(cfg *config.Config) bool {
 	return false
 }
 
+// newManagedSearchRuntime constructs the request-driven Search runtime.
+// Result enrichment (verify, include_content, and schema) is attached only
+// when both process-owned dependencies are supplied; a baseline-only runtime
+// keeps those request shapes failing closed as SEARCH_UNAVAILABLE.
 func newManagedSearchRuntime(
 	cfg *config.Config,
 	policy *publicnet.Policy,
+	artifacts searchdomain.ArtifactService,
+	signer searchdomain.ReceiptSigner,
 ) (*managedSearchRuntime, error) {
 	if cfg == nil {
 		return nil, nil
@@ -71,16 +78,21 @@ func newManagedSearchRuntime(
 		return nil, errManagedSearchConfigInvalid
 	}
 
+	options := make([]searchdomain.ServiceOption, 0, 1)
+	enriched := artifacts != nil && signer != nil
+	if enriched {
+		options = append(options, searchdomain.WithEnrichment(artifacts, signer))
+	}
 	provider, err := searchdomain.NewBraveProvider(cfg.Search.BraveKey, policy)
 	if err != nil {
 		return nil, errManagedSearchConfigInvalid
 	}
-	service, err := searchdomain.NewService(provider)
+	service, err := searchdomain.NewService(provider, options...)
 	if err != nil {
 		provider.CloseIdleConnections()
 		return nil, errManagedSearchConfigInvalid
 	}
-	return &managedSearchRuntime{service: service, provider: provider}, nil
+	return &managedSearchRuntime{service: service, provider: provider, enriched: enriched}, nil
 }
 
 // Close releases the provider's idle connection pool exactly once. It is safe
