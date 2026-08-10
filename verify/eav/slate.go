@@ -339,17 +339,21 @@ func slugViable(phrase string) bool {
 	return true
 }
 
-// headWindow bounds frequency scanning to the document head on a rune
-// boundary.
+// headWindow bounds frequency scanning and extraction input to the document
+// head on a rune boundary.
 func headWindow(cleaned string) string {
-	if len(cleaned) <= MaxHeadWindowBytes {
-		return cleaned
+	return runeSafePrefix(cleaned, MaxHeadWindowBytes)
+}
+
+func runeSafePrefix(value string, limit int) string {
+	if len(value) <= limit {
+		return value
 	}
-	cut := MaxHeadWindowBytes
-	for cut > 0 && !utf8.RuneStart(cleaned[cut]) {
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
 		cut--
 	}
-	return cleaned[:cut]
+	return value[:cut]
 }
 
 func frequencyPhrases(head string) []string {
