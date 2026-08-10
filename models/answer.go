@@ -129,19 +129,26 @@ const (
 	AnswerUnknownMissingValue    AnswerUnknownReason = "missing_consensus_value"
 	AnswerUnknownInsufficient    AnswerUnknownReason = "insufficient_independent_sources"
 	AnswerUnknownConflict        AnswerUnknownReason = "conflicting_independent_sources"
+	// AnswerUnknownEntityMismatch reports that sources were found but were
+	// judged to be about a different entity than the requested subject, and
+	// the belief was withheld because of those exclusions.
+	AnswerUnknownEntityMismatch AnswerUnknownReason = "entity_mismatch"
 )
 
 // AnswerEvidence is the credential-free public projection of one winning
-// consensus support.
+// consensus support. EntityVerdict, when present, is the source's entity
+// attribution ("entity_match" or "entity_uncertain"); mismatched sources
+// never reach a belief because consensus excludes them.
 type AnswerEvidence struct {
-	URL        string          `json:"url"`
-	Root       string          `json:"root"`
-	Quote      string          `json:"quote"`
-	TextRange  [2]int          `json:"text_range"`
-	Selector   string          `json:"selector,omitempty"`
-	Method     evidence.Method `json:"method"`
-	SnapshotID string          `json:"snapshot_id"`
-	FetchedAt  time.Time       `json:"fetched_at"`
+	URL           string          `json:"url"`
+	Root          string          `json:"root"`
+	Quote         string          `json:"quote"`
+	TextRange     [2]int          `json:"text_range"`
+	Selector      string          `json:"selector,omitempty"`
+	Method        evidence.Method `json:"method"`
+	SnapshotID    string          `json:"snapshot_id"`
+	FetchedAt     time.Time       `json:"fetched_at"`
+	EntityVerdict string          `json:"entity_verdict,omitempty"`
 }
 
 // AnswerCandidate exposes one competing value without recomputing its

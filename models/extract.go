@@ -64,6 +64,22 @@ type ExtractRequest struct {
 	// Evidence asks Purify to align every extracted leaf value to source text
 	// and raw HTML and include field-level basis in the response.
 	Evidence bool `json:"evidence,omitempty"`
+
+	// ExpectedSubject names the entity every source is expected to be about.
+	// Multi-source extraction judges each fetched document against it and
+	// excludes right-source-wrong-entity documents from consensus; it is not
+	// supported for single-source extraction. Requires the entity attribution
+	// capability to be enabled on the server; otherwise it is carried but has
+	// no effect.
+	ExpectedSubject *SubjectSpec `json:"expected_subject,omitempty"`
+}
+
+// SubjectSpec identifies the entity a caller expects source documents to be
+// about. Hint is optional disambiguation context (for example the fact
+// predicate) shown only to the gray-zone referee.
+type SubjectSpec struct {
+	Name string `json:"name" binding:"required"`
+	Hint string `json:"hint,omitempty"`
 }
 
 // Defaults applies default values to unset fields.
@@ -208,6 +224,9 @@ const (
 	// or was excluded from consensus.
 	ErrCodeNoValidSource          = "NO_VALID_SOURCE"
 	ErrCodeMultiSourceUnavailable = "MULTI_SOURCE_UNAVAILABLE"
+	// ErrCodeEntityMismatch marks a source excluded from consensus because it
+	// is about a different entity than the request's expected subject.
+	ErrCodeEntityMismatch = "ENTITY_MISMATCH"
 )
 
 // MultiExtractStatus describes the aggregate materialization outcome.
@@ -232,7 +251,30 @@ const (
 	MultiExtractSourceStatusSchemaInvalid       MultiExtractSourceStatus = "schema_invalid"
 	MultiExtractSourceStatusEvidenceUnavailable MultiExtractSourceStatus = "evidence_unavailable"
 	MultiExtractSourceStatusDuplicate           MultiExtractSourceStatus = "duplicate"
+	// MultiExtractSourceStatusEntityMismatch marks a source that fetched and
+	// extracted successfully but is about a different entity than the
+	// request's expected subject; it is excluded from consensus.
+	MultiExtractSourceStatusEntityMismatch MultiExtractSourceStatus = "entity_mismatch"
 )
+
+// Entity attribution verdict literals shared by extract sources and answer
+// evidence. They mirror the eav package's Verdict contract.
+const (
+	EntityVerdictMatch     = "entity_match"
+	EntityVerdictMismatch  = "entity_mismatch"
+	EntityVerdictUncertain = "entity_uncertain"
+)
+
+// EntityAttribution is the public projection of one entity-attribution
+// judgment for a source document. Quote is the verbatim deciding excerpt;
+// Tier records which rung of the attribution ladder decided.
+type EntityAttribution struct {
+	Verdict string `json:"verdict"`
+	Name    string `json:"name,omitempty"`
+	Kind    string `json:"kind,omitempty"`
+	Quote   string `json:"quote,omitempty"`
+	Tier    string `json:"tier,omitempty"`
+}
 
 // MultiExtractSource is the bounded public summary for one deduplicated,
 // canonical request source. It never includes provider errors or credentials.
@@ -243,6 +285,7 @@ type MultiExtractSource struct {
 	Status      MultiExtractSourceStatus `json:"status"`
 	SnapshotID  string                   `json:"snapshot_id,omitempty"`
 	DuplicateOf string                   `json:"duplicate_of,omitempty"`
+	Entity      *EntityAttribution       `json:"entity,omitempty"`
 	Tokens      TokenInfo                `json:"tokens"`
 	Timing      ExtractTimingInfo        `json:"timing"`
 	LLMUsage    *LLMUsage                `json:"llm_usage,omitempty"`
