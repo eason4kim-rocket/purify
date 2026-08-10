@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	answerdomain "github.com/use-agent/purify/answer"
 	"github.com/use-agent/purify/api"
 	"github.com/use-agent/purify/api/handler"
 	"github.com/use-agent/purify/batch"
@@ -312,6 +313,21 @@ func run() error {
 		slog.Info("search disabled")
 	}
 
+	// ── 4g. Initialise the belief-mode Answer service ────────────────
+	// Answer composes fresh Search baselines with multi-source consensus
+	// extraction, so it requires both capabilities and fails closed otherwise.
+	var answerService handler.AnswerService
+	if managedSearch != nil && safeProxyURL != "" {
+		composedAnswer, answerErr := answerdomain.NewService(managedSearch.service, extractService)
+		if answerErr != nil {
+			return fmt.Errorf("initialise answer service: %w", answerErr)
+		}
+		answerService = composedAnswer
+		slog.Info("answer enabled")
+	} else {
+		slog.Info("answer disabled without search and multi-source extraction")
+	}
+
 	// ── 5. Setup router ─────────────────────────────────────────────
 	startTime := time.Now()
 	router := api.NewRouterWithOptions(
@@ -328,6 +344,7 @@ func run() error {
 		verifyService,
 		api.WithSearchService(managedSearchHandlerService(managedSearch)),
 		api.WithExtractorHealService(managedHealHandlerService(managedHeal)),
+		api.WithAnswerService(answerService),
 	)
 
 	// ── 6. Start HTTP server ────────────────────────────────────────
