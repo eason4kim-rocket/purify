@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 
 	"github.com/use-agent/purify/evidence"
@@ -67,7 +66,7 @@ func AnchoredExtraction(
 	if ctx == nil {
 		return DocumentEntities{}, fmt.Errorf("%w: context is nil", ErrInvalidInput)
 	}
-	if isNilEntityExtractor(extractor) {
+	if isNilInterface(extractor) {
 		return DocumentEntities{}, ErrNotConfigured
 	}
 	if err := ctx.Err(); err != nil {
@@ -139,19 +138,6 @@ func AnchoredExtraction(
 		secondary = nil
 	}
 	return DocumentEntities{Primary: primary, Secondary: secondary}, nil
-}
-
-func isNilEntityExtractor(extractor EntityExtractor) bool {
-	if extractor == nil {
-		return true
-	}
-	value := reflect.ValueOf(extractor)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
-		return value.IsNil()
-	default:
-		return false
-	}
 }
 
 // gateEntity applies the bounds and anchoring gates to one extracted entity.

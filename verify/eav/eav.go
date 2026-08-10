@@ -14,6 +14,7 @@ package eav
 
 import (
 	"errors"
+	"reflect"
 
 	"github.com/use-agent/purify/evidence"
 )
@@ -146,6 +147,8 @@ type MatchResult struct {
 // Judgment is one complete attribution decision. Evidence anchors the
 // deciding quote in the document's cleaned text and is present whenever the
 // verdict is match or mismatch; DocEntity may be nil only when uncertain.
+// The anchor's snapshot identity and fetch time are deliberately left empty
+// here — the wiring layer stamps them from its own observation.
 type Judgment struct {
 	Verdict    Verdict
 	Tier       MatchTier
@@ -153,4 +156,19 @@ type Judgment struct {
 	DocEntity  *Entity
 	Evidence   *evidence.Anchor
 	Similarity float64
+}
+
+// isNilInterface reports whether a dependency boundary value is nil,
+// including a non-nil interface wrapping a typed nil implementation.
+func isNilInterface(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }
