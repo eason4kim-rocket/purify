@@ -116,6 +116,35 @@ func AnswerAuth(apiKeys []string) gin.HandlerFunc {
 	}
 }
 
+// WatchAuth authenticates all permanently registered Watch and Facts routes
+// while preserving their error-only non-2xx envelope. An empty effective key
+// set is inert; the router's independent capability latch then returns 503.
+func WatchAuth(apiKeys []string) gin.HandlerFunc {
+	keySet := make(map[string]struct{}, len(apiKeys))
+	for _, key := range apiKeys {
+		if strings.TrimSpace(key) != "" {
+			keySet[key] = struct{}{}
+		}
+	}
+	if len(keySet) == 0 {
+		return func(c *gin.Context) { c.Next() }
+	}
+
+	return func(c *gin.Context) {
+		key := extractAPIKey(c)
+		if key == "" {
+			abortWatchUnauthorized(c, "missing API key: provide X-API-Key header or Authorization: Bearer <key>")
+			return
+		}
+		if _, valid := keySet[key]; !valid {
+			abortWatchUnauthorized(c, "invalid API key")
+			return
+		}
+		c.Set("api_key", key)
+		c.Next()
+	}
+}
+
 func abortSearchUnauthorized(c *gin.Context, message string) {
 	c.AbortWithStatusJSON(http.StatusUnauthorized, models.SearchResponse{
 		Success: false,
@@ -129,6 +158,15 @@ func abortSearchUnauthorized(c *gin.Context, message string) {
 
 func abortAnswerUnauthorized(c *gin.Context, message string) {
 	c.AbortWithStatusJSON(http.StatusUnauthorized, models.AnswerErrorResponse{
+		Error: &models.ErrorDetail{
+			Code:    models.ErrCodeUnauthorized,
+			Message: message,
+		},
+	})
+}
+
+func abortWatchUnauthorized(c *gin.Context, message string) {
+	c.AbortWithStatusJSON(http.StatusUnauthorized, models.WatchErrorResponse{
 		Error: &models.ErrorDetail{
 			Code:    models.ErrCodeUnauthorized,
 			Message: message,

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/receipts"
 	"github.com/use-agent/purify/scraper"
+	watchdomain "github.com/use-agent/purify/watch"
 )
 
 var _ func(
@@ -49,6 +51,70 @@ type routerSearchService struct {
 
 type routerAnswerService struct {
 	calls int
+}
+
+type routerWatchService struct {
+	calls     int
+	factCalls int
+}
+
+func routerWatchValue(id string, spec models.FactSpec, state watchdomain.State) watchdomain.Watch {
+	now := time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC)
+	next := now.Add(time.Hour)
+	value := watchdomain.Watch{
+		ID: id, Spec: spec, State: state, NextCheckAt: &next,
+		EWMAInterval: time.Hour, CreatedAt: now, UpdatedAt: now,
+	}
+	if state == watchdomain.StatePending {
+		value.NextCheckAt = &now
+	}
+	if state == watchdomain.StatePaused {
+		value.NextCheckAt = nil
+		value.PausedAt = &now
+	}
+	return value
+}
+
+func routerWatchSpec() models.FactSpec {
+	return models.FactSpec{
+		Subject: "example price", Predicate: "price", Freshness: "day",
+		MinIndependentSources: 2, OnConflict: models.FactConflictExpose,
+	}
+}
+
+func (service *routerWatchService) Create(_ context.Context, spec models.FactSpec) (watchdomain.Watch, bool, error) {
+	service.calls++
+	return routerWatchValue("00000000-0000-4000-8000-000000000001", spec, watchdomain.StatePending), true, nil
+}
+
+func (service *routerWatchService) Get(_ context.Context, id string) (watchdomain.Watch, error) {
+	service.calls++
+	return routerWatchValue(id, routerWatchSpec(), watchdomain.StateActive), nil
+}
+
+func (service *routerWatchService) List(_ context.Context, _ watchdomain.WatchListOptions) (watchdomain.WatchPage, error) {
+	service.calls++
+	return watchdomain.WatchPage{Items: []watchdomain.Watch{}}, nil
+}
+
+func (service *routerWatchService) Pause(_ context.Context, id string) (watchdomain.Watch, error) {
+	service.calls++
+	return routerWatchValue(id, routerWatchSpec(), watchdomain.StatePaused), nil
+}
+
+func (service *routerWatchService) Resume(_ context.Context, id string) (watchdomain.Watch, error) {
+	service.calls++
+	return routerWatchValue(id, routerWatchSpec(), watchdomain.StateActive), nil
+}
+
+func (service *routerWatchService) Delete(_ context.Context, _ string) error {
+	service.calls++
+	return nil
+}
+
+func (service *routerWatchService) FactAt(_ context.Context, _, _ string, _ time.Time) (watchdomain.Fact, bool, error) {
+	service.factCalls++
+	return watchdomain.Fact{}, false, nil
 }
 
 func (service *routerAnswerService) Answer(_ context.Context, _ *models.AnswerRequest) (*models.AnswerResponse, error) {
@@ -528,6 +594,183 @@ func decodeRouterAnswerError(t *testing.T, recorder *httptest.ResponseRecorder) 
 	var response models.AnswerErrorResponse
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode Answer error: %v; body=%s", err, recorder.Body)
+	}
+	return response
+}
+
+func TestWatchAndFactsRoutesArePermanentProtectedAndFailClosed(t *testing.T) {
+	cfg := &config.Config{
+		Server:    config.ServerConfig{Mode: "test"},
+		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+		RateLimit: config.RateLimitConfig{RequestsPerSecond: 100, Burst: 100},
+	}
+	router := NewRouter(nil, nil, nil, cfg, cache.New(1), time.Now(), nil, nil, nil, nil, nil)
+	const id = "00000000-0000-4000-8000-000000000001"
+	routes := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		code   string
+	}{
+		{name: "create", method: http.MethodPost, path: "/api/v1/watches", body: `{"spec":{"subject":"example price","predicate":"price"}}`, code: models.ErrCodeWatchUnavailable},
+		{name: "list", method: http.MethodGet, path: "/api/v1/watches", code: models.ErrCodeWatchUnavailable},
+		{name: "get", method: http.MethodGet, path: "/api/v1/watches/" + id, code: models.ErrCodeWatchUnavailable},
+		{name: "pause", method: http.MethodPost, path: "/api/v1/watches/" + id + "/pause", code: models.ErrCodeWatchUnavailable},
+		{name: "resume", method: http.MethodPost, path: "/api/v1/watches/" + id + "/resume", code: models.ErrCodeWatchUnavailable},
+		{name: "delete", method: http.MethodDelete, path: "/api/v1/watches/" + id, code: models.ErrCodeWatchUnavailable},
+		{name: "facts", method: http.MethodGet, path: "/api/v1/facts?subject=example+price&predicate=price&as_of=2026-08-10T12%3A00%3A00Z", code: models.ErrCodeFactUnavailable},
+	}
+	for _, route := range routes {
+		t.Run(route.name, func(t *testing.T) {
+			unauthorized := httptest.NewRequest(route.method, route.path, strings.NewReader(route.body))
+			unauthorizedResponse := httptest.NewRecorder()
+			router.ServeHTTP(unauthorizedResponse, unauthorized)
+			if unauthorizedResponse.Code != http.StatusUnauthorized ||
+				decodeRouterWatchError(t, unauthorizedResponse).Error.Code != models.ErrCodeUnauthorized {
+				t.Fatalf("unauthorized = %d %s", unauthorizedResponse.Code, unauthorizedResponse.Body)
+			}
+
+			authorized := httptest.NewRequest(route.method, route.path, strings.NewReader(route.body))
+			authorized.Header.Set("X-API-Key", "required-secret")
+			authorizedResponse := httptest.NewRecorder()
+			router.ServeHTTP(authorizedResponse, authorized)
+			if authorizedResponse.Code != http.StatusServiceUnavailable ||
+				decodeRouterWatchError(t, authorizedResponse).Error.Code != route.code {
+				t.Fatalf("fail closed = %d %s", authorizedResponse.Code, authorizedResponse.Body)
+			}
+		})
+	}
+}
+
+func TestWatchCapabilityRequiresAuthEffectiveKeyServiceAndOneTokenBurst(t *testing.T) {
+	tests := []struct {
+		name       string
+		auth       config.AuthConfig
+		burst      int
+		header     string
+		withOption bool
+		typedNil   bool
+		wantStatus int
+		wantCalls  int
+	}{
+		{name: "auth disabled", auth: config.AuthConfig{APIKeys: []string{"required-secret"}}, burst: 1, withOption: true, wantStatus: 503},
+		{name: "no keys", auth: config.AuthConfig{Enabled: true}, burst: 1, withOption: true, wantStatus: 503},
+		{name: "blank keys", auth: config.AuthConfig{Enabled: true, APIKeys: []string{"", " \t"}}, burst: 1, withOption: true, wantStatus: 503},
+		{name: "zero burst", auth: config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}}, burst: 0, header: "required-secret", withOption: true, wantStatus: 503},
+		{name: "missing option", auth: config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}}, burst: 1, header: "required-secret", wantStatus: 503},
+		{name: "typed nil", auth: config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}}, burst: 1, header: "required-secret", withOption: true, typedNil: true, wantStatus: 503},
+		{name: "safe boundary", auth: config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}}, burst: 1, header: "required-secret", withOption: true, wantStatus: 200, wantCalls: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Server: config.ServerConfig{Mode: "test"}, Auth: test.auth,
+				RateLimit: config.RateLimitConfig{RequestsPerSecond: 0, Burst: test.burst},
+			}
+			service := &routerWatchService{}
+			options := []RouterOption{}
+			if test.withOption {
+				if test.typedNil {
+					var typedNil *routerWatchService
+					options = append(options, WithWatchService(typedNil))
+				} else {
+					options = append(options, WithWatchService(service))
+				}
+			}
+			router := NewRouterWithOptions(nil, nil, nil, cfg, cache.New(1), time.Now(), nil, nil, nil, nil, nil, options...)
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/watches", nil)
+			if test.header != "" {
+				request.Header.Set("X-API-Key", test.header)
+			}
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != test.wantStatus || service.calls != test.wantCalls {
+				t.Fatalf("status/calls = %d/%d want %d/%d body=%s", recorder.Code, service.calls, test.wantStatus, test.wantCalls, recorder.Body)
+			}
+			if test.wantStatus == http.StatusServiceUnavailable &&
+				decodeRouterWatchError(t, recorder).Error.Code != models.ErrCodeWatchUnavailable {
+				t.Fatalf("fail-closed envelope = %s", recorder.Body)
+			}
+		})
+	}
+}
+
+func TestWatchOptionExposesAllSevenRoutes(t *testing.T) {
+	cfg := &config.Config{
+		Server:    config.ServerConfig{Mode: "test"},
+		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+		RateLimit: config.RateLimitConfig{RequestsPerSecond: 1000, Burst: 100},
+	}
+	service := &routerWatchService{}
+	router := NewRouterWithOptions(nil, nil, nil, cfg, cache.New(1), time.Now(), nil, nil, nil, nil, nil,
+		WithWatchService(service))
+	const id = "00000000-0000-4000-8000-000000000001"
+	routes := []struct {
+		method string
+		path   string
+		body   string
+		want   int
+	}{
+		{method: http.MethodPost, path: "/api/v1/watches", body: `{"spec":{"subject":"example price","predicate":"price","freshness":"day","min_independent_sources":2,"on_conflict":"expose"}}`, want: 201},
+		{method: http.MethodGet, path: "/api/v1/watches", want: 200},
+		{method: http.MethodGet, path: "/api/v1/watches/" + id, want: 200},
+		{method: http.MethodPost, path: "/api/v1/watches/" + id + "/pause", want: 200},
+		{method: http.MethodPost, path: "/api/v1/watches/" + id + "/resume", want: 200},
+		{method: http.MethodDelete, path: "/api/v1/watches/" + id, want: 204},
+		{method: http.MethodGet, path: "/api/v1/facts?subject=example+price&predicate=price&as_of=2026-08-10T12%3A00%3A00Z", want: 200},
+	}
+	for _, route := range routes {
+		request := httptest.NewRequest(route.method, route.path, strings.NewReader(route.body))
+		request.Header.Set("X-API-Key", "required-secret")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != route.want {
+			t.Fatalf("%s %s = %d body=%s", route.method, route.path, recorder.Code, recorder.Body)
+		}
+	}
+	if service.calls != 6 || service.factCalls != 1 {
+		t.Fatalf("Watch/Fact calls = %d/%d, want 6/1", service.calls, service.factCalls)
+	}
+}
+
+func TestWatchAndFactsShareOneIdentityBucketAtCostOne(t *testing.T) {
+	cfg := &config.Config{
+		Server:    config.ServerConfig{Mode: "test"},
+		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+		RateLimit: config.RateLimitConfig{RequestsPerSecond: 0, Burst: 1},
+	}
+	service := &routerWatchService{}
+	router := NewRouterWithOptions(nil, nil, nil, cfg, cache.New(1), time.Now(), nil, nil, nil, nil, nil,
+		WithWatchService(service))
+
+	first := httptest.NewRequest(http.MethodGet, "/api/v1/watches", nil)
+	first.Header.Set("X-API-Key", "required-secret")
+	firstResponse := httptest.NewRecorder()
+	router.ServeHTTP(firstResponse, first)
+	if firstResponse.Code != http.StatusOK || service.calls != 1 {
+		t.Fatalf("first Watch request = %d/%d %s", firstResponse.Code, service.calls, firstResponse.Body)
+	}
+
+	second := httptest.NewRequest(http.MethodGet,
+		"/api/v1/facts?subject=example+price&predicate=price&as_of=2026-08-10T12%3A00%3A00Z", nil)
+	second.Header.Set("X-API-Key", "required-secret")
+	secondResponse := httptest.NewRecorder()
+	router.ServeHTTP(secondResponse, second)
+	if secondResponse.Code != http.StatusTooManyRequests || service.factCalls != 0 ||
+		decodeRouterWatchError(t, secondResponse).Error.Code != models.ErrCodeRateLimited {
+		t.Fatalf("shared exhausted request = %d facts=%d %s", secondResponse.Code, service.factCalls, secondResponse.Body)
+	}
+}
+
+func decodeRouterWatchError(t *testing.T, recorder *httptest.ResponseRecorder) models.WatchErrorResponse {
+	t.Helper()
+	var response models.WatchErrorResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode Watch error: %v; body=%s", err, recorder.Body)
+	}
+	if response.Error == nil {
+		t.Fatalf("missing Watch error: %s", recorder.Body)
 	}
 	return response
 }

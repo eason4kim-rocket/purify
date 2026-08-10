@@ -17,6 +17,7 @@ type routerOptions struct {
 	extractorHealService handler.ExtractorHealService
 	searchService        handler.SearchService
 	answerService        handler.AnswerService
+	watchService         handler.WatchService
 }
 
 // RouterOption adds an optional API capability without changing the fixed
@@ -50,6 +51,17 @@ func WithAnswerService(service handler.AnswerService) RouterOption {
 	return func(options *routerOptions) {
 		if options != nil {
 			options.answerService = service
+		}
+	}
+}
+
+// WithWatchService enables durable Watch CRUD and bitemporal Facts lookup.
+// Their seven routes remain registered and authenticated when absent, but
+// fail closed without calling any partial implementation.
+func WithWatchService(service handler.WatchService) RouterOption {
+	return func(options *routerOptions) {
+		if options != nil {
+			options.watchService = service
 		}
 	}
 }
@@ -115,6 +127,22 @@ func NewRouterWithOptions(sc *scraper.Scraper, extractService handler.ExtractSer
 	}
 	answerProtected.POST("/answer", handler.AnswerWithRateLimiter(answerService, limiter))
 
+	watchProtected := v1.Group("")
+	if cfg.Auth.Enabled {
+		watchProtected.Use(middleware.WatchAuth(cfg.Auth.APIKeys))
+	}
+	watchService := options.watchService
+	if !watchCapabilityEnabled(cfg) {
+		watchService = nil
+	}
+	watchProtected.POST("/watches", handler.CreateWatchWithRateLimiter(watchService, limiter))
+	watchProtected.GET("/watches", handler.ListWatchesWithRateLimiter(watchService, limiter))
+	watchProtected.GET("/watches/:id", handler.GetWatchWithRateLimiter(watchService, limiter))
+	watchProtected.POST("/watches/:id/pause", handler.PauseWatchWithRateLimiter(watchService, limiter))
+	watchProtected.POST("/watches/:id/resume", handler.ResumeWatchWithRateLimiter(watchService, limiter))
+	watchProtected.DELETE("/watches/:id", handler.DeleteWatchWithRateLimiter(watchService, limiter))
+	watchProtected.GET("/facts", handler.GetFactAtWithRateLimiter(watchService, limiter))
+
 	standardProtected := v1.Group("")
 	if cfg.Auth.Enabled {
 		standardProtected.Use(middleware.Auth(cfg.Auth.APIKeys))
@@ -161,6 +189,18 @@ func searchCapabilityEnabled(cfg *config.Config) bool {
 
 func answerCapabilityEnabled(cfg *config.Config) bool {
 	if cfg == nil || !cfg.Auth.Enabled || cfg.RateLimit.Burst < handler.MaxAnswerRequestCost {
+		return false
+	}
+	for _, key := range cfg.Auth.APIKeys {
+		if strings.TrimSpace(key) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func watchCapabilityEnabled(cfg *config.Config) bool {
+	if cfg == nil || !cfg.Auth.Enabled || cfg.RateLimit.Burst < handler.MaxWatchRequestCost {
 		return false
 	}
 	for _, key := range cfg.Auth.APIKeys {

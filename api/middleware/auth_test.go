@@ -197,6 +197,102 @@ func TestAnswerAuthEmptyEffectiveKeySetIsInertForFailClosedRoute(t *testing.T) {
 	}
 }
 
+func TestWatchAuthUsesErrorOnlyEnvelopeAndNeverReachesProtectedHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	calls := 0
+	router := gin.New()
+	router.GET("/facts", WatchAuth([]string{"required-secret"}), func(c *gin.Context) {
+		calls++
+		c.Status(http.StatusNoContent)
+	})
+	for _, test := range []struct {
+		name   string
+		header string
+	}{
+		{name: "missing"},
+		{name: "invalid", header: "wrong-secret"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/facts", nil)
+			if test.header != "" {
+				request.Header.Set("X-API-Key", test.header)
+			}
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body)
+			}
+			var response models.WatchErrorResponse
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Error == nil || response.Error.Code != models.ErrCodeUnauthorized {
+				t.Fatalf("response = %#v", response)
+			}
+			var document map[string]json.RawMessage
+			if err := json.Unmarshal(recorder.Body.Bytes(), &document); err != nil {
+				t.Fatal(err)
+			}
+			if len(document) != 1 || document["error"] == nil {
+				t.Fatalf("Watch auth envelope = %s", recorder.Body)
+			}
+		})
+	}
+	if calls != 0 {
+		t.Fatalf("protected handler calls = %d, want zero", calls)
+	}
+}
+
+func TestWatchAuthAcceptsBothHeadersAndSetsSharedLimiterIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/facts", WatchAuth([]string{"", " \t", "required-secret"}), func(c *gin.Context) {
+		identity, exists := c.Get("api_key")
+		if !exists || identity != "required-secret" {
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	})
+	for _, test := range []struct {
+		name        string
+		header      string
+		headerValue string
+	}{
+		{name: "X API key", header: "X-API-Key", headerValue: "required-secret"},
+		{name: "bearer", header: "Authorization", headerValue: "Bearer required-secret"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/facts", nil)
+			request.Header.Set(test.header, test.headerValue)
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusNoContent {
+				t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body)
+			}
+		})
+	}
+}
+
+func TestWatchAuthEmptyEffectiveKeySetIsInertForRouterFailClosedLatch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, keys := range [][]string{nil, {}, {"", " \t"}} {
+		calls := 0
+		router := gin.New()
+		router.GET("/facts", WatchAuth(keys), func(c *gin.Context) {
+			calls++
+			c.JSON(http.StatusServiceUnavailable, models.WatchErrorResponse{
+				Error: &models.ErrorDetail{Code: models.ErrCodeFactUnavailable, Message: "facts are unavailable"},
+			})
+		})
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/facts", nil))
+		if recorder.Code != http.StatusServiceUnavailable || calls != 1 {
+			t.Fatalf("keys=%#v status/calls = %d/%d body=%s", keys, recorder.Code, calls, recorder.Body)
+		}
+	}
+}
+
 func TestStandardAuthKeepsLegacyScrapeResponseEnvelope(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
