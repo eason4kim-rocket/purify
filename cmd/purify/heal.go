@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/use-agent/purify/api/handler"
 	compilerdomain "github.com/use-agent/purify/compiler"
 	"github.com/use-agent/purify/config"
 	"github.com/use-agent/purify/proxy"
@@ -119,6 +120,15 @@ func newManagedHealRuntime(
 		return nil, err
 	}
 	return &managedHealRuntime{worker: worker}, nil
+}
+
+// managedHealHandlerService avoids storing a typed nil in the transport
+// interface when self-heal is disabled.
+func managedHealHandlerService(runtime *managedHealRuntime) handler.ExtractorHealService {
+	if runtime == nil || runtime.worker == nil {
+		return nil
+	}
+	return runtime
 }
 
 // newManagedSafeRelay creates the one process-owned SOCKS5 boundary shared by

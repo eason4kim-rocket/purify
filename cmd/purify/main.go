@@ -159,6 +159,18 @@ func run() error {
 	}
 	compilerBindings := bindCompilerServices(compiledStore, managedCompiler)
 
+	// ── 3d-1. Run the durable self-heal worker ──────────────────────
+	managedHeal, err := newManagedHealRuntime(context.Background(), cfg.Heal, compiledStore, snapshotStore)
+	if err != nil {
+		return fmt.Errorf("initialise self-heal runtime: %w", err)
+	}
+	if managedHeal != nil {
+		defer managedHeal.Close()
+		slog.Info("self-heal runtime enabled")
+	} else {
+		slog.Info("self-heal runtime disabled because snapshots are disabled")
+	}
+
 	// ── 3e. Deliver transactionally queued verification webhooks ───
 	webhookClient, err := webhook.NewPublicHTTPClient(outboundPolicy, webhook.DefaultOutboxHTTPTimeout)
 	if err != nil {
@@ -174,6 +186,22 @@ func run() error {
 		return fmt.Errorf("initialise webhook outbox worker: %w", err)
 	}
 	defer outboxWorker.Close()
+
+	// Explicit post-drain shutdown order for background work; the per-resource
+	// defers above remain idempotent initialization-failure fallbacks.
+	backgroundLifecycle := &managedBackgroundLifecycle{
+		outbox:      outboxWorker,
+		closeOutbox: webhookClient.CloseIdleConnections,
+	}
+	if managedCompiler != nil {
+		backgroundLifecycle.compiler = managedCompiler
+	}
+	if managedHeal != nil {
+		backgroundLifecycle.heal = managedHeal
+	}
+	if safeRelay != nil {
+		backgroundLifecycle.relay = safeRelay
+	}
 
 	// ── 3f. Build a provenance-preserving verification service ──────
 	var verifyService handler.VerifyService
@@ -286,6 +314,7 @@ func run() error {
 		mapService,
 		verifyService,
 		api.WithSearchService(managedSearchHandlerService(managedSearch)),
+		api.WithExtractorHealService(managedHealHandlerService(managedHeal)),
 	)
 
 	// ── 6. Start HTTP server ────────────────────────────────────────
@@ -302,6 +331,10 @@ func run() error {
 
 	if err := listenAndServeUntilShutdown(srv, quit, 5*time.Second); err != nil {
 		return err
+	}
+
+	if closeErr := backgroundLifecycle.Close(); closeErr != nil {
+		slog.Error("background shutdown reported failures", "error", closeErr)
 	}
 
 	// sc.Close() runs via defer — drains page pool and kills Chrome.
