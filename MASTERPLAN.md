@@ -151,6 +151,13 @@ scrape ─▶ snapshot.Put(raw HTML) ─▶ clean ─▶ extract ──compiled�
 | `PURIFY_COMPILER_API_KEY` | 空 | 后台合成专用 provider credential，不作为请求 BYOK fallback | P2 |
 | `PURIFY_COMPILER_MODEL` | `gpt-4o-mini` | 后台真值提取模型 | P2 |
 | `PURIFY_COMPILER_BASE_URL` | `https://api.openai.com/v1` | 后台真值提取 OpenAI-compatible base URL | P2 |
+| `PURIFY_EAV_ENABLED` | `false` | 开启 process-owned 逐源实体归因 | E-6 |
+| `PURIFY_EAV_REFEREE_ENABLED` | `true` | EAV 开启时启用灰区 referee | E-6 |
+| `PURIFY_EAV_CACHE_ENTRIES` | `128` | 成功盲抽取的进程内 LRU 条目上限 | E-6 |
+| `PURIFY_EAV_LLM_API_KEY` | 空 | managed EAV 专用 credential，不作为请求 BYOK fallback | E-6 |
+| `PURIFY_EAV_LLM_MODEL` | `gpt-4o-mini` | managed 实体归因模型 | E-6 |
+| `PURIFY_EAV_LLM_BASE_URL` | `https://api.openai.com/v1` | managed EAV OpenAI-compatible base URL | E-6 |
+| `PURIFY_EAV_LLM_ALLOW_PRIVATE` | `false` | 仅允许运营者配置的 managed EAV 端点访问私网；请求 BYOK 永远公网 only | E-8 |
 | `PURIFY_SEARCH_BRAVE_KEY` | 空 | 首个 search provider | P4 |
 | `PURIFY_WATCH_ENABLED` | `false` | watch 调度器 | P6 |
 
@@ -1149,7 +1156,13 @@ zkTLS（Reclaim/TLSNotary）定位一句话：**它证传输，我们证语义�
 
 ## 15. Phase 8 — EAV 实体归因校验（PLAN.md §6 步 2）
 
-> **状态**：**Phase 8 代码收口（2026-08-11）**。进度：E-1 ✅（`612fd50`）　E-2 ✅（`b5be194`）　E-3 ✅（`f2c6329`）　E-4 ✅（`e233bf6`）　E-5 ✅（`737a008`+`3eefe31`，种子集 48 行）　E-6 ✅（`060ff7e`+`1384592`+`a979cb7`）。剩余非代码项：① ✅ **全部完成（2026-08-11，`3a19cfe`）**：78 文档（en/zh Wikipedia 真实抓取）× 345 行审计标签，用 Mac 本地 Ollama 代理的 `gpt-oss:120b-cloud` 完成真实录制（record 模式走普通 HTTP client、不受服务器公网白名单约束）并晋级 `testdata/golden`。**首份真实成绩单：full 模式 P=1.000 / R=0.935 / FP=0.000 / U=0.062 / 零静默失败；hard 切片（40 条词形混淆对）R=0.975；确定性模式 P=1.000 / FP=0 / R=0.687（hard R=0）——referee 把总召回 +0.25、把 hard 从 0 拉到 0.975，价值定量证明。全部门（P>0.90 / R>0.90 / FP<0.02）通过。** 两个校准发现已入档：(a) 主要漏报来源是 LLM 引用 Wikipedia 首句时洗掉脚注/注音导致 quote 非逐字、被锚定闸整体丢弃（4/78 文档 → uncertain,涉 21 行）——防幻觉不变量按设计工作，后续可通过强化 ExtractionSystemPrompt 的逐字要求再录一版对比；(b) 别名路同形异指（"Paris" vs Paris,Texas、"Washington" vs D.C.）由真实运行暴露，与 Georgia 同类，已补 waived（waived 计 4）；② 真机冒烟 **半程完成（2026-08-11，本机真实二进制 + 真实网络）**：已验 EAV 配置校验与启动接线（`entity attribution enabled`）、单源 /extract 对 expected_subject 的 400 拒收、/answer 缺搜索 key 时干净 `ANSWER_UNAVAILABLE`、死 provider 下多源优雅超时且失败源无 entity 字段；**并确认 BYOK/managed LLM 走 publicnet 公网白名单（SSRF 防线），本地 Ollama(127.0.0.1) 按设计被拒、不为冒烟松动**。剩 happy path（双源 match/mismatch 逐源判定 + mismatch 逐出共识）与第 ① 项重录共用同一个前置：一把活的公网 OpenAI 兼容 key（推荐 ollama.com 网页建 key → `https://ollama.com/v1` + `gpt-oss:120b`，已验端点真实存在且账号已登录；或 MiniMax 补配额）；③ PLAN.md §6 步 3（N_eff v1）与步 4（重排焊接）在本相位之外。图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始 · ⟳ 与规划不同（以实码为准）。
+> **状态**：**Phase 8 + EAV 校准代码收口（2026-08-11）**。进度：E-1 ✅（`612fd50`）　E-2 ✅（`b5be194`）　E-3 ✅（`f2c6329`）　E-4 ✅（`e233bf6`）　E-5 ✅（`737a008`+`3eefe31`，种子集 48 行）　E-6 ✅（`060ff7e`+`1384592`+`a979cb7`）　E-7 ✅（`18411d7`）　E-8 ✅（`c60ec5f`，整块审查补强 `22c379e`，Compose 接线 `1a2c601`）。图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始 · ⟳ 与规划不同（以实码为准）。
+>
+> **真实语料基线（`3a19cfe`）**：78 文档（en/zh Wikipedia 真实抓取）× 345 行审计标签，以 Mac Ollama 代理的 `gpt-oss:120b-cloud` 录制并晋级 golden。首份 full 成绩为 P=1.000 / R=0.935 / FP=0 / U=0.062 / silent=0，hard R=0.975；det-only P=1.000 / FP=0 / R=0.687。原 21 条 uncertain 中，18 条来自 4 个 extraction 文档因 quote 洗掉脚注/注音而被锚定闸整体丢弃，另 3 条来自 referee unsure；旧文案“4 文档涉 21 行”已按实况纠正。
+>
+> **E-7 校准**：`ExtractionSystemPrompt` 现同时要求 shortest/proves、连续子串、逐字符复制、回传前自检，并逐字保留 “including footnote markers, pronunciation guides, and unusual spacing; never clean it up”。首次 frozen-prompt 全量运行的诚实成绩是 P=1.000 / R=0.987 / FP=0 / U=0.009 / silent=0、hard R=0.950、extraction raw-exact 76/78；随后对**预先声明的 5 文档 / 22 标签**做一次文档级成对 repair（每个文档整行 extraction + 该文档全部 referee 一起替换，其他 73/57 行保持首次全量原样），晋级为 curated regression replay：P=1.000 / R=0.996 / FP=0 / U=0.003 / silent=0、hard R=0.975、det-only R=0.730，78/78 **extraction** quote 均为原文 exact substring 并通过 production anchoring。这不是第二份无偏全量成绩；hard 的单条残余也发生了身份交换：Michael B. Jordan 漏报已修，但 `iPhone 16 × products/iphone-15` 因 referee quote 自行加空格而变 uncertain，故不得表述为 hard 逐行无回归或所有 referee quote 都 exact。
+>
+> **E-8 网络边界**：`PURIFY_EAV_LLM_ALLOW_PRIVATE` 默认 false，只控制运营者固定配置的 managed EAV 独立 policy/client；request BYOK、Search、relay、compiler、webhook 等共享 outbound policy 永远公网 only。loopback managed 成功 + 同进程 BYOK 拨号前拒绝/零凭据泄漏已有测试。真机冒烟此前已验配置/启动、单源拒参、无 Search key 的干净降级和死 provider 超时；剩余 `/answer` happy path 仍需运行实例 + Search provider key，未 push、未 deploy。
 > **上游依据**：PLAN.md §5.3（算法与验收）、§6 步 2（顺序）。**落点定案：新包 `verify/eav/`**——不做 evidence/ 扩展：evidence 管「值在哪」（定位），eav 管「这页在讲谁」（判断），职责不同。
 > **一句话**：抓 right-source-wrong-entity——系统如实引用了真实文档、每个字都锚得上，但文档说的是 B，你问的是 A。对幻觉检测、忠实度、引用核查全部隐形；Parallel Basis 结构上抓不到。
 
@@ -1187,7 +1200,7 @@ verify/eav/                  # package eav — 传输中立判断核心
   testdata/
     harvest/*.html           # 候选板收割用完整 HTML 样张（少量）
     golden/*.jsonl           # 跨域标注集（收割后快照，不存全 HTML）
-    recordings/*.json        # LLM 录制回放（离线评测全链路）
+    recordings/*.jsonl       # LLM 录制回放（离线评测全链路）
 scripts/eavcorpus/           # 标注集构建器（E-5，独立 main，不进生产二进制）
 ```
 
@@ -1401,7 +1414,7 @@ base* = StripLegalSuffix 后的形式
 2. **真实抓取**：构建器用现有 scrape 栈每域抓 ~10–15 个真实页面，**fixture 存收割后快照**（`{url,title,cleaned≤8KB,slate}` JSONL），不存全 HTML——收割本身由 E-2 的 HTML 样张单测覆盖。
 3. **程序化配对**：正例 =（A 的页, subject=A）与（A 的页, subject=A 的别名/ticker/简称）；负例 =（B 的页, subject=A），其中 B 为 A 的同类兄弟；**hard 负例** = 兄弟中 `Normalize` 后编辑距离 ≤0.35 或 token 重叠 ≥0.5 的词形混淆对（AMD/ARM 类），打 `hard:true`。
 4. **人工审计**：随机 10% + 全部 hard 对逐行过目改标；行 schema `{subject,hint?,doc_ref,label:"match|mismatch",hard,domain,note}`。
-5. **LLM 录制回放**：录制 adapter 把（提示词 sha256 → 响应）写入 `recordings/`；golden 测试用回放 fake 跑**全链路**（收割→盲抽取→阶梯→referee），离线、确定性、免 key；重录用 `PURIFY_EAV_RECORD=1` + BYOK env 手动触发。
+5. **LLM 录制回放**：实码按文档 ID（由 URL 映射）索引 extraction reply，referee 再按 `doc ID + Normalize(subject)` 索引；recording schema **不存 prompt/model/run digest**。因此任何 prompt 变化都必须在空目录主动重录，并把 `extract.jsonl` + `referee.jsonl` 成对晋级，不能把旧录制的绿灯冒充新 prompt 成绩。golden 测试用回放 fake 跑**全链路**（收割→盲抽取→阶梯→referee），离线、确定性、免 key；真实重录使用 `EAVCORPUS_API_KEY/MODEL/BASE_URL` + `go run ./scripts/eavcorpus -mode record -docs ... -labels ... -out ...`。
 **指标定义（写进 `golden_test.go`，即 PLAN.md §5.3 验收的可执行形式）**：
 - 报警精度 P = 判 mismatch 且标 mismatch / 判 mismatch，**门 > 0.90**
 - 报警召回 R = 判 mismatch 且标 mismatch / 标 mismatch（uncertain 计入漏报，从严），**门 > 0.90**（全链路回放模式）
@@ -1452,7 +1465,7 @@ E-6c feat(answer): withhold beliefs on entity mismatch        # 依赖 E-6b
 ## 16. 交接 · 2026-08-11 起 Codex 接续开发
 
 > **给 Codex 的单页入口。** 读完本节 + `AGENTS.md` 即可开工；战略问题回 `PLAN.md`（LOCKED，三层结构与非目标不许推翻）。
-> **状态快照**：原交接 waypoint `c7189c2`（分支 `codex/search-api-v1`）；P1 N_eff v1 五卡已于 2026-08-11 完成至 `94f9f88`，整块审查补强至 `d213376`。Phase 0–8 代码全收口；EAV 已有真实成绩单（§15 状态行：P=1.000 / R=0.935 / FP=0 / hard R=0.975，341 行 gpt-oss:120b 真实录制）。N_eff v1 收口时全仓 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...` 与 `git diff --check` 全绿。
+> **状态快照**：原交接 waypoint `c7189c2`（分支 `codex/search-api-v1`）；P1 N_eff v1 五卡已于 2026-08-11 完成至 `94f9f88`，整块审查补强至 `d213376`；P2 EAV 两张校准卡已完成至 `c60ec5f`，整块审查补强至 `22c379e`，Compose 配置闭合至 `1a2c601`。Phase 0–8 与 P1/P2 代码均收口；当前晋级的 curated regression replay 成绩为 P=1.000 / R=0.996 / FP=0 / U=0.003 / silent=0、hard R=0.975（完整录制口径与残余见 §15）。P2 收口时全仓 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...` 与 `git diff --check` 全绿。
 
 ### 16.1 优先队列
 
@@ -1464,9 +1477,9 @@ E-6c feat(answer): withhold beliefs on entity mismatch        # 依赖 E-6b
 - **N-4 · 折叠原因导出（additive）** ✅（`e17086c`，整块审查补强 `d213376`）：`Support`/`Agreement` 增加 omitempty 字段暴露折叠证据（`fold_reason: same_root | near_duplicate | quote_lineage`）；deterministic forest、mixed witness、REST/MCP/Answer 投影与 32 MiB 预算均已锁门，MCP multi decoder 同时拒绝普通/Unicode-escaped 重复 JSON key，公开契约只加不改。
 - **N-5 · 构造集评测门** ✅（`94f9f88`）：`consensus/testdata/neff/` 已有 33 个 source / 12 个 case，覆盖六类、en/zh、1+7 镜像、8 独立源、95-rune、lineage、mixed、compat 与 bridge；严格 loader、v0/v1 有界排列和 exact reason 门已并入普通 `go test`。
 
-**P2 · EAV 校准迭代（小卡）**：
-- **E-7 · 提示词逐字强化 + 重录对比**：§15 ①(a) 的发现——LLM 引用洗掉脚注/注音致 quote 非逐字、4/78 文档被锚定闸整体丢弃。强化 `ExtractionSystemPrompt` 的 verbatim 措辞（"including footnote markers, pronunciation guides, and unusual spacing; never clean it up"），按 `scripts/eavcorpus/main.go` 头注释重录（Mac Ollama 即可，零成本），对比两版成绩单后择优提交。改 prompt/`match.go` 阈值**必须过 golden 门**——这就是回归闸。
-- **E-8 · managed LLM 私网豁免配置**：新键 `PURIFY_EAV_LLM_ALLOW_PRIVATE`（默认 false），仅放行**运营者配置的** managed 端点走私网（自托管 vLLM/Ollama 场景）；BYOK 请求路径保持公网 only（SSRF 防线不动）。实现点：managed judge 的 HTTP client 构造处（`cmd/purify/eav.go` + main 注入的 policy client）。
+**P2 · EAV 校准迭代（小卡）** ✅：
+- **E-7 · 提示词逐字强化 + 重录对比** ✅（`18411d7`）：保留 shortest/proves 语义并强化逐字复制；golden 现逐一锁住 78/78 extraction quote 为 cleaned 原文子串且通过 production anchoring。首次 frozen-prompt 全量与随后预声明 5 文档 / 22 标签的 paired repair 分开记账；晋级 replay 为 P=1.000 / R=0.996 / FP=0 / U=0.003 / silent=0、hard R=0.975，详见 §15。改 prompt/`match.go` 阈值仍**必须过 golden 门**。
+- **E-8 · managed LLM 私网豁免配置** ✅（`c60ec5f`，整块审查补强 `22c379e`，Compose 接线 `1a2c601`）：新增 `PURIFY_EAV_LLM_ALLOW_PRIVATE`（默认 false），只给**运营者固定配置的** managed EAV 独立 policy/client 开私网；request BYOK 与 Search/relay/compiler/webhook 等共享 egress 仍是公网 only。loopback、默认拒绝、同进程隔离与零凭据泄漏均有回归门；LLM response-format capability cache 也已改为 per-client、per-model 且 128 项有界，request/managed 不再共享降级状态；主 Compose 路径显式转发全部 7 个 EAV 键。
 
 **P3 · 步 4 重排器 + 信任排序（N-4 已解锁，待开卡）**：PLAN.md §4.3。先开设计卡再动工；EAV 侧接口 `MultiExtractSource.Entity` 与 N_eff 侧 `fold_reason` 均已备好。
 
@@ -1573,18 +1586,30 @@ REV   d213376  fix(mcp): reject duplicate multi response fields
 
 每卡都先红测试后实现，且 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...` 与 `git diff --check` 全绿才 commit。**非目标**：方向性转载图/发布时间先后、claim 级不同 component、改 answer 置信度公式、步 4 重排、ledger 持久化、Wikidata/外部查重、提高 `MaxSources`。
 
-> **收口状态（2026-08-11）**：N-1…N-5 五卡全部完成；生产增量按内容核、逐字血缘、可审计折叠原因三个单关注提交落地，构造集以 33 source / 12 case 对六类信号做 exact gate。分卡审计全部 PASS；随后对 `c7189c2..c12fbdc` 做整块审查，发现 MCP multi strict decoder 可被重复 `fold_reason` 的 last-wins 语义绕过，已由红测试复现并在 `d213376` 递归拒绝 exact/Unicode-escaped duplicate key，发现者复审 PASS。最终快照全仓 test/race/vet/build/diff-check 通过。下一步可按优先队列进入 P2；P3 的接口依赖也已满足，但仍须先开设计卡。
+> **收口状态（2026-08-11）**：N-1…N-5 五卡全部完成；生产增量按内容核、逐字血缘、可审计折叠原因三个单关注提交落地，构造集以 33 source / 12 case 对六类信号做 exact gate。分卡审计全部 PASS；随后对 `c7189c2..c12fbdc` 做整块审查，发现 MCP multi strict decoder 可被重复 `fold_reason` 的 last-wins 语义绕过，已由红测试复现并在 `d213376` 递归拒绝 exact/Unicode-escaped duplicate key，发现者复审 PASS。最终快照全仓 test/race/vet/build/diff-check 通过。P2 也已完成；下一步进入 P3，但仍须先开设计卡。
 
 > **EN —** N_eff v1 preserves document-global components and adds bounded, anchor-centered content-core similarity plus exact long-fragment lineage as conservative union edges. Missing enhanced input retains v0 compatibility; malformed or hard-size-invalid input fails explicitly, while richer derived inputs are sampled deterministically within fixed bounds. Sampling may miss an enhanced fold and thus overcount independence relative to an unbounded ideal, but never removes the v0 signals. N-2/N-3 may change winners, materialization outcomes, and confidence through the new N_eff, while their schemas/formulas stay intact; N-4 itself only adds fold metadata from a deterministic forest.
 
-### 16.4 运行环境备忘
+### 16.4 P2 实施与审查
+
+```text
+E-7  18411d7  fix(eav): preserve verbatim evidence quotes
+E-8  c60ec5f  feat(eav): allow private managed llm endpoints
+REV  22c379e  fix(llm): isolate response format capability cache
+DEP  1a2c601  fix(deploy): pass managed eav configuration
+```
+
+E-7 先以最终冻结提示词做一次空目录全量重录，再对预先声明的 5 文档 / 22 标签做一次完整文档组 paired repair；两阶段成绩、晋级规则和 hard residual 均在 §15 留痕。E-8 在独立 worktree 测试先行实现，应用到主线后重跑合并门；managed EAV 私网授权没有进入任何 request/BYOK 配置或共享 outbound policy。两卡分项审查均 PASS。随后对 `6cb3783..c60ec5f` 做整块审查，发现 package-global、仅按 BaseURL 缓存的 `rfSupport` 仍可让 request BYOK 与 managed EAV 互相污染 response-format 降级状态；红测复现后，`22c379e` 将其收为 per-client 指针缓存、按 `(BaseURL, model)` 隔离并以 128 项 FIFO 封顶。文档机械审查又发现 `.env` 的 EAV 键未进入主 Compose 容器，`1a2c601` 以安全默认值逐项显式映射。发现者与交叉审查复跑均 PASS；最终全仓 test/race/vet/build/diff-check 与 Compose 默认/覆盖解析门全绿。
+
+### 16.5 运行环境备忘
 
 - **重录**：`EAVCORPUS_API_KEY=ollama EAVCORPUS_MODEL=gpt-oss:120b-cloud EAVCORPUS_BASE_URL=http://127.0.0.1:11434/v1`（Mac 需先 `ollama serve`；record 模式走普通 HTTP client，不受服务器公网白名单限制）。
-- **服务器冒烟/生产待配**（非代码）：一把公网 OpenAI 兼容 key（推荐 ollama.com 网页建）→ VPS `PURIFY_EAV_*`；Brave key → search/answer 点亮。VPS 纪律见 AGENTS.md/部署备忘：严禁动 `/opt/purify`、`/opt/lithium`。
+- **本机 managed EAV**：如需让服务本身连接私网 Ollama/vLLM，显式设 `PURIFY_EAV_LLM_ALLOW_PRIVATE=true`；这不会放宽请求 BYOK。
+- **服务器冒烟/生产待配**（非代码）：部署侧仍需一把公网 OpenAI-compatible key（若不使用自托管 managed endpoint）和 Brave key，才能点亮 `/answer` happy path。VPS 纪律见 AGENTS.md/部署备忘：严禁动 `/opt/purify`、`/opt/lithium`。
 - **已知格式漂移**：`models/response.go` 存在先于本相位的 gofmt 漂移（注释对齐），顺手修请单独 chore commit。
 
-### 16.5 纪律（照旧，一行不减）
+### 16.6 纪律（照旧，一行不减）
 
 单关注提交 · 测试先行 · `go test ./...` + `-race` + vet + build 全绿后才 commit · `git diff --check` · 不带任何 AI 署名尾注 · 公开契约 additive-only · 不 push/merge/tag/deploy 除非明确决定 · PLAN.md 三层结构与非目标不可推翻 · MASTERPLAN 状态标记（✅/🚧/⬜/⟳）随实况回写。
 
-> **EN —** Handoff to Codex from waypoint `c7189c2`: P1 is N_eff v1 in consensus/ (five cards, starting from the honest finding that v0 already folds same-root ∪ whole-page-simhash — v1's real delta is content-core fingerprints, quote lineage, and additive fold-reason export), P2 is EAV calibration (verbatim-quote prompt hardening + re-record; private-network allowance for operator-configured managed LLM endpoints), P3 opens the trust-ranking reranker after N-4, P4 is the old backlog. The golden gates are the regression barrier for any ladder/prompt change.
+> **EN —** Handoff from waypoint `c7189c2`: P1 N_eff v1 and P2 EAV calibration are complete. N_eff now adds bounded content-core fingerprints, quote lineage, and additive fold-reason export on top of the existing same-root/whole-page-simhash folds. EAV now enforces verbatim extraction quotes through the golden replay gate and can opt only its operator-managed client into private networking while request BYOK remains public-only. Next is P3: open the trust-ranking reranker design card before implementation; P4 remains the old backlog.

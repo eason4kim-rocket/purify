@@ -434,16 +434,42 @@ or provider request. A compiled miss or incompatible profile/schema returns
 `EXTRACTOR_UNAVAILABLE` (HTTP 409); corrupt registry or IR state fails closed
 as `INTERNAL_ERROR` rather than silently returning unvalidated data.
 
-Both request-scoped and managed LLM transports use the same public-only
-network policy: every DNS answer is checked and pinned at dial time, mixed or
-private/reserved answers are rejected, environment proxies are ignored,
-redirects are not followed with credentials or prompt bodies, and TLS uses a
-minimum of 1.2. The complete provider response envelope is capped at 32 MiB.
+Request-scoped/BYOK LLM transports and the managed compiler always use a
+public-only network policy. Managed entity attribution owns a separate policy
+that is also public-only by default; an operator may opt only that managed EAV
+provider into private networking. Every DNS answer remains checked and pinned
+at dial time. Ambient `HTTP_PROXY`/`HTTPS_PROXY` variables are ignored, while
+the explicit `PURIFY_PROXY` setting is honored; redirects are not followed
+with credentials or prompt bodies, and TLS uses a minimum of 1.2. The complete
+provider response envelope is capped at 32 MiB.
 Managed truth values and deterministic IR output are each capped at 4 MiB.
 Compiled schema validation uses a success-only LRU bounded to 128 entries and
 8 MiB (512 KiB per schema). Its in-flight coordination map is capped at 128;
 overflow compiles bypass the cache, while failed schemas and caller-owned
 buffers are not retained.
+
+#### Managed entity attribution
+
+Per-source entity attribution is an explicit, default-off process capability:
+
+```bash
+PURIFY_EAV_ENABLED=true
+PURIFY_EAV_REFEREE_ENABLED=true
+PURIFY_EAV_CACHE_ENTRIES=128
+PURIFY_EAV_LLM_API_KEY=your-process-owned-provider-key
+PURIFY_EAV_LLM_MODEL=gpt-4o-mini
+PURIFY_EAV_LLM_BASE_URL=https://api.openai.com/v1
+PURIFY_EAV_LLM_ALLOW_PRIVATE=false
+```
+
+The Compose stack forwards these values from the project `.env` file. When
+running the binary directly, export them into its process environment first.
+
+`PURIFY_EAV_LLM_ALLOW_PRIVATE=true` permits private destinations only for the
+operator-configured managed EAV endpoint, for example a self-hosted vLLM or
+Ollama server. It does not widen request `llm_api_key` providers, Search,
+relay, compiler, webhook, or other request-driven egress; those remain
+public-only.
 
 #### Managed compiler
 
@@ -831,6 +857,13 @@ All configuration via environment variables:
 | `PURIFY_COMPILER_API_KEY` | — | Process-owned provider key used only by the managed compiler |
 | `PURIFY_COMPILER_MODEL` | `gpt-4o-mini` | Managed compiler truth-extraction model |
 | `PURIFY_COMPILER_BASE_URL` | `https://api.openai.com/v1` | Managed compiler OpenAI-compatible base URL |
+| `PURIFY_EAV_ENABLED` | `false` | Enable process-owned per-source entity attribution |
+| `PURIFY_EAV_REFEREE_ENABLED` | `true` | Enable the managed gray-zone entity referee when EAV is enabled |
+| `PURIFY_EAV_CACHE_ENTRIES` | `128` | Maximum successful blind-extraction cache entries |
+| `PURIFY_EAV_LLM_API_KEY` | — | Process-owned EAV provider key; never a request BYOK fallback |
+| `PURIFY_EAV_LLM_MODEL` | `gpt-4o-mini` | Managed entity-attribution model |
+| `PURIFY_EAV_LLM_BASE_URL` | `https://api.openai.com/v1` | Managed EAV OpenAI-compatible base URL |
+| `PURIFY_EAV_LLM_ALLOW_PRIVATE` | `false` | Permit private destinations only for the operator-configured managed EAV endpoint |
 
 ## Self-hosting
 
