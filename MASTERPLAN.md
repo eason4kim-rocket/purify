@@ -1446,3 +1446,40 @@ E-6c feat(answer): withhold beliefs on entity mismatch        # 依赖 E-6b
 - ❌ 共指消解、跨文档实体图、知识库对齐（Wikidata linking）——全部 YAGNI，标注集证明需要再说
 
 > **EN —** Phase 8 lands EAV as `verify/eav/`: a pure normalize+match ladder (E-1), deterministic candidate harvesting (E-2), a blind anchored LLM extractor boundary (E-3), a three-verdict judge with a gray-zone referee (E-4), a 300+-row six-domain golden set built by sibling-category perturbation with recorded-LLM replay (E-5), and additive wiring through /extract into /answer where mismatched sources stop counting as support (E-6). Alarms only ever come from the similarity floor or the referee; everything unprovable stays uncertain.
+
+---
+
+## 16. 交接 · 2026-08-11 起 Codex 接续开发
+
+> **给 Codex 的单页入口。** 读完本节 + `AGENTS.md` 即可开工；战略问题回 `PLAN.md`（LOCKED，三层结构与非目标不许推翻）。
+> **状态快照**：waypoint `36b2e79`（分支 `codex/search-api-v1`）。Phase 0–8 代码全收口；EAV 已有真实成绩单（§15 状态行：P=1.000 / R=0.935 / FP=0 / hard R=0.975，341 行 gpt-oss:120b 真实录制）。全仓 `go test ./...` 绿。
+
+### 16.1 优先队列
+
+**P1 · N_eff v1（PLAN.md §6 步 3，落 `consensus/`）** —— 出处血缘独立。**实况先于计划**：`consensus/merge.go` 的 v0 已比 PLAN.md §5.4 描述的强——`independentComponents`（merge.go:927）已用 union-find 按「同 eTLD+1 根域 ∪ 全页 SimText simhash 距离 ≤ `independenceDistance`(3)」折叠，跨域**完全**镜像已能折。v1 的真实增量按卡执行：
+
+- **N-1 · 实况盘点 + 设计定案**（docs commit）：通读 `consensus/merge.go`/`materialize.go` 与 `simhash/` 全家，写清 v0 边界（全页指纹会被站点边栏/导航稀释——同一篇通稿嵌在不同站点模板里，全页距离可能 >3 而漏折），在本节下追加 N-2…N-5 的实施细则（照 §15 卡风格，⟳ 记差异）。
+- **N-2 · 内容核指纹**：折叠依据从全页 SimText 升级为「支撑字段的内容核」指纹（候选：per-field 支撑 quote 邻域的 shingle 集 / `simhash.Fingerprint` 于去 chrome 正文）。验收：构造「同稿异站」集（同一正文 + 不同导航/页脚包装）折叠到 1；真异源不误折。
+- **N-3 · 措辞血缘**：B 含 A 的支撑 quote 的长逐字片段 ⇒ 视为转载衍生，入 union（对称折叠即可，方向性/发布时间先后留 v1.5）。上限与预算沿用 consensus 的 Max* 惯例。
+- **N-4 · 折叠原因导出（additive）**：`Support`/`Agreement` 增加 omitempty 字段暴露折叠证据（`fold_reason: same_root | near_duplicate | quote_lineage`），供步 4 重排与 answer 置信度消费；公开契约只加不改。
+- **N-5 · 构造集评测门**：照 §15 E-5 模式建 `consensus/testdata/` 构造集——「一源 N 镜像」N_eff→≈1、「真 N 独立源」N_eff→≈N（PLAN.md §5.4 验收），门进 `go test`。
+
+**P2 · EAV 校准迭代（小卡）**：
+- **E-7 · 提示词逐字强化 + 重录对比**：§15 ①(a) 的发现——LLM 引用洗掉脚注/注音致 quote 非逐字、4/78 文档被锚定闸整体丢弃。强化 `ExtractionSystemPrompt` 的 verbatim 措辞（"including footnote markers, pronunciation guides, and unusual spacing; never clean it up"），按 `scripts/eavcorpus/main.go` 头注释重录（Mac Ollama 即可，零成本），对比两版成绩单后择优提交。改 prompt/`match.go` 阈值**必须过 golden 门**——这就是回归闸。
+- **E-8 · managed LLM 私网豁免配置**：新键 `PURIFY_EAV_LLM_ALLOW_PRIVATE`（默认 false），仅放行**运营者配置的** managed 端点走私网（自托管 vLLM/Ollama 场景）；BYOK 请求路径保持公网 only（SSRF 防线不动）。实现点：managed judge 的 HTTP client 构造处（`cmd/purify/eav.go` + main 注入的 policy client）。
+
+**P3 · 步 4 重排器 + 信任排序（等 N-4 落地后开卡）**：PLAN.md §4.3。先开设计卡再动工；EAV 侧接口已备好（`MultiExtractSource.Entity`），N_eff 侧等 `fold_reason`。
+
+**P4 · 旧账（№ 不阻塞上面）**：§10 准确率 CI（golden 门已现成，接 CI 即可）；commons 冷启动 ≥30 垂类（要运行实例 + key）；P7 自适应租约。
+
+### 16.2 运行环境备忘
+
+- **重录**：`EAVCORPUS_API_KEY=ollama EAVCORPUS_MODEL=gpt-oss:120b-cloud EAVCORPUS_BASE_URL=http://127.0.0.1:11434/v1`（Mac 需先 `ollama serve`；record 模式走普通 HTTP client，不受服务器公网白名单限制）。
+- **服务器冒烟/生产待配**（非代码）：一把公网 OpenAI 兼容 key（推荐 ollama.com 网页建）→ VPS `PURIFY_EAV_*`；Brave key → search/answer 点亮。VPS 纪律见 AGENTS.md/部署备忘：严禁动 `/opt/purify`、`/opt/lithium`。
+- **已知格式漂移**：`models/response.go` 存在先于本相位的 gofmt 漂移（注释对齐），顺手修请单独 chore commit。
+
+### 16.3 纪律（照旧，一行不减）
+
+单关注提交 · 测试先行 · `go test ./...` + `-race` + vet + build 全绿后才 commit · `git diff --check` · 不带任何 AI 署名尾注 · 公开契约 additive-only · 不 push/merge/tag/deploy 除非明确决定 · PLAN.md 三层结构与非目标不可推翻 · MASTERPLAN 状态标记（✅/🚧/⬜/⟳）随实况回写。
+
+> **EN —** Handoff to Codex from waypoint `36b2e79`: P1 is N_eff v1 in consensus/ (five cards, starting from the honest finding that v0 already folds same-root ∪ whole-page-simhash — v1's real delta is content-core fingerprints, quote lineage, and additive fold-reason export), P2 is EAV calibration (verbatim-quote prompt hardening + re-record; private-network allowance for operator-configured managed LLM endpoints), P3 opens the trust-ranking reranker after N-4, P4 is the old backlog. The golden gates are the regression barrier for any ladder/prompt change.
