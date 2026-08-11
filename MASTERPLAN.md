@@ -1465,7 +1465,7 @@ E-6c feat(answer): withhold beliefs on entity mismatch        # 依赖 E-6b
 ## 16. 交接 · 2026-08-11 起 Codex 接续开发
 
 > **给 Codex 的单页入口。** 读完本节 + `AGENTS.md` 即可开工；战略问题回 `PLAN.md`（LOCKED，三层结构与非目标不许推翻）。
-> **状态快照**：原交接 waypoint `c7189c2`（分支 `codex/search-api-v1`）；P1 N_eff v1 五卡已于 2026-08-11 完成至 `94f9f88`，整块审查补强至 `d213376`；P2 EAV 两张校准卡已完成至 `c60ec5f`，整块审查补强至 `22c379e`，Compose 配置闭合至 `1a2c601`。Phase 0–8 与 P1/P2 代码均收口；当前晋级的 curated regression replay 成绩为 P=1.000 / R=0.996 / FP=0 / U=0.003 / silent=0、hard R=0.975（完整录制口径与残余见 §15）。P2 收口时全仓 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...` 与 `git diff --check` 全绿。
+> **状态快照**：原交接 waypoint `c7189c2`（分支 `codex/search-api-v1`）；P1 N_eff v1 五卡已于 2026-08-11 完成至 `94f9f88`，整块审查补强至 `d213376`；P2 EAV 两张校准卡已完成至 `c60ec5f`，整块审查补强至 `22c379e`，Compose 配置闭合至 `1a2c601`；P3 已完成 R-1 设计定案至 `8c83af3` 与 R-2 pure rerank core `c8e72f8`。Phase 0–8 与 P1/P2 代码均收口；当前晋级的 curated regression replay 成绩为 P=1.000 / R=0.996 / FP=0 / U=0.003 / silent=0、hard R=0.975（完整录制口径与残余见 §15）。R-2 收口时全仓 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...` 与 `git diff --check` 全绿。
 
 ### 16.1 优先队列
 
@@ -1481,7 +1481,7 @@ E-6c feat(answer): withhold beliefs on entity mismatch        # 依赖 E-6b
 - **E-7 · 提示词逐字强化 + 重录对比** ✅（`18411d7`）：保留 shortest/proves 语义并强化逐字复制；golden 现逐一锁住 78/78 extraction quote 为 cleaned 原文子串且通过 production anchoring。首次 frozen-prompt 全量与随后预声明 5 文档 / 22 标签的 paired repair 分开记账；晋级 replay 为 P=1.000 / R=0.996 / FP=0 / U=0.003 / silent=0、hard R=0.975，详见 §15。改 prompt/`match.go` 阈值仍**必须过 golden 门**。
 - **E-8 · managed LLM 私网豁免配置** ✅（`c60ec5f`，整块审查补强 `22c379e`，Compose 接线 `1a2c601`）：新增 `PURIFY_EAV_LLM_ALLOW_PRIVATE`（默认 false），只给**运营者固定配置的** managed EAV 独立 policy/client 开私网；request BYOK 与 Search/relay/compiler/webhook 等共享 egress 仍是公网 only。loopback、默认拒绝、同进程隔离与零凭据泄漏均有回归门；LLM response-format capability cache 也已改为 per-client、per-model 且 128 项有界，request/managed 不再共享降级状态；主 Compose 路径显式转发全部 7 个 EAV 键。
 
-**P3 · 步 4 重排器 + 信任排序** 🚧：PLAN.md §4.3。R-1 实况盘点与设计定案已写入 §17；⟳ 交接时说“`Entity`/`fold_reason` 已备好”只表示 transport 字段存在，**不等于 Search 已有逐结果信任分**。实现须先落基础 relevance，再补 component analysis + shared artifact seam，最后才开放显式 `trust` 模式。
+**P3 · 步 4 重排器 + 信任排序** 🚧：PLAN.md §4.3。R-1 实况盘点与设计定案已写入 §17；R-2 pure rerank core 已由 `c8e72f8` 落地并通过卡后审查，未接 Search/HTTP/wire。⟳ 交接时说“`Entity`/`fold_reason` 已备好”只表示 transport 字段存在，**不等于 Search 已有逐结果信任分**。下一步从 R-3 strict vLLM adapter + 独立 network runtime 开始，再做内部 relevance 接线、component analysis + shared artifact seam，最后才开放显式 `trust` 模式。
 
 **P4 · 旧账（№ 不阻塞上面）**：§10 准确率 CI（golden 门已现成，接 CI 即可）；commons 冷启动 ≥30 垂类（要运行实例 + key）；P7 自适应租约。
 
@@ -1586,7 +1586,7 @@ REV   d213376  fix(mcp): reject duplicate multi response fields
 
 每卡都先红测试后实现，且 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...` 与 `git diff --check` 全绿才 commit。**非目标**：方向性转载图/发布时间先后、claim 级不同 component、改 answer 置信度公式、步 4 重排、ledger 持久化、Wikidata/外部查重、提高 `MaxSources`。
 
-> **收口状态（2026-08-11）**：N-1…N-5 五卡全部完成；生产增量按内容核、逐字血缘、可审计折叠原因三个单关注提交落地，构造集以 33 source / 12 case 对六类信号做 exact gate。分卡审计全部 PASS；随后对 `c7189c2..c12fbdc` 做整块审查，发现 MCP multi strict decoder 可被重复 `fold_reason` 的 last-wins 语义绕过，已由红测试复现并在 `d213376` 递归拒绝 exact/Unicode-escaped duplicate key，发现者复审 PASS。最终快照全仓 test/race/vet/build/diff-check 通过。P2 也已完成；P3 的 R-1 设计定案见 §17，下一步从 R-2 pure relevance core 开始。
+> **收口状态（2026-08-11）**：N-1…N-5 五卡全部完成；生产增量按内容核、逐字血缘、可审计折叠原因三个单关注提交落地，构造集以 33 source / 12 case 对六类信号做 exact gate。分卡审计全部 PASS；随后对 `c7189c2..c12fbdc` 做整块审查，发现 MCP multi strict decoder 可被重复 `fold_reason` 的 last-wins 语义绕过，已由红测试复现并在 `d213376` 递归拒绝 exact/Unicode-escaped duplicate key，发现者复审 PASS。最终快照全仓 test/race/vet/build/diff-check 通过。P2 也已完成；P3 的 R-1 设计与 R-2 pure relevance core 已完成，下一步为 §17 的 R-3 strict vLLM adapter + 独立 network runtime。
 
 > **EN —** N_eff v1 preserves document-global components and adds bounded, anchor-centered content-core similarity plus exact long-fragment lineage as conservative union edges. Missing enhanced input retains v0 compatibility; malformed or hard-size-invalid input fails explicitly, while richer derived inputs are sampled deterministically within fixed bounds. Sampling may miss an enhanced fold and thus overcount independence relative to an unbounded ideal, but never removes the v0 signals. N-2/N-3 may change winners, materialization outcomes, and confidence through the new N_eff, while their schemas/formulas stay intact; N-4 itself only adds fold metadata from a deterministic forest.
 
@@ -1612,7 +1612,7 @@ E-7 先以最终冻结提示词做一次空目录全量重录，再对预先声�
 
 单关注提交 · 测试先行 · `go test ./...` + `-race` + vet + build 全绿后才 commit · `git diff --check` · 不带任何 AI 署名尾注 · 公开契约 additive-only · 不 push/merge/tag/deploy 除非明确决定 · PLAN.md 三层结构与非目标不可推翻 · MASTERPLAN 状态标记（✅/🚧/⬜/⟳）随实况回写。
 
-> **EN —** Handoff from waypoint `c7189c2`: P1 N_eff v1 and P2 EAV calibration are complete. N_eff now adds bounded content-core fingerprints, quote lineage, and additive fold-reason export on top of the existing same-root/whole-page-simhash folds. EAV now enforces verbatim extraction quotes through the golden replay gate and can opt only its operator-managed client into private networking while request BYOK remains public-only. P3's R-1 design is now locked in §17; implementation starts with the pure relevance core, while P4 remains the old backlog.
+> **EN —** Handoff from waypoint `c7189c2`: P1 N_eff v1 and P2 EAV calibration are complete. N_eff now adds bounded content-core fingerprints, quote lineage, and additive fold-reason export on top of the existing same-root/whole-page-simhash folds. EAV now enforces verbatim extraction quotes through the golden replay gate and can opt only its operator-managed client into private networking while request BYOK remains public-only. P3's R-1 design and R-2 pure relevance core are complete; the next card is the isolated vLLM adapter/runtime in R-3, while P4 remains the old backlog.
 
 ---
 
@@ -1770,8 +1770,8 @@ PLAN.md 的 `relevance × N_eff × EAV` 是产品方向，不是三个已校准�
 ### 17.11 实施卡与提交边界
 
 ```text
-R-1  实况盘点 + 本设计定案（docs only）
-R-2  pure rerank core + fake executor + NDCG math（无 HTTP / 无 wire）
+R-1  ✅ 7b40111 / review hardening 8c83af3：实况盘点 + 本设计定案（docs only）
+R-2  ✅ c8e72f8：pure rerank core + fake executor + NDCG math（无 HTTP / 无 wire）
 R-3  strict vLLM /v1/rerank adapter + config + 独立 network runtime（不接 Search）
 R-4  内部 rankCandidates：candidate-20 → relevance → metadata dedup → truncate（package seam/tests，无公开 request 字段）
 R-5  relevance models / HTTP / MCP + Search service switch + strict duplicate guard + rate/capability 接线
@@ -1782,6 +1782,8 @@ R-9  optional sidecar/profile、SBOM/Apache attribution 与运维文档（未授
 ```
 
 每卡单关注：先红测试、实现后定向 + 全仓 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...`、`git diff --check` 全绿才 commit；卡后做只读审查，发现项另提 review-fix commit。R-6 不通过就不在生产启用 relevance capability；R-8 不通过就不开放 trust；即使两门都过，v1 请求默认仍为 `provider`。
+
+> **R-2 收口（2026-08-12）**：`c8e72f8 feat(search): add pure rerank core` 只新增 `search/rerank/` 六个实现/测试文件。stable candidate ID、UTF-8 有界文档、exact score-set join、`score DESC → provider rank ASC → canonical URL ASC` 总序、ctx/panic/error 收敛与 NDCG@5 均由 pure fake 锁门；没有接 Search service、models、HTTP/MCP、config、cache 或公开 wire。提交前全仓 test/race/vet/build/diff-check 全绿，卡后三路只读审查均 PASS，无 review-fix。
 
 **明确非目标**：多 provider federation、自建索引、把模型/Python塞进 Purify 主容器、公开 reranker BYOK、从 query 猜 subject、抓20页做 trust、把 provider `Score` 改义、用 `fold_reason==""` 奖励独立、把 lexical forest root 当最佳页、claim级 component、方向性首发判定、修改 Answer confidence、缓存 artifact/cleaned/credential、未授权 push/deploy。
 
