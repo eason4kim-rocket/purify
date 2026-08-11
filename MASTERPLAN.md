@@ -1149,7 +1149,7 @@ zkTLS（Reclaim/TLSNotary）定位一句话：**它证传输，我们证语义�
 
 ## 15. Phase 8 — EAV 实体归因校验（PLAN.md §6 步 2）
 
-> **状态**：**Phase 8 代码收口（2026-08-11）**。进度：E-1 ✅（`612fd50`）　E-2 ✅（`b5be194`）　E-3 ✅（`f2c6329`）　E-4 ✅（`e233bf6`）　E-5 ✅（`737a008`+`3eefe31`，种子集 48 行）　E-6 ✅（`060ff7e`+`1384592`+`a979cb7`）。剩余非代码项：① 真实 LLM 重录 + 标注集扩容 ≥300 行（联网跑 `scripts/eavcorpus`）；② 真机冒烟（`PURIFY_EAV_ENABLED=1` + key，/extract expected_subject 与 /answer 全链路）；③ PLAN.md §6 步 3（N_eff v1）与步 4（重排焊接）在本相位之外。图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始 · ⟳ 与规划不同（以实码为准）。
+> **状态**：**Phase 8 代码收口（2026-08-11）**。进度：E-1 ✅（`612fd50`）　E-2 ✅（`b5be194`）　E-3 ✅（`f2c6329`）　E-4 ✅（`e233bf6`）　E-5 ✅（`737a008`+`3eefe31`，种子集 48 行）　E-6 ✅（`060ff7e`+`1384592`+`a979cb7`）。剩余非代码项：① ~~标注集扩容~~ **已完成大半（2026-08-11）**：`scripts/eavcorpus/corpus/` 已入库真实抓取语料——78 文档（en/zh Wikipedia，78/78 零失败）× 345 行审计标签（111 match / 232 mismatch / 42 hard / 2 waived 同形异指），44 条 hard 对全部人工过目；**只剩 `-mode record` 真实 LLM 重录**（本机 MiniMax key 认证通过、`api.minimaxi.com` + `MiniMax-M2` 可用，但 Token Plan 配额已尽 429——补配额或换 OpenAI 兼容 key 后按 main.go 头注释一条命令跑完并晋级 testdata/golden）；② 真机冒烟（`PURIFY_EAV_ENABLED=1` + key，/extract expected_subject 与 /answer 全链路）；③ PLAN.md §6 步 3（N_eff v1）与步 4（重排焊接）在本相位之外。图例沿用：✅ 已提交 · 🚧 进行中 · ⬜ 未开始 · ⟳ 与规划不同（以实码为准）。
 > **上游依据**：PLAN.md §5.3（算法与验收）、§6 步 2（顺序）。**落点定案：新包 `verify/eav/`**——不做 evidence/ 扩展：evidence 管「值在哪」（定位），eav 管「这页在讲谁」（判断），职责不同。
 > **一句话**：抓 right-source-wrong-entity——系统如实引用了真实文档、每个字都锚得上，但文档说的是 B，你问的是 A。对幻觉检测、忠实度、引用核查全部隐形；Parallel Basis 结构上抓不到。
 
