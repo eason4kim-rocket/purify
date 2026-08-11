@@ -1,0 +1,345 @@
+{"subject": "Apple Inc.", "doc": "companies/apple-inc", "label": "match", "domain": "companies", "note": "audited 2026-08-11"}
+{"subject": "AAPL", "doc": "companies/apple-inc", "label": "match", "domain": "companies", "note": "alias"}
+{"subject": "Apple", "doc": "companies/apple-inc", "label": "match", "domain": "companies", "note": "alias"}
+{"subject": "Advanced Micro Devices", "doc": "companies/apple-inc", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Applied Materials", "doc": "companies/apple-inc", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Texas Instruments", "doc": "companies/apple-inc", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Samsung Electronics", "doc": "companies/samsung-electronics", "label": "match", "domain": "companies", "note": "audited 2026-08-11"}
+{"subject": "Samsung", "doc": "companies/samsung-electronics", "label": "match", "domain": "companies", "note": "alias"}
+{"subject": "Advanced Micro Devices", "doc": "companies/samsung-electronics", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Apple Inc.", "doc": "companies/samsung-electronics", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Texas Instruments", "doc": "companies/samsung-electronics", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Microsoft", "doc": "companies/microsoft", "label": "match", "domain": "companies", "note": "audited 2026-08-11"}
+{"subject": "MSFT", "doc": "companies/microsoft", "label": "match", "domain": "companies", "note": "alias"}
+{"subject": "Advanced Micro Devices", "doc": "companies/microsoft", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Apple Inc.", "doc": "companies/microsoft", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Texas Instruments", "doc": "companies/microsoft", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Micron Technology", "doc": "companies/micron", "label": "match", "domain": "companies", "note": "audited 2026-08-11"}
+{"subject": "Micron", "doc": "companies/micron", "label": "match", "domain": "companies", "note": "alias"}
+{"subject": "Advanced Micro Devices", "doc": "companies/micron", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Apple Inc.", "doc": "companies/micron", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Texas Instruments", "doc": "companies/micron", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Intel", "doc": "companies/intel", "label": "match", "domain": "companies", "note": "audited 2026-08-11"}
+{"subject": "Advanced Micro Devices", "doc": "companies/intel", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Apple Inc.", "doc": "companies/intel", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Texas Instruments", "doc": "companies/intel", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Nvidia", "doc": "companies/nvidia", "label": "match", "domain": "companies", "note": "audited 2026-08-11"}
+{"subject": "NVDA", "doc": "companies/nvidia", "label": "match", "domain": "companies", "note": "alias"}
+{"subject": "Advanced Micro Devices", "doc": "companies/nvidia", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Apple Inc.", "doc": "companies/nvidia", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Texas Instruments", "doc": "companies/nvidia", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Advanced Micro Devices", "doc": "companies/amd", "label": "match", "domain": "companies", "note": "audited 2026-08-11"}
+{"subject": "AMD", "doc": "companies/amd", "label": "match", "domain": "companies", "note": "alias"}
+{"subject": "Apple Inc.", "doc": "companies/amd", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Applied Materials", "doc": "companies/amd", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Texas Instruments", "doc": "companies/amd", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Arm Holdings", "doc": "companies/arm-holdings", "label": "match", "domain": "companies", "note": "audited 2026-08-11"}
+{"subject": "Arm", "doc": "companies/arm-holdings", "label": "match", "domain": "companies", "note": "alias"}
+{"subject": "Advanced Micro Devices", "doc": "companies/arm-holdings", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Apple Inc.", "doc": "companies/arm-holdings", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Texas Instruments", "doc": "companies/arm-holdings", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Qualcomm", "doc": "companies/qualcomm", "label": "match", "domain": "companies", "note": "audited 2026-08-11"}
+{"subject": "Advanced Micro Devices", "doc": "companies/qualcomm", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Apple Inc.", "doc": "companies/qualcomm", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Texas Instruments", "doc": "companies/qualcomm", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Broadcom", "doc": "companies/broadcom", "label": "match", "domain": "companies", "note": "audited 2026-08-11"}
+{"subject": "Advanced Micro Devices", "doc": "companies/broadcom", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Apple Inc.", "doc": "companies/broadcom", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Texas Instruments", "doc": "companies/broadcom", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Applied Materials", "doc": "companies/applied-materials", "label": "match", "domain": "companies", "note": "audited 2026-08-11"}
+{"subject": "Advanced Micro Devices", "doc": "companies/applied-materials", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Apple Inc.", "doc": "companies/applied-materials", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Texas Instruments", "doc": "companies/applied-materials", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Texas Instruments", "doc": "companies/texas-instruments", "label": "match", "domain": "companies", "note": "audited 2026-08-11"}
+{"subject": "TI", "doc": "companies/texas-instruments", "label": "match", "domain": "companies", "note": "alias"}
+{"subject": "Advanced Micro Devices", "doc": "companies/texas-instruments", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Apple Inc.", "doc": "companies/texas-instruments", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Samsung Electronics", "doc": "companies/texas-instruments", "label": "mismatch", "domain": "companies", "note": "sibling"}
+{"subject": "Atorvastatin", "doc": "drugs/atorvastatin", "label": "match", "domain": "drugs", "note": "audited 2026-08-11"}
+{"subject": "Lipitor", "doc": "drugs/atorvastatin", "label": "match", "domain": "drugs", "note": "alias"}
+{"subject": "Enalapril", "doc": "drugs/atorvastatin", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Esomeprazole", "doc": "drugs/atorvastatin", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Valsartan", "doc": "drugs/atorvastatin", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Simvastatin", "doc": "drugs/simvastatin", "label": "match", "domain": "drugs", "note": "audited 2026-08-11"}
+{"subject": "Zocor", "doc": "drugs/simvastatin", "label": "match", "domain": "drugs", "note": "alias"}
+{"subject": "Atorvastatin", "doc": "drugs/simvastatin", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Enalapril", "doc": "drugs/simvastatin", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Valsartan", "doc": "drugs/simvastatin", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Rosuvastatin", "doc": "drugs/rosuvastatin", "label": "match", "domain": "drugs", "note": "audited 2026-08-11"}
+{"subject": "Crestor", "doc": "drugs/rosuvastatin", "label": "match", "domain": "drugs", "note": "alias"}
+{"subject": "Atorvastatin", "doc": "drugs/rosuvastatin", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Enalapril", "doc": "drugs/rosuvastatin", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Valsartan", "doc": "drugs/rosuvastatin", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Pravastatin", "doc": "drugs/pravastatin", "label": "match", "domain": "drugs", "note": "audited 2026-08-11"}
+{"subject": "Pravachol", "doc": "drugs/pravastatin", "label": "match", "domain": "drugs", "note": "alias"}
+{"subject": "Atorvastatin", "doc": "drugs/pravastatin", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Enalapril", "doc": "drugs/pravastatin", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Valsartan", "doc": "drugs/pravastatin", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Metformin", "doc": "drugs/metformin", "label": "match", "domain": "drugs", "note": "audited 2026-08-11"}
+{"subject": "Glucophage", "doc": "drugs/metformin", "label": "match", "domain": "drugs", "note": "alias"}
+{"subject": "Atorvastatin", "doc": "drugs/metformin", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Enalapril", "doc": "drugs/metformin", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Valsartan", "doc": "drugs/metformin", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Lisinopril", "doc": "drugs/lisinopril", "label": "match", "domain": "drugs", "note": "audited 2026-08-11"}
+{"subject": "Atorvastatin", "doc": "drugs/lisinopril", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Enalapril", "doc": "drugs/lisinopril", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Valsartan", "doc": "drugs/lisinopril", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Enalapril", "doc": "drugs/enalapril", "label": "match", "domain": "drugs", "note": "audited 2026-08-11"}
+{"subject": "Vasotec", "doc": "drugs/enalapril", "label": "match", "domain": "drugs", "note": "alias"}
+{"subject": "Atorvastatin", "doc": "drugs/enalapril", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Esomeprazole", "doc": "drugs/enalapril", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Valsartan", "doc": "drugs/enalapril", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Losartan", "doc": "drugs/losartan", "label": "match", "domain": "drugs", "note": "audited 2026-08-11"}
+{"subject": "Cozaar", "doc": "drugs/losartan", "label": "match", "domain": "drugs", "note": "alias"}
+{"subject": "Atorvastatin", "doc": "drugs/losartan", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Enalapril", "doc": "drugs/losartan", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Valsartan", "doc": "drugs/losartan", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Valsartan", "doc": "drugs/valsartan", "label": "match", "domain": "drugs", "note": "audited 2026-08-11"}
+{"subject": "Diovan", "doc": "drugs/valsartan", "label": "match", "domain": "drugs", "note": "alias"}
+{"subject": "Atorvastatin", "doc": "drugs/valsartan", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Enalapril", "doc": "drugs/valsartan", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Simvastatin", "doc": "drugs/valsartan", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Omeprazole", "doc": "drugs/omeprazole", "label": "match", "domain": "drugs", "note": "audited 2026-08-11"}
+{"subject": "Prilosec", "doc": "drugs/omeprazole", "label": "match", "domain": "drugs", "note": "alias"}
+{"subject": "Esomeprazole", "doc": "drugs/omeprazole", "label": "mismatch", "domain": "drugs", "hard": true, "note": "confusable sibling"}
+{"subject": "Atorvastatin", "doc": "drugs/omeprazole", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Valsartan", "doc": "drugs/omeprazole", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Esomeprazole", "doc": "drugs/esomeprazole", "label": "match", "domain": "drugs", "note": "audited 2026-08-11"}
+{"subject": "Nexium", "doc": "drugs/esomeprazole", "label": "match", "domain": "drugs", "note": "alias"}
+{"subject": "Omeprazole", "doc": "drugs/esomeprazole", "label": "mismatch", "domain": "drugs", "hard": true, "note": "confusable sibling"}
+{"subject": "Atorvastatin", "doc": "drugs/esomeprazole", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Valsartan", "doc": "drugs/esomeprazole", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Ibuprofen", "doc": "drugs/ibuprofen", "label": "match", "domain": "drugs", "note": "audited 2026-08-11"}
+{"subject": "Advil", "doc": "drugs/ibuprofen", "label": "match", "domain": "drugs", "note": "alias"}
+{"subject": "Atorvastatin", "doc": "drugs/ibuprofen", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Enalapril", "doc": "drugs/ibuprofen", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Valsartan", "doc": "drugs/ibuprofen", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Naproxen", "doc": "drugs/naproxen", "label": "match", "domain": "drugs", "note": "audited 2026-08-11"}
+{"subject": "Aleve", "doc": "drugs/naproxen", "label": "match", "domain": "drugs", "note": "alias"}
+{"subject": "Atorvastatin", "doc": "drugs/naproxen", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Enalapril", "doc": "drugs/naproxen", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "Valsartan", "doc": "drugs/naproxen", "label": "mismatch", "domain": "drugs", "note": "sibling"}
+{"subject": "iPhone 15", "doc": "products/iphone-15", "label": "match", "domain": "products", "note": "audited 2026-08-11"}
+{"subject": "iPhone 16", "doc": "products/iphone-15", "label": "mismatch", "domain": "products", "hard": true, "note": "confusable sibling"}
+{"subject": "iPhone 15 Pro", "doc": "products/iphone-15", "label": "mismatch", "domain": "products", "hard": true, "note": "confusable sibling"}
+{"subject": "Samsung Galaxy S24", "doc": "products/iphone-15", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "iPhone 15 Pro", "doc": "products/iphone-15-pro", "label": "match", "domain": "products", "note": "audited 2026-08-11"}
+{"subject": "iPhone 16 Pro", "doc": "products/iphone-15-pro", "label": "mismatch", "domain": "products", "hard": true, "note": "confusable sibling"}
+{"subject": "iPhone 15", "doc": "products/iphone-15-pro", "label": "mismatch", "domain": "products", "hard": true, "note": "confusable sibling"}
+{"subject": "Samsung Galaxy S24", "doc": "products/iphone-15-pro", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "iPhone 16", "doc": "products/iphone-16", "label": "match", "domain": "products", "note": "audited 2026-08-11"}
+{"subject": "iPhone 15", "doc": "products/iphone-16", "label": "mismatch", "domain": "products", "hard": true, "note": "confusable sibling"}
+{"subject": "iPhone 16 Pro", "doc": "products/iphone-16", "label": "mismatch", "domain": "products", "hard": true, "note": "confusable sibling"}
+{"subject": "Samsung Galaxy S24", "doc": "products/iphone-16", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "iPhone 16 Pro", "doc": "products/iphone-16-pro", "label": "match", "domain": "products", "note": "audited 2026-08-11"}
+{"subject": "iPhone 15 Pro", "doc": "products/iphone-16-pro", "label": "mismatch", "domain": "products", "hard": true, "note": "confusable sibling"}
+{"subject": "iPhone 16", "doc": "products/iphone-16-pro", "label": "mismatch", "domain": "products", "hard": true, "note": "confusable sibling"}
+{"subject": "Samsung Galaxy S24", "doc": "products/iphone-16-pro", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "Samsung Galaxy S24", "doc": "products/galaxy-s24", "label": "match", "domain": "products", "note": "audited 2026-08-11"}
+{"subject": "Samsung Galaxy S23", "doc": "products/galaxy-s24", "label": "mismatch", "domain": "products", "hard": true, "note": "confusable sibling"}
+{"subject": "MacBook Air", "doc": "products/galaxy-s24", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "iPhone 16 Pro", "doc": "products/galaxy-s24", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "Samsung Galaxy S23", "doc": "products/galaxy-s23", "label": "match", "domain": "products", "note": "audited 2026-08-11"}
+{"subject": "Samsung Galaxy S24", "doc": "products/galaxy-s23", "label": "mismatch", "domain": "products", "hard": true, "note": "confusable sibling"}
+{"subject": "MacBook Air", "doc": "products/galaxy-s23", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "iPhone 16 Pro", "doc": "products/galaxy-s23", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "Pixel 8", "doc": "products/pixel-8", "label": "match", "domain": "products", "note": "audited 2026-08-11"}
+{"subject": "Pixel 9", "doc": "products/pixel-8", "label": "mismatch", "domain": "products", "hard": true, "note": "confusable sibling"}
+{"subject": "MacBook Air", "doc": "products/pixel-8", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "iPhone 16 Pro", "doc": "products/pixel-8", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "Pixel 9", "doc": "products/pixel-9", "label": "match", "domain": "products", "note": "audited 2026-08-11"}
+{"subject": "Pixel 8", "doc": "products/pixel-9", "label": "mismatch", "domain": "products", "hard": true, "note": "confusable sibling"}
+{"subject": "MacBook Air", "doc": "products/pixel-9", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "iPhone 16 Pro", "doc": "products/pixel-9", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "PlayStation 5", "doc": "products/playstation-5", "label": "match", "domain": "products", "note": "audited 2026-08-11"}
+{"subject": "PS5", "doc": "products/playstation-5", "label": "match", "domain": "products", "note": "alias"}
+{"subject": "MacBook Air", "doc": "products/playstation-5", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "MacBook Pro", "doc": "products/playstation-5", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "iPhone 16 Pro", "doc": "products/playstation-5", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "Nintendo Switch", "doc": "products/nintendo-switch", "label": "match", "domain": "products", "note": "audited 2026-08-11"}
+{"subject": "Nintendo Switch 2", "doc": "products/nintendo-switch", "label": "mismatch", "domain": "products", "hard": true, "note": "confusable sibling"}
+{"subject": "MacBook Air", "doc": "products/nintendo-switch", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "iPhone 16 Pro", "doc": "products/nintendo-switch", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "Nintendo Switch 2", "doc": "products/nintendo-switch-2", "label": "match", "domain": "products", "note": "audited 2026-08-11"}
+{"subject": "Nintendo Switch", "doc": "products/nintendo-switch-2", "label": "mismatch", "domain": "products", "hard": true, "note": "confusable sibling"}
+{"subject": "MacBook Air", "doc": "products/nintendo-switch-2", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "iPhone 16 Pro", "doc": "products/nintendo-switch-2", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "MacBook Air", "doc": "products/macbook-air", "label": "match", "domain": "products", "note": "audited 2026-08-11"}
+{"subject": "MacBook Pro", "doc": "products/macbook-air", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "Nintendo Switch", "doc": "products/macbook-air", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "iPhone 16 Pro", "doc": "products/macbook-air", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "MacBook Pro", "doc": "products/macbook-pro", "label": "match", "domain": "products", "note": "audited 2026-08-11"}
+{"subject": "MacBook Air", "doc": "products/macbook-pro", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "iPhone 15 Pro", "doc": "products/macbook-pro", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "iPhone 16", "doc": "products/macbook-pro", "label": "mismatch", "domain": "products", "note": "sibling"}
+{"subject": "Michael Jordan", "doc": "people/michael-jordan", "label": "match", "domain": "people", "note": "audited 2026-08-11"}
+{"subject": "MJ", "doc": "people/michael-jordan", "label": "match", "domain": "people", "note": "alias"}
+{"subject": "Michael B. Jordan", "doc": "people/michael-jordan", "label": "mismatch", "domain": "people", "hard": true, "note": "confusable sibling"}
+{"subject": "Barack Obama", "doc": "people/michael-jordan", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Venus Williams", "doc": "people/michael-jordan", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Michael B. Jordan", "doc": "people/michael-b-jordan", "label": "match", "domain": "people", "note": "audited 2026-08-11"}
+{"subject": "Michael Jordan", "doc": "people/michael-b-jordan", "label": "mismatch", "domain": "people", "hard": true, "note": "confusable sibling"}
+{"subject": "Barack Obama", "doc": "people/michael-b-jordan", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Venus Williams", "doc": "people/michael-b-jordan", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Steve Jobs", "doc": "people/steve-jobs", "label": "match", "domain": "people", "note": "audited 2026-08-11"}
+{"subject": "Steve Wozniak", "doc": "people/steve-jobs", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Barack Obama", "doc": "people/steve-jobs", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Venus Williams", "doc": "people/steve-jobs", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Steve Wozniak", "doc": "people/steve-wozniak", "label": "match", "domain": "people", "note": "audited 2026-08-11"}
+{"subject": "Woz", "doc": "people/steve-wozniak", "label": "match", "domain": "people", "note": "alias"}
+{"subject": "Steve Jobs", "doc": "people/steve-wozniak", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Barack Obama", "doc": "people/steve-wozniak", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Venus Williams", "doc": "people/steve-wozniak", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Elon Musk", "doc": "people/elon-musk", "label": "match", "domain": "people", "note": "audited 2026-08-11"}
+{"subject": "Kimbal Musk", "doc": "people/elon-musk", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Barack Obama", "doc": "people/elon-musk", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Venus Williams", "doc": "people/elon-musk", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Kimbal Musk", "doc": "people/kimbal-musk", "label": "match", "domain": "people", "note": "audited 2026-08-11"}
+{"subject": "Elon Musk", "doc": "people/kimbal-musk", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Barack Obama", "doc": "people/kimbal-musk", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Venus Williams", "doc": "people/kimbal-musk", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Serena Williams", "doc": "people/serena-williams", "label": "match", "domain": "people", "note": "audited 2026-08-11"}
+{"subject": "Venus Williams", "doc": "people/serena-williams", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Barack Obama", "doc": "people/serena-williams", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Tim Cook", "doc": "people/serena-williams", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Venus Williams", "doc": "people/venus-williams", "label": "match", "domain": "people", "note": "audited 2026-08-11"}
+{"subject": "Serena Williams", "doc": "people/venus-williams", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Barack Obama", "doc": "people/venus-williams", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Tim Cook", "doc": "people/venus-williams", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Larry Page", "doc": "people/larry-page", "label": "match", "domain": "people", "note": "audited 2026-08-11"}
+{"subject": "Larry Ellison", "doc": "people/larry-page", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Barack Obama", "doc": "people/larry-page", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Venus Williams", "doc": "people/larry-page", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Larry Ellison", "doc": "people/larry-ellison", "label": "match", "domain": "people", "note": "audited 2026-08-11"}
+{"subject": "Larry Page", "doc": "people/larry-ellison", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Barack Obama", "doc": "people/larry-ellison", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Venus Williams", "doc": "people/larry-ellison", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Barack Obama", "doc": "people/barack-obama", "label": "match", "domain": "people", "note": "audited 2026-08-11"}
+{"subject": "Michelle Obama", "doc": "people/barack-obama", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Elon Musk", "doc": "people/barack-obama", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Venus Williams", "doc": "people/barack-obama", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Michelle Obama", "doc": "people/michelle-obama", "label": "match", "domain": "people", "note": "audited 2026-08-11"}
+{"subject": "Barack Obama", "doc": "people/michelle-obama", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Elon Musk", "doc": "people/michelle-obama", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Venus Williams", "doc": "people/michelle-obama", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Tim Cook", "doc": "people/tim-cook", "label": "match", "domain": "people", "note": "audited 2026-08-11"}
+{"subject": "Timothy Donald Cook", "doc": "people/tim-cook", "label": "match", "domain": "people", "note": "alias"}
+{"subject": "Barack Obama", "doc": "people/tim-cook", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Elon Musk", "doc": "people/tim-cook", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Venus Williams", "doc": "people/tim-cook", "label": "mismatch", "domain": "people", "note": "sibling"}
+{"subject": "Georgia", "doc": "places/georgia-state", "label": "match", "domain": "places", "note": "audited 2026-08-11"}
+{"subject": "Georgia", "doc": "places/georgia-state", "label": "mismatch", "domain": "places", "hard": true, "note": "v1 known limit: homonym subjects match on surface; needs typed subjects", "waived": true}
+{"subject": "Australia", "doc": "places/georgia-state", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "湖南省", "doc": "places/georgia-state", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "Georgia", "doc": "places/georgia-country", "label": "match", "domain": "places", "note": "audited 2026-08-11"}
+{"subject": "Georgia", "doc": "places/georgia-country", "label": "mismatch", "domain": "places", "hard": true, "note": "v1 known limit: homonym subjects match on surface; needs typed subjects", "waived": true}
+{"subject": "Australia", "doc": "places/georgia-country", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "湖南省", "doc": "places/georgia-country", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "Paris", "doc": "places/paris", "label": "match", "domain": "places", "note": "audited 2026-08-11"}
+{"subject": "Paris, Texas", "doc": "places/paris", "label": "mismatch", "domain": "places", "hard": true, "note": "confusable sibling"}
+{"subject": "Australia", "doc": "places/paris", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "湖南省", "doc": "places/paris", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "Paris, Texas", "doc": "places/paris-texas", "label": "match", "domain": "places", "note": "audited 2026-08-11"}
+{"subject": "Paris", "doc": "places/paris-texas", "label": "mismatch", "domain": "places", "hard": true, "note": "confusable sibling"}
+{"subject": "Australia", "doc": "places/paris-texas", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "湖南省", "doc": "places/paris-texas", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "Washington", "doc": "places/washington-state", "label": "match", "domain": "places", "note": "audited 2026-08-11"}
+{"subject": "Washington, D.C.", "doc": "places/washington-state", "label": "mismatch", "domain": "places", "hard": true, "note": "confusable sibling"}
+{"subject": "Australia", "doc": "places/washington-state", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "湖南省", "doc": "places/washington-state", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "Washington, D.C.", "doc": "places/washington-dc", "label": "match", "domain": "places", "note": "audited 2026-08-11"}
+{"subject": "District of Columbia", "doc": "places/washington-dc", "label": "match", "domain": "places", "note": "alias"}
+{"subject": "Washington", "doc": "places/washington-dc", "label": "mismatch", "domain": "places", "hard": true, "note": "confusable sibling"}
+{"subject": "Australia", "doc": "places/washington-dc", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "湖南省", "doc": "places/washington-dc", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "Niger", "doc": "places/niger", "label": "match", "domain": "places", "note": "audited 2026-08-11"}
+{"subject": "Nigeria", "doc": "places/niger", "label": "mismatch", "domain": "places", "hard": true, "note": "confusable sibling"}
+{"subject": "Australia", "doc": "places/niger", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "湖南省", "doc": "places/niger", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "Nigeria", "doc": "places/nigeria", "label": "match", "domain": "places", "note": "audited 2026-08-11"}
+{"subject": "Niger", "doc": "places/nigeria", "label": "mismatch", "domain": "places", "hard": true, "note": "confusable sibling"}
+{"subject": "Australia", "doc": "places/nigeria", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "湖南省", "doc": "places/nigeria", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "Austria", "doc": "places/austria", "label": "match", "domain": "places", "note": "audited 2026-08-11"}
+{"subject": "Australia", "doc": "places/austria", "label": "mismatch", "domain": "places", "hard": true, "note": "confusable sibling"}
+{"subject": "Georgia", "doc": "places/austria", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "湖南省", "doc": "places/austria", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "Australia", "doc": "places/australia", "label": "match", "domain": "places", "note": "audited 2026-08-11"}
+{"subject": "Austria", "doc": "places/australia", "label": "mismatch", "domain": "places", "hard": true, "note": "confusable sibling"}
+{"subject": "Georgia", "doc": "places/australia", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "湖南省", "doc": "places/australia", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "Slovakia", "doc": "places/slovakia", "label": "match", "domain": "places", "note": "audited 2026-08-11"}
+{"subject": "Slovenia", "doc": "places/slovakia", "label": "mismatch", "domain": "places", "hard": true, "note": "confusable sibling"}
+{"subject": "Australia", "doc": "places/slovakia", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "湖南省", "doc": "places/slovakia", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "Slovenia", "doc": "places/slovenia", "label": "match", "domain": "places", "note": "audited 2026-08-11"}
+{"subject": "Slovakia", "doc": "places/slovenia", "label": "mismatch", "domain": "places", "hard": true, "note": "confusable sibling"}
+{"subject": "Australia", "doc": "places/slovenia", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "湖南省", "doc": "places/slovenia", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "湖北省", "doc": "places/hubei", "label": "match", "domain": "places", "note": "audited 2026-08-11"}
+{"subject": "鄂", "doc": "places/hubei", "label": "match", "domain": "places", "note": "alias"}
+{"subject": "湖北", "doc": "places/hubei", "label": "match", "domain": "places", "note": "alias"}
+{"subject": "湖南省", "doc": "places/hubei", "label": "mismatch", "domain": "places", "hard": true, "note": "confusable sibling"}
+{"subject": "Australia", "doc": "places/hubei", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "Washington, D.C.", "doc": "places/hubei", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "湖南省", "doc": "places/hunan", "label": "match", "domain": "places", "note": "audited 2026-08-11"}
+{"subject": "湘", "doc": "places/hunan", "label": "match", "domain": "places", "note": "alias"}
+{"subject": "湖南", "doc": "places/hunan", "label": "match", "domain": "places", "note": "alias"}
+{"subject": "湖北省", "doc": "places/hunan", "label": "mismatch", "domain": "places", "hard": true, "note": "confusable sibling"}
+{"subject": "Australia", "doc": "places/hunan", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "Washington, D.C.", "doc": "places/hunan", "label": "mismatch", "domain": "places", "note": "sibling"}
+{"subject": "2024 Summer Olympics", "doc": "events/olympics-2024", "label": "match", "domain": "events", "note": "audited 2026-08-11"}
+{"subject": "Paris 2024", "doc": "events/olympics-2024", "label": "match", "domain": "events", "note": "alias"}
+{"subject": "2020 Summer Olympics", "doc": "events/olympics-2024", "label": "mismatch", "domain": "events", "hard": true, "note": "confusable sibling"}
+{"subject": "2022 Winter Olympics", "doc": "events/olympics-2024", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Super Bowl LVIII", "doc": "events/olympics-2024", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "2020 Summer Olympics", "doc": "events/olympics-2020", "label": "match", "domain": "events", "note": "audited 2026-08-11"}
+{"subject": "Tokyo 2020", "doc": "events/olympics-2020", "label": "match", "domain": "events", "note": "alias"}
+{"subject": "2024 Summer Olympics", "doc": "events/olympics-2020", "label": "mismatch", "domain": "events", "hard": true, "note": "confusable sibling"}
+{"subject": "2022 Winter Olympics", "doc": "events/olympics-2020", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Super Bowl LVIII", "doc": "events/olympics-2020", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "2022 Winter Olympics", "doc": "events/olympics-2022-winter", "label": "match", "domain": "events", "note": "audited 2026-08-11"}
+{"subject": "Beijing 2022", "doc": "events/olympics-2022-winter", "label": "match", "domain": "events", "note": "alias"}
+{"subject": "2020 Summer Olympics", "doc": "events/olympics-2022-winter", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "2024 Summer Olympics", "doc": "events/olympics-2022-winter", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Super Bowl LVIII", "doc": "events/olympics-2022-winter", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "2018 FIFA World Cup", "doc": "events/world-cup-2018", "label": "match", "domain": "events", "note": "audited 2026-08-11"}
+{"subject": "2022 FIFA World Cup", "doc": "events/world-cup-2018", "label": "mismatch", "domain": "events", "hard": true, "note": "confusable sibling"}
+{"subject": "2020 Summer Olympics", "doc": "events/world-cup-2018", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Super Bowl LVIII", "doc": "events/world-cup-2018", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "2022 FIFA World Cup", "doc": "events/world-cup-2022", "label": "match", "domain": "events", "note": "audited 2026-08-11"}
+{"subject": "2018 FIFA World Cup", "doc": "events/world-cup-2022", "label": "mismatch", "domain": "events", "hard": true, "note": "confusable sibling"}
+{"subject": "2022 Winter Olympics", "doc": "events/world-cup-2022", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Super Bowl LVIII", "doc": "events/world-cup-2022", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Super Bowl LVIII", "doc": "events/super-bowl-lviii", "label": "match", "domain": "events", "note": "audited 2026-08-11"}
+{"subject": "Super Bowl LVII", "doc": "events/super-bowl-lviii", "label": "mismatch", "domain": "events", "hard": true, "note": "confusable sibling"}
+{"subject": "2018 FIFA World Cup", "doc": "events/super-bowl-lviii", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Eurovision Song Contest 2024", "doc": "events/super-bowl-lviii", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Super Bowl LVII", "doc": "events/super-bowl-lvii", "label": "match", "domain": "events", "note": "audited 2026-08-11"}
+{"subject": "Super Bowl LVIII", "doc": "events/super-bowl-lvii", "label": "mismatch", "domain": "events", "hard": true, "note": "confusable sibling"}
+{"subject": "2018 FIFA World Cup", "doc": "events/super-bowl-lvii", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Eurovision Song Contest 2024", "doc": "events/super-bowl-lvii", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Eurovision Song Contest 2024", "doc": "events/eurovision-2024", "label": "match", "domain": "events", "note": "audited 2026-08-11"}
+{"subject": "Eurovision Song Contest 2023", "doc": "events/eurovision-2024", "label": "mismatch", "domain": "events", "hard": true, "note": "confusable sibling"}
+{"subject": "2024 Summer Olympics", "doc": "events/eurovision-2024", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Super Bowl LVIII", "doc": "events/eurovision-2024", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Eurovision Song Contest 2023", "doc": "events/eurovision-2023", "label": "match", "domain": "events", "note": "audited 2026-08-11"}
+{"subject": "Eurovision Song Contest 2024", "doc": "events/eurovision-2023", "label": "mismatch", "domain": "events", "hard": true, "note": "confusable sibling"}
+{"subject": "2018 FIFA World Cup", "doc": "events/eurovision-2023", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Super Bowl LVIII", "doc": "events/eurovision-2023", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "COP28", "doc": "events/cop28", "label": "match", "domain": "events", "note": "audited 2026-08-11"}
+{"subject": "COP29", "doc": "events/cop28", "label": "mismatch", "domain": "events", "hard": true, "note": "confusable sibling"}
+{"subject": "2018 FIFA World Cup", "doc": "events/cop28", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Super Bowl LVIII", "doc": "events/cop28", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "COP29", "doc": "events/cop29", "label": "match", "domain": "events", "note": "audited 2026-08-11"}
+{"subject": "COP28", "doc": "events/cop29", "label": "mismatch", "domain": "events", "hard": true, "note": "confusable sibling"}
+{"subject": "2018 FIFA World Cup", "doc": "events/cop29", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Super Bowl LVIII", "doc": "events/cop29", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "2024 United States presidential election", "doc": "events/us-election-2024", "label": "match", "domain": "events", "note": "audited 2026-08-11"}
+{"subject": "2020 United States presidential election", "doc": "events/us-election-2024", "label": "mismatch", "domain": "events", "hard": true, "note": "confusable sibling"}
+{"subject": "2024 Summer Olympics", "doc": "events/us-election-2024", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Super Bowl LVIII", "doc": "events/us-election-2024", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "2020 United States presidential election", "doc": "events/us-election-2020", "label": "match", "domain": "events", "note": "audited 2026-08-11"}
+{"subject": "2024 United States presidential election", "doc": "events/us-election-2020", "label": "mismatch", "domain": "events", "hard": true, "note": "confusable sibling"}
+{"subject": "2020 Summer Olympics", "doc": "events/us-election-2020", "label": "mismatch", "domain": "events", "note": "sibling"}
+{"subject": "Super Bowl LVIII", "doc": "events/us-election-2020", "label": "mismatch", "domain": "events", "note": "sibling"}

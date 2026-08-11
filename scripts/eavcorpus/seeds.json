@@ -1,0 +1,110 @@
+[
+  {
+    "domain": "companies",
+    "entities": [
+      {"id": "apple-inc", "subject": "Apple Inc.", "aliases": ["AAPL", "Apple"], "url": "https://en.wikipedia.org/wiki/Apple_Inc."},
+      {"id": "samsung-electronics", "subject": "Samsung Electronics", "aliases": ["Samsung"], "url": "https://en.wikipedia.org/wiki/Samsung_Electronics"},
+      {"id": "microsoft", "subject": "Microsoft", "aliases": ["MSFT"], "url": "https://en.wikipedia.org/wiki/Microsoft"},
+      {"id": "micron", "subject": "Micron Technology", "aliases": ["Micron"], "url": "https://en.wikipedia.org/wiki/Micron_Technology"},
+      {"id": "intel", "subject": "Intel", "aliases": [], "url": "https://en.wikipedia.org/wiki/Intel"},
+      {"id": "nvidia", "subject": "Nvidia", "aliases": ["NVDA"], "url": "https://en.wikipedia.org/wiki/Nvidia"},
+      {"id": "amd", "subject": "Advanced Micro Devices", "aliases": ["AMD"], "url": "https://en.wikipedia.org/wiki/Advanced_Micro_Devices"},
+      {"id": "arm-holdings", "subject": "Arm Holdings", "aliases": ["Arm"], "url": "https://en.wikipedia.org/wiki/Arm_Holdings"},
+      {"id": "qualcomm", "subject": "Qualcomm", "aliases": [], "url": "https://en.wikipedia.org/wiki/Qualcomm"},
+      {"id": "broadcom", "subject": "Broadcom", "aliases": [], "url": "https://en.wikipedia.org/wiki/Broadcom"},
+      {"id": "applied-materials", "subject": "Applied Materials", "aliases": [], "url": "https://en.wikipedia.org/wiki/Applied_Materials"},
+      {"id": "texas-instruments", "subject": "Texas Instruments", "aliases": ["TI"], "url": "https://en.wikipedia.org/wiki/Texas_Instruments"}
+    ]
+  },
+  {
+    "domain": "drugs",
+    "entities": [
+      {"id": "atorvastatin", "subject": "Atorvastatin", "aliases": ["Lipitor"], "url": "https://en.wikipedia.org/wiki/Atorvastatin"},
+      {"id": "simvastatin", "subject": "Simvastatin", "aliases": ["Zocor"], "url": "https://en.wikipedia.org/wiki/Simvastatin"},
+      {"id": "rosuvastatin", "subject": "Rosuvastatin", "aliases": ["Crestor"], "url": "https://en.wikipedia.org/wiki/Rosuvastatin"},
+      {"id": "pravastatin", "subject": "Pravastatin", "aliases": ["Pravachol"], "url": "https://en.wikipedia.org/wiki/Pravastatin"},
+      {"id": "metformin", "subject": "Metformin", "aliases": ["Glucophage"], "url": "https://en.wikipedia.org/wiki/Metformin"},
+      {"id": "lisinopril", "subject": "Lisinopril", "aliases": [], "url": "https://en.wikipedia.org/wiki/Lisinopril"},
+      {"id": "enalapril", "subject": "Enalapril", "aliases": ["Vasotec"], "url": "https://en.wikipedia.org/wiki/Enalapril"},
+      {"id": "losartan", "subject": "Losartan", "aliases": ["Cozaar"], "url": "https://en.wikipedia.org/wiki/Losartan"},
+      {"id": "valsartan", "subject": "Valsartan", "aliases": ["Diovan"], "url": "https://en.wikipedia.org/wiki/Valsartan"},
+      {"id": "omeprazole", "subject": "Omeprazole", "aliases": ["Prilosec"], "url": "https://en.wikipedia.org/wiki/Omeprazole"},
+      {"id": "esomeprazole", "subject": "Esomeprazole", "aliases": ["Nexium"], "url": "https://en.wikipedia.org/wiki/Esomeprazole"},
+      {"id": "ibuprofen", "subject": "Ibuprofen", "aliases": ["Advil"], "url": "https://en.wikipedia.org/wiki/Ibuprofen"},
+      {"id": "naproxen", "subject": "Naproxen", "aliases": ["Aleve"], "url": "https://en.wikipedia.org/wiki/Naproxen"}
+    ]
+  },
+  {
+    "domain": "products",
+    "entities": [
+      {"id": "iphone-15", "subject": "iPhone 15", "aliases": [], "url": "https://en.wikipedia.org/wiki/IPhone_15"},
+      {"id": "iphone-15-pro", "subject": "iPhone 15 Pro", "aliases": [], "url": "https://en.wikipedia.org/wiki/IPhone_15_Pro"},
+      {"id": "iphone-16", "subject": "iPhone 16", "aliases": [], "url": "https://en.wikipedia.org/wiki/IPhone_16"},
+      {"id": "iphone-16-pro", "subject": "iPhone 16 Pro", "aliases": [], "url": "https://en.wikipedia.org/wiki/IPhone_16_Pro"},
+      {"id": "galaxy-s24", "subject": "Samsung Galaxy S24", "aliases": [], "url": "https://en.wikipedia.org/wiki/Samsung_Galaxy_S24"},
+      {"id": "galaxy-s23", "subject": "Samsung Galaxy S23", "aliases": [], "url": "https://en.wikipedia.org/wiki/Samsung_Galaxy_S23"},
+      {"id": "pixel-8", "subject": "Pixel 8", "aliases": [], "url": "https://en.wikipedia.org/wiki/Pixel_8"},
+      {"id": "pixel-9", "subject": "Pixel 9", "aliases": [], "url": "https://en.wikipedia.org/wiki/Pixel_9"},
+      {"id": "playstation-5", "subject": "PlayStation 5", "aliases": ["PS5"], "url": "https://en.wikipedia.org/wiki/PlayStation_5"},
+      {"id": "nintendo-switch", "subject": "Nintendo Switch", "aliases": [], "url": "https://en.wikipedia.org/wiki/Nintendo_Switch"},
+      {"id": "nintendo-switch-2", "subject": "Nintendo Switch 2", "aliases": [], "url": "https://en.wikipedia.org/wiki/Nintendo_Switch_2"},
+      {"id": "macbook-air", "subject": "MacBook Air", "aliases": [], "url": "https://en.wikipedia.org/wiki/MacBook_Air"},
+      {"id": "macbook-pro", "subject": "MacBook Pro", "aliases": [], "url": "https://en.wikipedia.org/wiki/MacBook_Pro"}
+    ]
+  },
+  {
+    "domain": "people",
+    "entities": [
+      {"id": "michael-jordan", "subject": "Michael Jordan", "aliases": ["MJ"], "url": "https://en.wikipedia.org/wiki/Michael_Jordan"},
+      {"id": "michael-b-jordan", "subject": "Michael B. Jordan", "aliases": [], "url": "https://en.wikipedia.org/wiki/Michael_B._Jordan"},
+      {"id": "steve-jobs", "subject": "Steve Jobs", "aliases": [], "url": "https://en.wikipedia.org/wiki/Steve_Jobs"},
+      {"id": "steve-wozniak", "subject": "Steve Wozniak", "aliases": ["Woz"], "url": "https://en.wikipedia.org/wiki/Steve_Wozniak"},
+      {"id": "elon-musk", "subject": "Elon Musk", "aliases": [], "url": "https://en.wikipedia.org/wiki/Elon_Musk"},
+      {"id": "kimbal-musk", "subject": "Kimbal Musk", "aliases": [], "url": "https://en.wikipedia.org/wiki/Kimbal_Musk"},
+      {"id": "serena-williams", "subject": "Serena Williams", "aliases": [], "url": "https://en.wikipedia.org/wiki/Serena_Williams"},
+      {"id": "venus-williams", "subject": "Venus Williams", "aliases": [], "url": "https://en.wikipedia.org/wiki/Venus_Williams"},
+      {"id": "larry-page", "subject": "Larry Page", "aliases": [], "url": "https://en.wikipedia.org/wiki/Larry_Page"},
+      {"id": "larry-ellison", "subject": "Larry Ellison", "aliases": [], "url": "https://en.wikipedia.org/wiki/Larry_Ellison"},
+      {"id": "barack-obama", "subject": "Barack Obama", "aliases": [], "url": "https://en.wikipedia.org/wiki/Barack_Obama"},
+      {"id": "michelle-obama", "subject": "Michelle Obama", "aliases": [], "url": "https://en.wikipedia.org/wiki/Michelle_Obama"},
+      {"id": "tim-cook", "subject": "Tim Cook", "aliases": ["Timothy Donald Cook"], "url": "https://en.wikipedia.org/wiki/Tim_Cook"}
+    ]
+  },
+  {
+    "domain": "places",
+    "entities": [
+      {"id": "georgia-state", "subject": "Georgia", "aliases": [], "url": "https://en.wikipedia.org/wiki/Georgia_(U.S._state)"},
+      {"id": "georgia-country", "subject": "Georgia", "aliases": [], "url": "https://en.wikipedia.org/wiki/Georgia_(country)"},
+      {"id": "paris", "subject": "Paris", "aliases": [], "url": "https://en.wikipedia.org/wiki/Paris"},
+      {"id": "paris-texas", "subject": "Paris, Texas", "aliases": [], "url": "https://en.wikipedia.org/wiki/Paris,_Texas"},
+      {"id": "washington-state", "subject": "Washington", "aliases": [], "url": "https://en.wikipedia.org/wiki/Washington_(state)"},
+      {"id": "washington-dc", "subject": "Washington, D.C.", "aliases": ["District of Columbia"], "url": "https://en.wikipedia.org/wiki/Washington,_D.C."},
+      {"id": "niger", "subject": "Niger", "aliases": [], "url": "https://en.wikipedia.org/wiki/Niger"},
+      {"id": "nigeria", "subject": "Nigeria", "aliases": [], "url": "https://en.wikipedia.org/wiki/Nigeria"},
+      {"id": "austria", "subject": "Austria", "aliases": [], "url": "https://en.wikipedia.org/wiki/Austria"},
+      {"id": "australia", "subject": "Australia", "aliases": [], "url": "https://en.wikipedia.org/wiki/Australia"},
+      {"id": "slovakia", "subject": "Slovakia", "aliases": [], "url": "https://en.wikipedia.org/wiki/Slovakia"},
+      {"id": "slovenia", "subject": "Slovenia", "aliases": [], "url": "https://en.wikipedia.org/wiki/Slovenia"},
+      {"id": "hubei", "subject": "湖北省", "aliases": ["鄂", "湖北"], "url": "https://zh.wikipedia.org/wiki/湖北省"},
+      {"id": "hunan", "subject": "湖南省", "aliases": ["湘", "湖南"], "url": "https://zh.wikipedia.org/wiki/湖南省"}
+    ]
+  },
+  {
+    "domain": "events",
+    "entities": [
+      {"id": "olympics-2024", "subject": "2024 Summer Olympics", "aliases": ["Paris 2024"], "url": "https://en.wikipedia.org/wiki/2024_Summer_Olympics"},
+      {"id": "olympics-2020", "subject": "2020 Summer Olympics", "aliases": ["Tokyo 2020"], "url": "https://en.wikipedia.org/wiki/2020_Summer_Olympics"},
+      {"id": "olympics-2022-winter", "subject": "2022 Winter Olympics", "aliases": ["Beijing 2022"], "url": "https://en.wikipedia.org/wiki/2022_Winter_Olympics"},
+      {"id": "world-cup-2018", "subject": "2018 FIFA World Cup", "aliases": [], "url": "https://en.wikipedia.org/wiki/2018_FIFA_World_Cup"},
+      {"id": "world-cup-2022", "subject": "2022 FIFA World Cup", "aliases": [], "url": "https://en.wikipedia.org/wiki/2022_FIFA_World_Cup"},
+      {"id": "super-bowl-lviii", "subject": "Super Bowl LVIII", "aliases": [], "url": "https://en.wikipedia.org/wiki/Super_Bowl_LVIII"},
+      {"id": "super-bowl-lvii", "subject": "Super Bowl LVII", "aliases": [], "url": "https://en.wikipedia.org/wiki/Super_Bowl_LVII"},
+      {"id": "eurovision-2024", "subject": "Eurovision Song Contest 2024", "aliases": [], "url": "https://en.wikipedia.org/wiki/Eurovision_Song_Contest_2024"},
+      {"id": "eurovision-2023", "subject": "Eurovision Song Contest 2023", "aliases": [], "url": "https://en.wikipedia.org/wiki/Eurovision_Song_Contest_2023"},
+      {"id": "cop28", "subject": "COP28", "aliases": [], "url": "https://en.wikipedia.org/wiki/2023_United_Nations_Climate_Change_Conference"},
+      {"id": "cop29", "subject": "COP29", "aliases": [], "url": "https://en.wikipedia.org/wiki/2024_United_Nations_Climate_Change_Conference"},
+      {"id": "us-election-2024", "subject": "2024 United States presidential election", "aliases": [], "url": "https://en.wikipedia.org/wiki/2024_United_States_presidential_election"},
+      {"id": "us-election-2020", "subject": "2020 United States presidential election", "aliases": [], "url": "https://en.wikipedia.org/wiki/2020_United_States_presidential_election"}
+    ]
+  }
+]
