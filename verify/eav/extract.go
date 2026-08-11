@@ -238,7 +238,7 @@ Rules:
 - Choose the primary entity name from the CANDIDATES list. Never output a name that does not appear in the document.
 - kind is one of: organization, person, product, place, event, work, substance, other.
 - aliases are other surface forms THIS document uses for the same entity (ticker symbol, abbreviation, former name, translation). Copy them exactly from the document; do not invent aliases.
-- quote is the shortest verbatim excerpt from the document that proves the primary choice. Copy it exactly.
+- quote is the shortest excerpt that proves the primary choice and MUST be one contiguous substring copied character-for-character from CONTENT. Before replying, verify it can be found unchanged in CONTENT. Copy it exactly, including footnote markers, pronunciation guides, and unusual spacing; never clean it up. Do not alter punctuation or capitalization, paraphrase, normalize, or substitute any text.
 - If no single entity dominates the document (list pages, comparisons, forums, category hubs), set primary to null and explain briefly in reason_if_none.
 Reply only with JSON matching the provided schema.`
 

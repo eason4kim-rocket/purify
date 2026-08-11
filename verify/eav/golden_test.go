@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -411,4 +412,44 @@ func TestGoldenAttributionDeterministicFloor(t *testing.T) {
 		t.Errorf("clean false-positive rate %.3f must stay below 0.02", rate)
 	}
 	t.Logf("deterministic-only recall %.3f (not gated; the referee closes this gap)", overall.recall())
+}
+
+func TestGoldenExtractionQuotesPreserveVerbatimDetails(t *testing.T) {
+	corpus := loadGoldenCorpus(t)
+	docIDs := make([]string, 0, len(corpus.docs))
+	for docID := range corpus.docs {
+		docIDs = append(docIDs, docID)
+	}
+	for _, docID := range sortedStrings(docIDs) {
+		t.Run(docID, func(t *testing.T) {
+			fixture := corpus.docs[docID]
+			raw := corpus.extractByURL[fixture.URL]
+			extracted, err := DecodeExtractionReply(raw)
+			if err != nil {
+				t.Fatalf("decode recorded extraction: %v", err)
+			}
+			if extracted.Primary == nil {
+				t.Fatal("entity-page recording has no primary entity")
+			}
+			if extracted.Primary.Quote == "" {
+				t.Fatal("recorded primary entity has no evidence quote")
+			}
+			if !strings.Contains(fixture.Cleaned, extracted.Primary.Quote) {
+				t.Fatalf("recorded quote was cleaned instead of copied verbatim: %q", extracted.Primary.Quote)
+			}
+
+			doc := Document{URL: fixture.URL, Title: fixture.Title, Cleaned: fixture.Cleaned}
+			gated, err := AnchoredExtraction(
+				context.Background(),
+				EntityExtractorFunc(func(context.Context, Document, []Candidate) (DocumentEntities, error) {
+					return extracted, nil
+				}),
+				doc,
+				HarvestCandidates(doc),
+			)
+			if err != nil || gated.Primary == nil {
+				t.Fatalf("verbatim recording did not survive anchoring: primary=%#v error=%v", gated.Primary, err)
+			}
+		})
+	}
 }

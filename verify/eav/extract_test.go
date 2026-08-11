@@ -396,6 +396,19 @@ func TestExtractionReplySchemaMatchesContract(t *testing.T) {
 	}
 }
 
+func TestExtractionSystemPromptRequiresVerbatimPreservation(t *testing.T) {
+	for _, want := range []string{
+		"quote is the shortest excerpt that proves the primary choice and MUST be one contiguous substring copied character-for-character from CONTENT.",
+		"Before replying, verify it can be found unchanged in CONTENT.",
+		"Copy it exactly, including footnote markers, pronunciation guides, and unusual spacing; never clean it up.",
+		"Do not alter punctuation or capitalization, paraphrase, normalize, or substitute any text.",
+	} {
+		if !strings.Contains(ExtractionSystemPrompt, want) {
+			t.Fatalf("extraction prompt is missing verbatim-preservation rule %q", want)
+		}
+	}
+}
+
 func TestBuildExtractionInput(t *testing.T) {
 	doc, slate := extractionTestDocument()
 	first := BuildExtractionInput(doc, slate)
