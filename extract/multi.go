@@ -492,11 +492,12 @@ func (s *Service) extractMultiSource(
 	basis := cloneConsensusBasis(*response.Basis)
 	receiptTokens := cloneConsensusReceipts(*response.Receipts)
 	candidate := consensus.SourceResult{
-		URL:      finalURL,
-		Data:     append(json.RawMessage(nil), response.Data...),
-		Basis:    basis,
-		Receipts: receiptTokens,
-		SimText:  simhash.Fingerprint(artifact.Public.Content),
+		URL:         finalURL,
+		Data:        append(json.RawMessage(nil), response.Data...),
+		Basis:       basis,
+		Receipts:    receiptTokens,
+		SimText:     simhash.Fingerprint(artifact.Public.Content),
+		CleanedText: artifact.Public.Content,
 	}
 	if _, err := consensus.Merge([]consensus.SourceResult{candidate}); err != nil {
 		outcome.summary.Success = false

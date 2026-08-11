@@ -209,6 +209,59 @@ func TestMergeWithMaterializationUsesIndependentRootsBeforePages(t *testing.T) {
 	}
 }
 
+func TestMergeWithMaterializationSharesAnchoredCoreComponentsWithFields(t *testing.T) {
+	body := numberedWords("wire", 180) + " Ada " + numberedWords("report", 180)
+	firstMirror := anchoredCleanedSource(
+		"https://alpha.com/report",
+		numberedWords("alpha-nav", 700)+body+numberedWords("alpha-footer", 700),
+		"Ada",
+	)
+	firstMirror.Data = json.RawMessage(`{"name":"Ada","shape":{"value":1}}`)
+	secondMirror := anchoredCleanedSource(
+		"https://bravo.net/report",
+		numberedWords("bravo-nav", 700)+body+numberedWords("bravo-footer", 700),
+		"Ada",
+	)
+	secondMirror.Data = json.RawMessage(`{"name":"Ada","shape":{"value":1}}`)
+	thirdMirror := anchoredCleanedSource(
+		"https://delta.io/report",
+		numberedWords("delta-nav", 700)+body+numberedWords("delta-footer", 700),
+		"Ada",
+	)
+	thirdMirror.Data = json.RawMessage(`{"name":"Ada","shape":{"value":1}}`)
+	firstIndependent := anchoredCleanedSource(
+		"https://charlie.org/report",
+		numberedWords("canyon", 180)+" Bob "+numberedWords("silver", 180),
+		"Bob",
+	)
+	firstIndependent.Data = json.RawMessage(`{"name":"Bob","shape":"different"}`)
+	secondIndependent := anchoredCleanedSource(
+		"https://echo.dev/report",
+		numberedWords("tundra", 180)+" Bob "+numberedWords("quartz", 180),
+		"Bob",
+	)
+	secondIndependent.Data = json.RawMessage(`{"name":"Bob","shape":"different"}`)
+
+	result, materialization, err := MergeWithMaterialization([]SourceResult{
+		firstMirror,
+		secondMirror,
+		thirdMirror,
+		firstIndependent,
+		secondIndependent,
+	})
+	if err != nil {
+		t.Fatalf("MergeWithMaterialization() error = %v", err)
+	}
+	if string(result.Fields["name"].Value) != `"Bob"` ||
+		result.Fields["name"].Agreement != (Agreement{Pages: 2, IndependentRoots: 2}) {
+		t.Fatalf("field vote did not use anchored component: %#v", result.Fields["name"])
+	}
+	if materialization.Status != MaterializationStatusComplete ||
+		string(materialization.Data) != `{"name":"Bob","shape":"different"}` {
+		t.Fatalf("materialization did not use the same anchored component: %#v", materialization)
+	}
+}
+
 func TestMergeWithMaterializationPresenceOnlyPollsParentObjects(t *testing.T) {
 	inputs := []SourceResult{
 		testSource("https://alpha.com/a", `{"parent":{"base":1,"optional":2}}`, 0),

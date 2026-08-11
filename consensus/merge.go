@@ -30,6 +30,9 @@ const (
 	MaxURLBytes = 16 << 10
 	// MaxSourceDataBytes matches the extraction output bound.
 	MaxSourceDataBytes = 4 << 20
+	// MaxCleanedTextBytes bounds optional non-wire content used to derive
+	// anchored independence signals.
+	MaxCleanedTextBytes = 4 << 20
 	// MaxTotalDataBytes is the aggregate JSON budget across all sources.
 	MaxTotalDataBytes = 32 << 20
 	// MaxOutputBytes bounds the complete JSON encoding of Result. Merge
@@ -73,12 +76,15 @@ var (
 // SourceResult is one successful extraction. URL must be the final response
 // URL. Root is deliberately not accepted from callers: Merge derives it from
 // the canonical URL. Basis and Receipts use evidence.LeafValues paths.
+// CleanedText is optional non-wire input, borrowed read-only for the duration
+// of Merge, and is never retained in Result.
 type SourceResult struct {
-	URL      string
-	Data     json.RawMessage
-	Basis    map[string]evidence.Anchor
-	Receipts map[string]string
-	SimText  uint64
+	URL         string
+	Data        json.RawMessage
+	Basis       map[string]evidence.Anchor
+	Receipts    map[string]string
+	SimText     uint64
+	CleanedText string `json:"-"`
 }
 
 // Result contains deterministic field consensus keyed by evidence leaf path.
@@ -132,6 +138,8 @@ type preparedSource struct {
 	paths     map[string]string
 	basis     map[string]evidence.Anchor
 	receipts  map[string]string
+	cleaned   string
+	core      coreDescriptor
 }
 
 type scalarKind uint8
@@ -159,9 +167,10 @@ type exactNumber struct {
 }
 
 // Merge performs field-level consensus over one to eight successful source
-// results. It is pure: inputs are copied, and output ordering is independent
-// of input order. It shares the MergeWithMaterialization implementation while
-// preserving the original field-only 32 MiB output contract.
+// results. It is pure: caller-owned mutable inputs are copied, CleanedText is
+// only read during the call, and output ordering is independent of input order.
+// It shares the MergeWithMaterialization implementation while preserving the
+// original field-only 32 MiB output contract.
 func Merge(results []SourceResult) (Result, error) {
 	result, _, err := merge(results, false)
 	return result, err
@@ -255,6 +264,12 @@ func prepareSource(index int, result SourceResult) (preparedSource, int, int, er
 	if !utf8.ValidString(result.URL) {
 		return preparedSource{}, 0, 0, fmt.Errorf("%w: source %d URL is not valid UTF-8", ErrInvalidInput, index)
 	}
+	if len(result.CleanedText) > MaxCleanedTextBytes {
+		return preparedSource{}, 0, 0, fmt.Errorf("%w: source %d cleaned text exceeds %d bytes", ErrResourceLimit, index, MaxCleanedTextBytes)
+	}
+	if !utf8.ValidString(result.CleanedText) {
+		return preparedSource{}, 0, 0, fmt.Errorf("%w: source %d cleaned text is not valid UTF-8", ErrInvalidInput, index)
+	}
 	canonicalURL, parsedURL, err := publicnet.NormalizeHTTPURL(result.URL, nil, false)
 	if err != nil {
 		return preparedSource{}, 0, 0, fmt.Errorf("%w: source %d URL is invalid: %v", ErrInvalidInput, index, err)
@@ -320,6 +335,10 @@ func prepareSource(index int, result SourceResult) (preparedSource, int, int, er
 	if err != nil {
 		return preparedSource{}, 0, 0, err
 	}
+	core, err := buildContentCore(result.CleanedText, basis)
+	if err != nil {
+		return preparedSource{}, 0, 0, fmt.Errorf("source %d content core: %w", index, err)
+	}
 	receipts, receiptBytes, err := prepareReceipts(index, result.Receipts, fields)
 	if err != nil {
 		return preparedSource{}, 0, 0, err
@@ -342,6 +361,8 @@ func prepareSource(index int, result SourceResult) (preparedSource, int, int, er
 		paths:     structuralPaths,
 		basis:     basis,
 		receipts:  receipts,
+		cleaned:   result.CleanedText,
+		core:      core,
 	}, len(result.Data), metadataBytes, nil
 }
 
@@ -871,7 +892,7 @@ func appendLengthPrefixed(output []byte, value string) []byte {
 }
 
 func sourcesEqual(first, second preparedSource) bool {
-	if first.simText != second.simText || !bytes.Equal(first.signature, second.signature) ||
+	if first.simText != second.simText || first.cleaned != second.cleaned || !bytes.Equal(first.signature, second.signature) ||
 		len(first.basis) != len(second.basis) || len(first.receipts) != len(second.receipts) {
 		return false
 	}
@@ -931,7 +952,7 @@ func independentComponents(sources []preparedSource) []int {
 			sameRoot := sources[first].root == sources[second].root
 			similar := sources[first].simText != 0 && sources[second].simText != 0 &&
 				simhash.Distance(sources[first].simText, sources[second].simText) <= independenceDistance
-			if sameRoot || similar {
+			if sameRoot || similar || contentCoresSimilar(sources[first].core, sources[second].core) {
 				set.union(first, second)
 			}
 		}

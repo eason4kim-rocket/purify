@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/use-agent/purify/evidence"
+	"github.com/use-agent/purify/simhash"
 )
 
 func TestMergeAllConsistentUsesIndependentRoots(t *testing.T) {
@@ -55,6 +57,107 @@ func TestMergeCollapsesSameRootAndTransitiveMirrors(t *testing.T) {
 	field := result.Fields["claim"]
 	if field.Agreement != (Agreement{Pages: 4, IndependentRoots: 1}) {
 		t.Fatalf("agreement = %#v, want four pages collapsed through same-root + transitive similarity", field.Agreement)
+	}
+}
+
+func TestMergeCollapsesAnchoredContentCoresAcrossDifferentChrome(t *testing.T) {
+	body := numberedWords("wire", 180) + " Ada " + numberedWords("report", 180)
+	first := anchoredCleanedSource(
+		"https://alpha.com/report",
+		numberedWords("alpha-nav", 700)+body+numberedWords("alpha-footer", 700),
+		"Ada",
+	)
+	second := anchoredCleanedSource(
+		"https://bravo.net/report",
+		numberedWords("bravo-nav", 700)+body+numberedWords("bravo-footer", 700),
+		"Ada",
+	)
+	if distance := simhash.Distance(first.SimText, second.SimText); distance <= independenceDistance {
+		t.Fatalf("fixture legacy distance = %d, want > %d", distance, independenceDistance)
+	}
+
+	forward, err := Merge([]SourceResult{first, second})
+	if err != nil {
+		t.Fatalf("Merge() error = %v", err)
+	}
+	reverse, err := Merge([]SourceResult{second, first})
+	if err != nil {
+		t.Fatalf("reverse Merge() error = %v", err)
+	}
+	if forward.Fields["name"].Agreement != (Agreement{Pages: 2, IndependentRoots: 1}) {
+		t.Fatalf("agreement = %#v, want anchored mirror collapse", forward.Fields["name"].Agreement)
+	}
+	forwardJSON, _ := json.Marshal(forward)
+	reverseJSON, _ := json.Marshal(reverse)
+	if !bytes.Equal(forwardJSON, reverseJSON) {
+		t.Fatalf("permutation changed output:\nforward=%s\nreverse=%s", forwardJSON, reverseJSON)
+	}
+}
+
+func TestMergeCollapsesChineseAnchoredContentCoresAcrossDifferentChrome(t *testing.T) {
+	body := hanSequence(0, 220) + "阿达" + hanSequence(500, 220)
+	first := anchoredCleanedSource(
+		"https://alpha.com/report",
+		numberedWords("alpha-nav", 700)+body+numberedWords("alpha-footer", 700),
+		"阿达",
+	)
+	second := anchoredCleanedSource(
+		"https://bravo.net/report",
+		numberedWords("bravo-nav", 700)+body+numberedWords("bravo-footer", 700),
+		"阿达",
+	)
+	if distance := simhash.Distance(first.SimText, second.SimText); distance <= independenceDistance {
+		t.Fatalf("fixture legacy distance = %d, want > %d", distance, independenceDistance)
+	}
+
+	result, err := Merge([]SourceResult{first, second})
+	if err != nil {
+		t.Fatalf("Merge() error = %v", err)
+	}
+	if result.Fields["name"].Agreement != (Agreement{Pages: 2, IndependentRoots: 1}) {
+		t.Fatalf("agreement = %#v, want CJK rune-shingle mirror collapse", result.Fields["name"].Agreement)
+	}
+}
+
+func TestMergeDoesNotFoldIndependentAnchoredContextsWithSharedScalar(t *testing.T) {
+	first := anchoredCleanedSource(
+		"https://alpha.com/report",
+		numberedWords("orchard", 180)+" Ada "+numberedWords("copper", 180),
+		"Ada",
+	)
+	second := anchoredCleanedSource(
+		"https://bravo.net/report",
+		numberedWords("tundra", 180)+" Ada "+numberedWords("quartz", 180),
+		"Ada",
+	)
+	if distance := simhash.Distance(first.SimText, second.SimText); distance <= independenceDistance {
+		t.Fatalf("fixture legacy distance = %d, want > %d", distance, independenceDistance)
+	}
+
+	result, err := Merge([]SourceResult{first, second})
+	if err != nil {
+		t.Fatalf("Merge() error = %v", err)
+	}
+	if result.Fields["name"].Agreement != (Agreement{Pages: 2, IndependentRoots: 2}) {
+		t.Fatalf("agreement = %#v, shared scalar/short quote caused false fold", result.Fields["name"].Agreement)
+	}
+}
+
+func TestContentCoresSimilarUsesExplicitValidityDistanceAndUnsaturatedLength(t *testing.T) {
+	base := coreDescriptor{fingerprint: 0, retainedShingles: 4_096, normalizedAlnumRunes: 100, valid: true}
+	if !contentCoresSimilar(base, coreDescriptor{fingerprint: 0b111, retainedShingles: 4_096, normalizedAlnumRunes: 142, valid: true}) {
+		t.Fatal("valid zero fingerprint at distance 3 and 70% length boundary did not match")
+	}
+	if contentCoresSimilar(base, coreDescriptor{fingerprint: 0b1111, retainedShingles: 24, normalizedAlnumRunes: 100, valid: true}) {
+		t.Fatal("distance 4 matched")
+	}
+	if contentCoresSimilar(base, coreDescriptor{fingerprint: 0b111, retainedShingles: 4_096, normalizedAlnumRunes: 143, valid: true}) {
+		t.Fatal("retained-count saturation bypassed the normalized length ratio")
+	}
+	invalid := base
+	invalid.valid = false
+	if contentCoresSimilar(base, invalid) {
+		t.Fatal("invalid core matched")
 	}
 }
 
@@ -331,6 +434,12 @@ func TestMergeDuplicateCanonicalURL(t *testing.T) {
 	if _, err := Merge([]SourceResult{first, second}); !errors.Is(err, ErrDuplicateSourceConflict) {
 		t.Fatalf("conflicting simhash error = %v, want ErrDuplicateSourceConflict", err)
 	}
+	second.SimText = first.SimText
+	first.CleanedText = "first cleaned snapshot"
+	second.CleanedText = "second cleaned snapshot"
+	if _, err := Merge([]SourceResult{first, second}); !errors.Is(err, ErrDuplicateSourceConflict) {
+		t.Fatalf("conflicting cleaned text error = %v, want ErrDuplicateSourceConflict", err)
+	}
 }
 
 func TestMergeRejectsCrossSourcePathStructuralAmbiguity(t *testing.T) {
@@ -490,6 +599,7 @@ func TestMergeRejectsInvalidAndOversizedInputs(t *testing.T) {
 
 	invalidUTF8 := append(json.RawMessage(`{"x":"`), 0xff)
 	invalidUTF8 = append(invalidUTF8, []byte(`"}`)...)
+	invalidCleanedUTF8 := string([]byte{'o', 'k', 0xff})
 	deep := strings.Repeat(`[`, MaxJSONDepth+1) + `0` + strings.Repeat(`]`, MaxJSONDepth+1)
 	tooManyLeaves := `[` + strings.Repeat(`0,`, MaxLeavesPerSource) + `0]`
 	tooManyNodes := `[` + strings.Repeat(`{},`, MaxJSONNodesPerSource) + `{}]`
@@ -507,6 +617,10 @@ func TestMergeRejectsInvalidAndOversizedInputs(t *testing.T) {
 		{name: "trailing", in: []SourceResult{testSource("https://alpha.com/a", `{} {}`, 0)}, want: ErrInvalidInput},
 		{name: "duplicate key", in: []SourceResult{testSource("https://alpha.com/a", `{"x":1,"x":1}`, 0)}, want: ErrInvalidInput},
 		{name: "invalid UTF-8", in: []SourceResult{{URL: valid.URL, Data: invalidUTF8}}, want: ErrInvalidInput},
+		{name: "invalid cleaned UTF-8", in: []SourceResult{{URL: valid.URL, Data: valid.Data, CleanedText: invalidCleanedUTF8}}, want: ErrInvalidInput},
+		{name: "oversized cleaned text", in: []SourceResult{{URL: valid.URL, Data: valid.Data, CleanedText: strings.Repeat("x", MaxCleanedTextBytes+1)}}, want: ErrResourceLimit},
+		{name: "cleaned quote mismatch", in: []SourceResult{{URL: valid.URL, Data: valid.Data, CleanedText: "one", Basis: map[string]evidence.Anchor{"x": {Quote: "two", Method: evidence.MethodExact, TextRange: [2]int{0, 3}}}}}, want: ErrInvalidInput},
+		{name: "cleaned range out of bounds", in: []SourceResult{{URL: valid.URL, Data: valid.Data, CleanedText: "one", Basis: map[string]evidence.Anchor{"x": {Quote: "one", Method: evidence.MethodExact, TextRange: [2]int{0, 4}}}}}, want: ErrInvalidInput},
 		{name: "oversized data", in: []SourceResult{testSource("https://alpha.com/a", `"`+strings.Repeat("x", MaxSourceDataBytes)+`"`, 0)}, want: ErrResourceLimit},
 		{name: "depth", in: []SourceResult{testSource("https://alpha.com/a", deep, 0)}, want: ErrResourceLimit},
 		{name: "leaves", in: []SourceResult{testSource("https://alpha.com/a", tooManyLeaves, 0)}, want: ErrResourceLimit},
@@ -528,6 +642,76 @@ func TestMergeRejectsInvalidAndOversizedInputs(t *testing.T) {
 				t.Fatalf("Merge() error = %v, want %v", err, test.want)
 			}
 		})
+	}
+}
+
+func TestMergeMissingCoreSignalPreservesV0AndNeverUsesPageHead(t *testing.T) {
+	unlocated := func(url, cleaned string, simText uint64) SourceResult {
+		return SourceResult{
+			URL:         url,
+			Data:        json.RawMessage(`{"x":1}`),
+			SimText:     simText,
+			CleanedText: cleaned,
+			Basis: map[string]evidence.Anchor{"x": {
+				Method:    evidence.MethodUnlocated,
+				TextRange: [2]int{},
+			}},
+		}
+	}
+
+	t.Run("zero eligible anchors do not fingerprint shared page head", func(t *testing.T) {
+		sharedHead := numberedWords("shared-head", 180)
+		result, err := Merge([]SourceResult{
+			unlocated("https://alpha.com/a", sharedHead+numberedWords("alpha-tail", 180), 0),
+			unlocated("https://bravo.net/b", sharedHead+numberedWords("bravo-tail", 180), 0),
+		})
+		if err != nil {
+			t.Fatalf("Merge() error = %v", err)
+		}
+		if result.Fields["x"].Agreement != (Agreement{Pages: 2, IndependentRoots: 2}) {
+			t.Fatalf("agreement = %#v, ineligible anchors created a page-head core", result.Fields["x"].Agreement)
+		}
+	})
+
+	t.Run("zero eligible anchors retain same-root edge", func(t *testing.T) {
+		result, err := Merge([]SourceResult{
+			unlocated("https://one.alpha.com/a", "first page", 0),
+			unlocated("https://two.alpha.com/b", "second page", 0),
+		})
+		if err != nil {
+			t.Fatalf("Merge() error = %v", err)
+		}
+		if result.Fields["x"].Agreement != (Agreement{Pages: 2, IndependentRoots: 1}) {
+			t.Fatalf("agreement = %#v, same-root edge was lost", result.Fields["x"].Agreement)
+		}
+	})
+
+	t.Run("invalid short cores retain legacy simhash edge", func(t *testing.T) {
+		first := anchoredCleanedSource("https://alpha.com/a", "short one context", "one")
+		second := anchoredCleanedSource("https://bravo.net/b", "different one text", "one")
+		first.Data, second.Data = json.RawMessage(`{"name":"one"}`), json.RawMessage(`{"name":"one"}`)
+		first.SimText, second.SimText = 0x1234, 0x1234
+		result, err := Merge([]SourceResult{first, second})
+		if err != nil {
+			t.Fatalf("Merge() error = %v", err)
+		}
+		if result.Fields["name"].Agreement != (Agreement{Pages: 2, IndependentRoots: 1}) {
+			t.Fatalf("agreement = %#v, legacy edge was lost", result.Fields["name"].Agreement)
+		}
+	})
+}
+
+func TestSourceResultCleanedTextIsNonWire(t *testing.T) {
+	encoded, err := json.Marshal(SourceResult{
+		URL:         "https://alpha.com/a",
+		Data:        json.RawMessage(`{"x":1}`),
+		CleanedText: "private cleaned content",
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if bytes.Contains(encoded, []byte("CleanedText")) || bytes.Contains(encoded, []byte("private cleaned content")) {
+		t.Fatalf("CleanedText leaked onto wire: %s", encoded)
 	}
 }
 
@@ -555,6 +739,36 @@ func TestMergeCopiesCallerOwnedData(t *testing.T) {
 
 func testSource(url, data string, simText uint64) SourceResult {
 	return SourceResult{URL: url, Data: json.RawMessage(data), SimText: simText}
+}
+
+func anchoredCleanedSource(url, cleaned, quote string) SourceResult {
+	start := strings.Index(cleaned, quote)
+	if start < 0 {
+		panic("quote is absent from cleaned fixture")
+	}
+	return SourceResult{
+		URL:         url,
+		Data:        json.RawMessage(`{"name":"` + quote + `"}`),
+		Basis:       map[string]evidence.Anchor{"name": {Quote: quote, Method: evidence.MethodExact, TextRange: [2]int{start, start + len(quote)}}},
+		SimText:     simhash.Fingerprint(cleaned),
+		CleanedText: cleaned,
+	}
+}
+
+func numberedWords(prefix string, count int) string {
+	var builder strings.Builder
+	for index := range count {
+		fmt.Fprintf(&builder, "%s-%04d ", prefix, index)
+	}
+	return builder.String()
+}
+
+func hanSequence(offset, count int) string {
+	var builder strings.Builder
+	for index := range count {
+		builder.WriteRune(rune(0x4e00 + (offset+index)%2_000))
+	}
+	return builder.String()
 }
 
 func provenanceSource(url, data string, simText uint64, marker string, fetchedAt time.Time) SourceResult {

@@ -19,6 +19,7 @@ import (
 	"github.com/use-agent/purify/receipts"
 	"github.com/use-agent/purify/scrape"
 	"github.com/use-agent/purify/scraper"
+	"github.com/use-agent/purify/simhash"
 	"github.com/use-agent/purify/snapshot"
 )
 
@@ -117,6 +118,40 @@ func TestExtractMultiCanonicalDedupeCompleteConsensusAndWallTiming(t *testing.T)
 	}
 	if signer.calls() != 2 {
 		t.Fatalf("receipt calls = %d, want 2", signer.calls())
+	}
+}
+
+func TestExtractMultiInjectsCleanedTextForAnchoredCoreConsensus(t *testing.T) {
+	body := multiNumberedWords("wire", 180) + " Ada " + multiNumberedWords("report", 180)
+	firstContent := multiNumberedWords("alpha-nav", 700) + body + multiNumberedWords("alpha-footer", 700)
+	secondContent := multiNumberedWords("bravo-nav", 700) + body + multiNumberedWords("bravo-footer", 700)
+	if distance := simhash.Distance(simhash.Fingerprint(firstContent), simhash.Fingerprint(secondContent)); distance <= 3 {
+		t.Fatalf("fixture legacy distance = %d, want > 3", distance)
+	}
+	runner := &multiRunner{plans: map[string]multiRunnerPlan{
+		"https://a.example.com/": {content: firstContent},
+		"https://b.example.net/": {content: secondContent},
+	}}
+	extractor := &multiExtractor{plans: map[string]multiExtractorPlan{
+		firstContent:  {initial: json.RawMessage(`{"name":"Ada"}`)},
+		secondContent: {initial: json.RawMessage(`{"name":"Ada"}`)},
+	}}
+	service := newMultiTestService(t, runner, extractor, &multiSigner{}, Config{SafeProxyURL: "socks5://127.0.0.1:1080"})
+
+	response, err := service.ExtractMulti(context.Background(), multiRequest(
+		multiNameSchema(),
+		"https://a.example.com",
+		"https://b.example.net",
+	))
+	if err != nil {
+		t.Fatalf("ExtractMulti() error = %v", err)
+	}
+	if response.Consensus == nil {
+		t.Fatalf("response consensus is nil: %#v", response)
+	}
+	field := response.Consensus.Fields["name"]
+	if field.Agreement != (models.MultiExtractAgreement{Pages: 2, IndependentRoots: 1}) {
+		t.Fatalf("agreement = %#v, cleaned text was not used for core folding", field.Agreement)
 	}
 }
 
@@ -1426,6 +1461,17 @@ func exactSizedMultiResponse(t *testing.T, size int) *models.MultiExtractRespons
 	}
 	response.Error.Message = strings.Repeat("x", fillerBytes)
 	return response
+}
+
+func multiNumberedWords(prefix string, count int) string {
+	var builder strings.Builder
+	for index := range count {
+		builder.WriteString(prefix)
+		builder.WriteByte('-')
+		builder.WriteString(strconv.Itoa(index))
+		builder.WriteByte(' ')
+	}
+	return builder.String()
 }
 
 func nestedMultiJSON(depth int) json.RawMessage {
