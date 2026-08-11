@@ -1452,23 +1452,23 @@ E-6c feat(answer): withhold beliefs on entity mismatch        # 依赖 E-6b
 ## 16. 交接 · 2026-08-11 起 Codex 接续开发
 
 > **给 Codex 的单页入口。** 读完本节 + `AGENTS.md` 即可开工；战略问题回 `PLAN.md`（LOCKED，三层结构与非目标不许推翻）。
-> **状态快照**：waypoint `c7189c2`（分支 `codex/search-api-v1`）。Phase 0–8 代码全收口；EAV 已有真实成绩单（§15 状态行：P=1.000 / R=0.935 / FP=0 / hard R=0.975，341 行 gpt-oss:120b 真实录制）。全仓 `go test ./...` 绿。
+> **状态快照**：原交接 waypoint `c7189c2`（分支 `codex/search-api-v1`）；P1 N_eff v1 已于 2026-08-11 完成至 `94f9f88`。Phase 0–8 代码全收口；EAV 已有真实成绩单（§15 状态行：P=1.000 / R=0.935 / FP=0 / hard R=0.975，341 行 gpt-oss:120b 真实录制）。N_eff v1 收口时全仓 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...` 与 `git diff --check` 全绿。
 
 ### 16.1 优先队列
 
 **P1 · N_eff v1（PLAN.md §6 步 3，落 `consensus/`）** —— 出处血缘独立。**实况先于计划**：`consensus/merge.go` 的 v0 已比 PLAN.md §5.4 描述的强——`independentComponents`（merge.go:927）已用 union-find 按「同 eTLD+1 根域 ∪ 全页 SimText simhash 距离 ≤ `independenceDistance`(3)」折叠，跨域**完全**镜像已能折。v1 的真实增量按卡执行：
 
-- **N-1 · 实况盘点 + 设计定案** ✅（本提交）：已通读 `consensus/merge.go`/`materialize.go`、两组测试、`simhash/` 全家及生产接线；v0 边界与 N-2…N-5 实施细则见 §16.2–§16.3。⟳ 关键实况：`Anchor.Quote` 通常只是抽取标量，不是支撑句；内容核/措辞血缘必须从 cleaned content + 已验证 `TextRange` 重建有界邻域。
-- **N-2 · 内容核指纹**：在 v0 边的并集上新增「支撑字段锚点邻域」的规范化 shingle 指纹；不替换同根域/legacy 全页 SimText。验收：构造「同稿异站」集（同一正文 + 不同导航/页脚包装）精确折叠到 1；真异源不误折。
-- **N-3 · 措辞血缘**：相同 path/value 的锚点句段存在足够长逐字包含 ⇒ 视为转载衍生，入 union（对称折叠即可，方向性/发布时间先后留 v1.5）。不直接拿通常只有标量值的 `Anchor.Quote` 做 contains。
-- **N-4 · 折叠原因导出（additive）**：`Support`/`Agreement` 增加 omitempty 字段暴露折叠证据（`fold_reason: same_root | near_duplicate | quote_lineage`），供步 4 重排与 answer 置信度消费；公开契约只加不改。
-- **N-5 · 构造集评测门**：照 §15 E-5 模式建 `consensus/testdata/` 构造集——「一源 N 镜像」逐行 `N_eff==1`、「真 N 独立源」逐行 `N_eff==N`（PLAN.md §5.4 验收），门进 `go test`。
+- **N-1 · 实况盘点 + 设计定案** ✅（`97490db`）：已通读 `consensus/merge.go`/`materialize.go`、两组测试、`simhash/` 全家及生产接线；v0 边界与 N-2…N-5 实施细则见 §16.2–§16.3。⟳ 关键实况：`Anchor.Quote` 通常只是抽取标量，不是支撑句；内容核/措辞血缘必须从 cleaned content + 已验证 `TextRange` 重建有界邻域。
+- **N-2 · 内容核指纹** ✅（`9a3455e`）：在 v0 边的并集上新增「支撑字段锚点邻域」的规范化 shingle 指纹；不替换同根域/legacy 全页 SimText。en/zh 同稿异站真实经过 production fingerprint 折到 1，独立 hard negatives 不误折。
+- **N-3 · 措辞血缘** ✅（`c78010b`）：相同 path/value 的锚点句段存在足够长逐字包含 ⇒ 视为转载衍生，入 union；95/96/97 rune、CJK、传递链、超长 fragment 与 source-global materialization 均已锁门。
+- **N-4 · 折叠原因导出（additive）** ✅（`e17086c`）：`Support`/`Agreement` 增加 omitempty 字段暴露折叠证据（`fold_reason: same_root | near_duplicate | quote_lineage`）；deterministic forest、mixed witness、REST/MCP/Answer 投影与 32 MiB 预算均已锁门，公开契约只加不改。
+- **N-5 · 构造集评测门** ✅（`94f9f88`）：`consensus/testdata/neff/` 已有 33 个 source / 12 个 case，覆盖六类、en/zh、1+7 镜像、8 独立源、95-rune、lineage、mixed、compat 与 bridge；严格 loader、v0/v1 有界排列和 exact reason 门已并入普通 `go test`。
 
 **P2 · EAV 校准迭代（小卡）**：
 - **E-7 · 提示词逐字强化 + 重录对比**：§15 ①(a) 的发现——LLM 引用洗掉脚注/注音致 quote 非逐字、4/78 文档被锚定闸整体丢弃。强化 `ExtractionSystemPrompt` 的 verbatim 措辞（"including footnote markers, pronunciation guides, and unusual spacing; never clean it up"），按 `scripts/eavcorpus/main.go` 头注释重录（Mac Ollama 即可，零成本），对比两版成绩单后择优提交。改 prompt/`match.go` 阈值**必须过 golden 门**——这就是回归闸。
 - **E-8 · managed LLM 私网豁免配置**：新键 `PURIFY_EAV_LLM_ALLOW_PRIVATE`（默认 false），仅放行**运营者配置的** managed 端点走私网（自托管 vLLM/Ollama 场景）；BYOK 请求路径保持公网 only（SSRF 防线不动）。实现点：managed judge 的 HTTP client 构造处（`cmd/purify/eav.go` + main 注入的 policy client）。
 
-**P3 · 步 4 重排器 + 信任排序（等 N-4 落地后开卡）**：PLAN.md §4.3。先开设计卡再动工；EAV 侧接口已备好（`MultiExtractSource.Entity`），N_eff 侧等 `fold_reason`。
+**P3 · 步 4 重排器 + 信任排序（N-4 已解锁，待开卡）**：PLAN.md §4.3。先开设计卡再动工；EAV 侧接口 `MultiExtractSource.Entity` 与 N_eff 侧 `fold_reason` 均已备好。
 
 **P4 · 旧账（№ 不阻塞上面）**：§10 准确率 CI（golden 门已现成，接 CI 即可）；commons 冷启动 ≥30 垂类（要运行实例 + key）；P7 自适应租约。
 
@@ -1518,7 +1518,7 @@ E-6c feat(answer): withhold beliefs on entity mismatch        # 依赖 E-6b
 
 ### 16.3 N_eff v1 实施卡（N-2…N-5）
 
-#### 任务卡 N-2 · 支撑内容核指纹 ⬜
+#### 任务卡 N-2 · 支撑内容核指纹 ✅（`9a3455e`）
 
 **交付什么**：`SourceResult.CleanedText` 的有界 admission/只读借用/equality；固定锚点窗构造器；`simhash/` 新增将 shingle 作为原子的、返回显式 valid/count 的规范化指纹 pure helper；全局 component builder 在 v0 边并集上加入 core near-duplicate（N-4 才把其返回值扩成带 forest 的 `independencePlan`）。
 
@@ -1526,9 +1526,9 @@ E-6c feat(answer): withhold beliefs on entity mismatch        # 依赖 E-6b
 
 **验收**：同稿异站 N_eff 精确为 1，真异源零误折；旧 caller 不填 `CleanedText` 时现有测试与编码不变；`go test -race ./consensus ./simhash ./extract` 绿。
 
-**提交**：`feat(consensus): fingerprint anchored content cores`
+**提交**：`9a3455e feat(consensus): fingerprint anchored content cores`
 
-#### 任务卡 N-3 · 长措辞血缘 ⬜
+#### 任务卡 N-3 · 长措辞血缘 ✅（`c78010b`）
 
 **交付什么**：从 N-2 已 admission 的 cleaned text/TextRange 派生 line/sentence/paragraph fragments，按 same path + canonical value 做有界、逐字、对称 containment，给全局 component builder 加 `quote_lineage` 边；不引入时间方向、外部知识库或 LLM。
 
@@ -1536,9 +1536,9 @@ E-6c feat(answer): withhold beliefs on entity mismatch        # 依赖 E-6b
 
 **验收**：全页与 core distance 均 >3 时，长逐字转载仍折到 1；所有可判定 hard negatives 保持独立；超长 fragment 只禁用该候选，仍保留 same-root/legacy/N-2 边，且资源使用受 §16.2.2 的 anchor/window/fragment 上限约束。
 
-**提交**：`feat(consensus): fold verbatim quote lineage`
+**提交**：`c78010b feat(consensus): fold verbatim quote lineage`
 
-#### 任务卡 N-4 · 折叠原因 additive 导出 ⬜
+#### 任务卡 N-4 · 折叠原因 additive 导出 ✅（`e17086c`）
 
 **交付什么**：`consensus.FoldReason`、`Support.fold_reason,omitempty`、witness-subtree 条件式 `Agreement.fold_reason,omitempty`；同步 `models.MultiExtractSupport/Agreement`、extract 投影、consensus 手算预算、multi REST 编码预算与 MCP strict decoder，以及 Answer service/handler/MCP 的 Agreement enum/allowlist。N-4 不新增 Extract REST decoder、`AnswerEvidence` 或 Search 字段。
 
@@ -1546,9 +1546,9 @@ E-6c feat(answer): withhold beliefs on entity mismatch        # 依赖 E-6b
 
 **验收**：每个非空原因均可由内部 forest 证据重放；混合原因不伪造 Agreement 单值；N-4 本身只加 metadata，不改 N-2/N-3 已算出的 components、materialization 或 confidence 公式。⟳ MCP 已有的 EAV strict-validator 漂移（`entity_verdict`/`entity_mismatch`）须另作单关注修复，不能借 N-4 混提。
 
-**提交**：`feat(consensus): expose source fold reasons`
+**提交**：`e17086c feat(consensus): expose source fold reasons`
 
-#### 任务卡 N-5 · 构造集评测门 ⬜
+#### 任务卡 N-5 · 构造集评测门 ✅（`94f9f88`）
 
 **交付什么**：`consensus/testdata/neff/sources.jsonl` 行 schema 为 `{id,url,data,cleaned,basis}`，保存真实 cleaned + `Basis.{quote,text_range,method}`，不预存最终 hash；fixture method 必须是 §16.2.2 eligible enum，loader 必须始终用 production `simhash.Fingerprint(cleaned)` 派生 legacy `SimText`。`cases.jsonl` 严格行 schema 为 `{id,class,language,sources,use_cleaned_text,hard,note,expect[]}`，其中 `sources` 必须非空、ID 唯一，`expect` 必须非空；required bool `use_cleaned_text` 决定本次 Merge 是否注入 `CleanedText`（`compat` 必须为 false，其余 class 必须为 true）。`class ∈ {core_mirror,lineage,independent,mixed,compat,bridge}`，`language ∈ {en,zh,mixed}`，`hard=true` 表示阈值邻界/桥接/boilerplate 等对抗样本；`expect[] = {path,value,pages,independent_roots,want_v0_independent_roots?,support_reasons,agreement_reason}`。`value` 保留 JSON scalar 类型；`support_reasons` 是 required canonical URL→非空枚举的 exact map（代表/无 reason URL 不出现，完全无 reason 时为 `{}`）；`agreement_reason` 是 required enum-or-null，`null` 精确要求 omitempty。`want_v0_independent_roots` 全局可选，但 `core_mirror`/`lineage` 每条 expectation 必填且必须严格大于 `independent_roots`，防止“真实增量”空门。
 
@@ -1558,19 +1558,21 @@ E-6c feat(answer): withhold beliefs on entity mismatch        # 依赖 E-6b
 
 **验收**：门并入普通 `go test ./...`，随后接 §10 CI；阈值或 tokenizer 任何改动都必须过本门。benchmark 只记报告，不作为时间门。
 
-**提交**：`test(consensus): gate effective source independence`
+**提交**：`94f9f88 test(consensus): gate effective source independence`
 
 #### 16.3.1 提交序列与非目标
 
 ```text
-N-1  docs(plan): lock effective-source independence v1
-N-2  feat(consensus): fingerprint anchored content cores
-N-3  feat(consensus): fold verbatim quote lineage
-N-4  feat(consensus): expose source fold reasons
-N-5  test(consensus): gate effective source independence
+N-1  97490db  docs(plan): lock effective-source independence v1
+N-2  9a3455e  feat(consensus): fingerprint anchored content cores
+N-3  c78010b  feat(consensus): fold verbatim quote lineage
+N-4  e17086c  feat(consensus): expose source fold reasons
+N-5  94f9f88  test(consensus): gate effective source independence
 ```
 
 每卡都先红测试后实现，且 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...` 与 `git diff --check` 全绿才 commit。**非目标**：方向性转载图/发布时间先后、claim 级不同 component、改 answer 置信度公式、步 4 重排、ledger 持久化、Wikidata/外部查重、提高 `MaxSources`。
+
+> **收口状态（2026-08-11）**：N-1…N-5 五卡全部完成；生产增量按内容核、逐字血缘、可审计折叠原因三个单关注提交落地，构造集以 33 source / 12 case 对六类信号做 exact gate。三路独立审计均无阻塞；收口快照全仓 test/race/vet/build/diff-check 通过。下一步可按优先队列进入 P2；P3 的接口依赖也已满足，但仍须先开设计卡。
 
 > **EN —** N_eff v1 preserves document-global components and adds bounded, anchor-centered content-core similarity plus exact long-fragment lineage as conservative union edges. Missing enhanced input retains v0 compatibility; malformed or hard-size-invalid input fails explicitly, while richer derived inputs are sampled deterministically within fixed bounds. Sampling may miss an enhanced fold and thus overcount independence relative to an unbounded ideal, but never removes the v0 signals. N-2/N-3 may change winners, materialization outcomes, and confidence through the new N_eff, while their schemas/formulas stay intact; N-4 itself only adds fold metadata from a deterministic forest.
 
