@@ -21,6 +21,14 @@ services:
       PURIFY_RATE_BURST: "30"
       # ── Search provider (empty leaves search/answer/watch disabled) ──
       PURIFY_SEARCH_BRAVE_KEY: "${PURIFY_SEARCH_BRAVE_KEY:-}"
+      # ── Managed entity attribution (default-off) ──
+      PURIFY_EAV_ENABLED: "${PURIFY_EAV_ENABLED:-false}"
+      PURIFY_EAV_REFEREE_ENABLED: "${PURIFY_EAV_REFEREE_ENABLED:-true}"
+      PURIFY_EAV_CACHE_ENTRIES: "${PURIFY_EAV_CACHE_ENTRIES:-128}"
+      PURIFY_EAV_LLM_API_KEY: "${PURIFY_EAV_LLM_API_KEY:-}"
+      PURIFY_EAV_LLM_MODEL: "${PURIFY_EAV_LLM_MODEL:-gpt-4o-mini}"
+      PURIFY_EAV_LLM_BASE_URL: "${PURIFY_EAV_LLM_BASE_URL:-https://api.openai.com/v1}"
+      PURIFY_EAV_LLM_ALLOW_PRIVATE: "${PURIFY_EAV_LLM_ALLOW_PRIVATE:-false}"
       # ── Logging ──
       PURIFY_LOG_LEVEL: info
       # ── Durable evidence storage ──
