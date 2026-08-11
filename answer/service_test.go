@@ -152,6 +152,138 @@ func TestAnswerKnownComposesFreshSearchAndMultiConsensus(t *testing.T) {
 	}
 }
 
+func TestAnswerPropagatesAgreementFoldReasonsWithoutProjectingSupportReason(t *testing.T) {
+	fetchedAt := time.Date(2025, 1, 2, 2, 9, 0, 0, time.UTC)
+	field := knownField(`"winner"`, 3, 2, fetchedAt)
+	field.Agreement.FoldReason = models.MultiExtractFoldReasonQuoteLineage
+	field.Supports[1].FoldReason = models.MultiExtractFoldReasonQuoteLineage
+	conflictAgreement := models.MultiExtractAgreement{
+		Pages:            2,
+		IndependentRoots: 1,
+		FoldReason:       models.MultiExtractFoldReasonNearDuplicate,
+	}
+	conflictSupports := generatedSupports(conflictAgreement, 3, `"other"`)
+	conflictSupports[1].FoldReason = models.MultiExtractFoldReasonNearDuplicate
+	field.Conflicts = []models.MultiExtractConflict{{
+		Value:     json.RawMessage(`"other"`),
+		Agreement: conflictAgreement,
+		Supports:  conflictSupports,
+	}}
+
+	response := runAnswerWithField(t, field, 2)
+	if response.Status != models.AnswerStatusKnown || response.Belief == nil {
+		t.Fatalf("response = %#v, want known belief", response)
+	}
+	if response.Belief.Agreement.FoldReason != models.MultiExtractFoldReasonQuoteLineage {
+		t.Fatalf("belief agreement = %#v", response.Belief.Agreement)
+	}
+	if response.Belief.Confidence != models.AnswerConfidenceMedium {
+		t.Fatalf("confidence = %q, fold metadata changed the existing roots formula", response.Belief.Confidence)
+	}
+	if len(response.Conflicts) != 1 ||
+		response.Conflicts[0].Agreement.FoldReason != models.MultiExtractFoldReasonNearDuplicate {
+		t.Fatalf("conflicts = %#v", response.Conflicts)
+	}
+	encodedEvidence, err := json.Marshal(response.Belief.Evidence)
+	if err != nil {
+		t.Fatalf("Marshal(evidence) error = %v", err)
+	}
+	if strings.Contains(string(encodedEvidence), `"fold_reason"`) {
+		t.Fatalf("support fold reason leaked into AnswerEvidence: %s", encodedEvidence)
+	}
+}
+
+func TestAnswerTiePreservesAlternativeAgreementFoldReason(t *testing.T) {
+	response := runAnswerWithField(t, models.MultiExtractFieldConsensus{
+		Ambiguous: true,
+		Conflicts: []models.MultiExtractConflict{
+			{
+				Value: json.RawMessage(`"alpha"`),
+				Agreement: models.MultiExtractAgreement{
+					Pages:            3,
+					IndependentRoots: 2,
+					FoldReason:       models.MultiExtractFoldReasonNearDuplicate,
+				},
+			},
+			{
+				Value: json.RawMessage(`"beta"`),
+				Agreement: models.MultiExtractAgreement{
+					Pages:            3,
+					IndependentRoots: 2,
+					FoldReason:       models.MultiExtractFoldReasonQuoteLineage,
+				},
+			},
+		},
+	}, 2)
+	if response.Status != models.AnswerStatusUnknown || response.Reason != models.AnswerUnknownConflict ||
+		response.Closest == nil || string(response.Closest.Value) != `"alpha"` || len(response.Conflicts) != 1 {
+		t.Fatalf("response = %#v, want tied unknown", response)
+	}
+	if response.Conflicts[0].Agreement.FoldReason != models.MultiExtractFoldReasonQuoteLineage {
+		t.Fatalf("tie alternative agreement = %#v", response.Conflicts[0].Agreement)
+	}
+}
+
+func TestValidateAgreementFoldReasonStates(t *testing.T) {
+	tests := []struct {
+		name      string
+		agreement models.MultiExtractAgreement
+		wantValid bool
+	}{
+		{
+			name:      "unfolded omits reason",
+			agreement: models.MultiExtractAgreement{Pages: 2, IndependentRoots: 2},
+			wantValid: true,
+		},
+		{
+			name: "single same-root reason",
+			agreement: models.MultiExtractAgreement{
+				Pages: 2, IndependentRoots: 1, FoldReason: models.MultiExtractFoldReasonSameRoot,
+			},
+			wantValid: true,
+		},
+		{
+			name: "single near-duplicate reason",
+			agreement: models.MultiExtractAgreement{
+				Pages: 2, IndependentRoots: 1, FoldReason: models.MultiExtractFoldReasonNearDuplicate,
+			},
+			wantValid: true,
+		},
+		{
+			name: "single quote-lineage reason",
+			agreement: models.MultiExtractAgreement{
+				Pages: 2, IndependentRoots: 1, FoldReason: models.MultiExtractFoldReasonQuoteLineage,
+			},
+			wantValid: true,
+		},
+		{
+			name:      "mixed reasons omit enum",
+			agreement: models.MultiExtractAgreement{Pages: 3, IndependentRoots: 1},
+			wantValid: true,
+		},
+		{
+			name: "unfolded cannot claim reason",
+			agreement: models.MultiExtractAgreement{
+				Pages: 2, IndependentRoots: 2, FoldReason: models.MultiExtractFoldReasonSameRoot,
+			},
+		},
+		{
+			name: "unknown reason",
+			agreement: models.MultiExtractAgreement{
+				Pages: 2, IndependentRoots: 1, FoldReason: models.MultiExtractFoldReason("unknown"),
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateAgreement(test.agreement)
+			if (err == nil) != test.wantValid {
+				t.Fatalf("validateAgreement(%#v) error = %v, want valid=%t", test.agreement, err, test.wantValid)
+			}
+		})
+	}
+}
+
 func TestAnswerIndependentRootThresholdAndTieStayUnknown(t *testing.T) {
 	tests := []struct {
 		name         string

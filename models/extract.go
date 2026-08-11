@@ -299,16 +299,29 @@ type MultiExtractConsensus struct {
 	Fields map[string]MultiExtractFieldConsensus `json:"fields"`
 }
 
+// MultiExtractFoldReason is the transport-owned reason one source page was
+// folded into another source component. The models package deliberately keeps
+// this enum independent from the consensus implementation package.
+type MultiExtractFoldReason string
+
+const (
+	MultiExtractFoldReasonSameRoot      MultiExtractFoldReason = "same_root"
+	MultiExtractFoldReasonNearDuplicate MultiExtractFoldReason = "near_duplicate"
+	MultiExtractFoldReasonQuoteLineage  MultiExtractFoldReason = "quote_lineage"
+)
+
 type MultiExtractAgreement struct {
-	Pages            int `json:"pages"`
-	IndependentRoots int `json:"independent_roots"`
+	Pages            int                    `json:"pages"`
+	IndependentRoots int                    `json:"independent_roots"`
+	FoldReason       MultiExtractFoldReason `json:"fold_reason,omitempty"`
 }
 
 type MultiExtractSupport struct {
-	URL      string           `json:"url"`
-	Root     string           `json:"root"`
-	Evidence *evidence.Anchor `json:"evidence,omitempty"`
-	Receipt  string           `json:"receipt,omitempty"`
+	URL        string                 `json:"url"`
+	Root       string                 `json:"root"`
+	Evidence   *evidence.Anchor       `json:"evidence,omitempty"`
+	Receipt    string                 `json:"receipt,omitempty"`
+	FoldReason MultiExtractFoldReason `json:"fold_reason,omitempty"`
 }
 
 type MultiExtractConflict struct {

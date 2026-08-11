@@ -235,3 +235,82 @@ func TestMultiExtractResponseKeepsConsensusProjectionIndependent(t *testing.T) {
 		t.Fatalf("ambiguous response unexpectedly contains data: %s", encoded)
 	}
 }
+
+func TestMultiExtractFoldReasonJSONContract(t *testing.T) {
+	if MultiExtractFoldReasonSameRoot != "same_root" ||
+		MultiExtractFoldReasonNearDuplicate != "near_duplicate" ||
+		MultiExtractFoldReasonQuoteLineage != "quote_lineage" {
+		t.Fatalf("fold reason literals = %q/%q/%q",
+			MultiExtractFoldReasonSameRoot,
+			MultiExtractFoldReasonNearDuplicate,
+			MultiExtractFoldReasonQuoteLineage,
+		)
+	}
+
+	withoutAgreementReason, err := json.Marshal(MultiExtractAgreement{Pages: 2, IndependentRoots: 2})
+	if err != nil {
+		t.Fatalf("Marshal(agreement) error = %v", err)
+	}
+	if string(withoutAgreementReason) != `{"pages":2,"independent_roots":2}` {
+		t.Fatalf("zero agreement reason changed legacy JSON: %s", withoutAgreementReason)
+	}
+	withoutSupportReason, err := json.Marshal(MultiExtractSupport{URL: "https://a.example/", Root: "a.example"})
+	if err != nil {
+		t.Fatalf("Marshal(support) error = %v", err)
+	}
+	if string(withoutSupportReason) != `{"url":"https://a.example/","root":"a.example"}` {
+		t.Fatalf("zero support reason changed legacy JSON: %s", withoutSupportReason)
+	}
+
+	response := MultiExtractResponse{
+		Success: true,
+		Consensus: &MultiExtractConsensus{Fields: map[string]MultiExtractFieldConsensus{
+			"name": {
+				Value: json.RawMessage(`"Ada"`),
+				Agreement: MultiExtractAgreement{
+					Pages:            3,
+					IndependentRoots: 1,
+					FoldReason:       MultiExtractFoldReasonSameRoot,
+				},
+				Supports: []MultiExtractSupport{
+					{URL: "https://a.example/", Root: "a.example"},
+					{URL: "https://b.example/", Root: "b.example", FoldReason: MultiExtractFoldReasonNearDuplicate},
+				},
+				Conflicts: []MultiExtractConflict{{
+					Value: json.RawMessage(`"Grace"`),
+					Agreement: MultiExtractAgreement{
+						Pages:            2,
+						IndependentRoots: 1,
+						FoldReason:       MultiExtractFoldReasonQuoteLineage,
+					},
+				}},
+			},
+		}},
+		Sources:       []MultiExtractSource{},
+		UsageComplete: true,
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("Marshal(response) error = %v", err)
+	}
+	for _, fragment := range []string{
+		`"fold_reason":"same_root"`,
+		`"fold_reason":"near_duplicate"`,
+		`"fold_reason":"quote_lineage"`,
+	} {
+		if !bytes.Contains(encoded, []byte(fragment)) {
+			t.Fatalf("response %s missing %s", encoded, fragment)
+		}
+	}
+	var decoded MultiExtractResponse
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("Unmarshal(response) error = %v", err)
+	}
+	field := decoded.Consensus.Fields["name"]
+	if field.Agreement.FoldReason != MultiExtractFoldReasonSameRoot ||
+		len(field.Supports) != 2 || field.Supports[0].FoldReason != "" ||
+		field.Supports[1].FoldReason != MultiExtractFoldReasonNearDuplicate ||
+		len(field.Conflicts) != 1 || field.Conflicts[0].Agreement.FoldReason != MultiExtractFoldReasonQuoteLineage {
+		t.Fatalf("decoded fold reasons = %#v", field)
+	}
+}

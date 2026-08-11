@@ -360,6 +360,113 @@ func TestDecodeAnswerFactResponseAcceptsKnownAndEveryUnknownReason(t *testing.T)
 	}
 }
 
+func TestDecodeAnswerFactResponseAcceptsFoldReasonStates(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		body    []byte
+		minimum int
+	}{
+		{
+			name: "belief single reason",
+			body: mutateAnswerResponseBody(t, validKnownAnswerResponse(), func(document map[string]any) {
+				belief := document["belief"].(map[string]any)
+				belief["confidence"] = "low"
+				agreement := belief["agreement"].(map[string]any)
+				agreement["independent_roots"] = float64(1)
+				agreement["fold_reason"] = "near_duplicate"
+			}),
+			minimum: 1,
+		},
+		{
+			name: "belief mixed reasons omit aggregate reason",
+			body: mutateAnswerResponseBody(t, validKnownAnswerResponse(), func(document map[string]any) {
+				belief := document["belief"].(map[string]any)
+				belief["confidence"] = "low"
+				belief["agreement"].(map[string]any)["independent_roots"] = float64(1)
+			}),
+			minimum: 1,
+		},
+		{
+			name: "candidate single reason",
+			body: mutateAnswerResponseBody(t, validKnownAnswerResponse(), func(document map[string]any) {
+				document["conflicts"] = []any{map[string]any{
+					"value": "$20",
+					"agreement": map[string]any{
+						"pages":             float64(2),
+						"independent_roots": float64(1),
+						"fold_reason":       "quote_lineage",
+					},
+				}}
+			}),
+			minimum: 2,
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := decodeAnswerFactResponse(test.body, test.minimum); err != nil {
+				t.Fatalf("decoder rejected valid fold-reason state: %v\n%s", err, test.body)
+			}
+		})
+	}
+}
+
+func TestDecodeAnswerFactResponseRejectsInvalidFoldReasons(t *testing.T) {
+	t.Parallel()
+
+	foldedBelief := func(reason any) []byte {
+		return mutateAnswerResponseBody(t, validKnownAnswerResponse(), func(document map[string]any) {
+			belief := document["belief"].(map[string]any)
+			belief["confidence"] = "low"
+			agreement := belief["agreement"].(map[string]any)
+			agreement["independent_roots"] = float64(1)
+			agreement["fold_reason"] = reason
+		})
+	}
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{name: "null", body: foldedBelief(nil)},
+		{name: "empty", body: foldedBelief("")},
+		{name: "unknown", body: foldedBelief("other")},
+		{name: "reason without an actual fold", body: mutateAnswerResponseBody(t, validKnownAnswerResponse(), func(document map[string]any) {
+			document["belief"].(map[string]any)["agreement"].(map[string]any)["fold_reason"] = "same_root"
+		})},
+		{name: "case-smuggled field", body: mutateAnswerResponseBody(t, validKnownAnswerResponse(), func(document map[string]any) {
+			belief := document["belief"].(map[string]any)
+			belief["confidence"] = "low"
+			agreement := belief["agreement"].(map[string]any)
+			agreement["independent_roots"] = float64(1)
+			agreement["Fold_Reason"] = "same_root"
+		})},
+		{name: "candidate unknown", body: mutateAnswerResponseBody(t, validKnownAnswerResponse(), func(document map[string]any) {
+			document["conflicts"] = []any{map[string]any{
+				"value": "$20",
+				"agreement": map[string]any{
+					"pages":             float64(2),
+					"independent_roots": float64(1),
+					"fold_reason":       "other",
+				},
+			}}
+		})},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := decodeAnswerFactResponse(test.body, 1); err == nil {
+				t.Fatalf("decoder accepted invalid fold reason: %s", test.body)
+			}
+		})
+	}
+}
+
 func TestDecodeAnswerFactResponseRejectsMalformedOrInconsistentDocuments(t *testing.T) {
 	base := validKnownAnswerResponse()
 	baseBody, err := json.Marshal(base)
@@ -1627,6 +1734,87 @@ func TestDecodeMultiExtractResponseAcceptsEveryJSONScalarKind(t *testing.T) {
 			}
 			if _, err := decodeMultiExtractResponse(body); err != nil {
 				t.Fatalf("decode scalar %s: %v", test.value, err)
+			}
+		})
+	}
+}
+
+func TestDecodeMultiExtractResponseAcceptsFoldReasonStates(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{
+			name: "agreement single reason",
+			body: mutateMultiExtractResponseBody(t, validNonAmbiguousConflictMultiExtractResponse(), func(document map[string]any) {
+				agreement := multiConsensusFieldDocument(t, document, "/name")["agreement"].(map[string]any)
+				agreement["independent_roots"] = float64(1)
+				agreement["fold_reason"] = "same_root"
+			}),
+		},
+		{
+			name: "agreement mixed reasons omitted",
+			body: mutateMultiExtractResponseBody(t, validNonAmbiguousConflictMultiExtractResponse(), func(document map[string]any) {
+				field := multiConsensusFieldDocument(t, document, "/name")
+				field["agreement"].(map[string]any)["independent_roots"] = float64(1)
+				supports := field["supports"].([]any)
+				supports[0].(map[string]any)["fold_reason"] = "same_root"
+				supports[1].(map[string]any)["fold_reason"] = "quote_lineage"
+			}),
+		},
+		{
+			name: "support reason is source-global",
+			body: mutateMultiExtractResponseBody(t, validMultiExtractResponse(models.MultiExtractStatusComplete), func(document map[string]any) {
+				support := multiConsensusFieldDocument(t, document, "/name")["supports"].([]any)[0].(map[string]any)
+				support["fold_reason"] = "near_duplicate"
+			}),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := decodeMultiExtractResponse(test.body); err != nil {
+				t.Fatalf("decoder rejected valid fold-reason state: %v\n%s", err, test.body)
+			}
+		})
+	}
+}
+
+func TestDecodeMultiExtractResponseRejectsInvalidFoldReasons(t *testing.T) {
+	agreementBody := func(reasonField string, reason any, folded bool) []byte {
+		return mutateMultiExtractResponseBody(t, validNonAmbiguousConflictMultiExtractResponse(), func(document map[string]any) {
+			field := multiConsensusFieldDocument(t, document, "/name")
+			if folded {
+				field["agreement"].(map[string]any)["independent_roots"] = float64(1)
+			}
+			field["agreement"].(map[string]any)[reasonField] = reason
+		})
+	}
+	supportBody := func(reasonField string, reason any) []byte {
+		return mutateMultiExtractResponseBody(t, validMultiExtractResponse(models.MultiExtractStatusComplete), func(document map[string]any) {
+			support := multiConsensusFieldDocument(t, document, "/name")["supports"].([]any)[0].(map[string]any)
+			support[reasonField] = reason
+		})
+	}
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{name: "agreement null", body: agreementBody("fold_reason", nil, true)},
+		{name: "agreement empty", body: agreementBody("fold_reason", "", true)},
+		{name: "agreement unknown", body: agreementBody("fold_reason", "other", true)},
+		{name: "agreement reason without an actual fold", body: agreementBody("fold_reason", "same_root", false)},
+		{name: "agreement case-smuggled field", body: agreementBody("Fold_Reason", "same_root", true)},
+		{name: "support null", body: supportBody("fold_reason", nil)},
+		{name: "support empty", body: supportBody("fold_reason", "")},
+		{name: "support unknown", body: supportBody("fold_reason", "other")},
+		{name: "support case-smuggled field", body: supportBody("Fold_Reason", "same_root")},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := decodeMultiExtractResponse(test.body); err == nil {
+				t.Fatalf("decoder accepted invalid fold reason: %s", test.body)
 			}
 		})
 	}

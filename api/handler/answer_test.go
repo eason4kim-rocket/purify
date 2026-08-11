@@ -185,6 +185,122 @@ func TestAnswerReturnsKnownAndUnknownSuccessShapes(t *testing.T) {
 	}
 }
 
+func TestAnswerFoldReasonRESTContract(t *testing.T) {
+	t.Run("valid folded agreement round trips", func(t *testing.T) {
+		serviceResponse := validKnownAnswerResponse()
+		serviceResponse.Belief.Agreement = models.MultiExtractAgreement{
+			Pages:            2,
+			IndependentRoots: 1,
+			FoldReason:       models.MultiExtractFoldReasonQuoteLineage,
+		}
+		serviceResponse.Belief.Confidence = models.AnswerConfidenceLow
+		request := []byte(`{"spec":{"subject":"anthropic claude","predicate":"price_per_mtok_input","min_independent_sources":1}}`)
+		recorder := performAnswerRequest(
+			newAnswerTestRouter(Answer(&recordingAnswerService{response: serviceResponse})),
+			request,
+		)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body)
+		}
+		var decoded models.AnswerResponse
+		if err := json.Unmarshal(recorder.Body.Bytes(), &decoded); err != nil {
+			t.Fatalf("decode response: %v; body=%s", err, recorder.Body)
+		}
+		if decoded.Belief == nil ||
+			decoded.Belief.Agreement.FoldReason != models.MultiExtractFoldReasonQuoteLineage {
+			t.Fatalf("decoded belief = %#v", decoded.Belief)
+		}
+	})
+
+	for _, test := range []struct {
+		name       string
+		agreement  models.MultiExtractAgreement
+		confidence models.AnswerConfidence
+		request    []byte
+	}{
+		{
+			name: "unknown enum",
+			agreement: models.MultiExtractAgreement{
+				Pages: 2, IndependentRoots: 1, FoldReason: models.MultiExtractFoldReason("unknown"),
+			},
+			confidence: models.AnswerConfidenceLow,
+			request:    []byte(`{"spec":{"subject":"anthropic claude","predicate":"price_per_mtok_input","min_independent_sources":1}}`),
+		},
+		{
+			name: "unfolded agreement with reason",
+			agreement: models.MultiExtractAgreement{
+				Pages: 2, IndependentRoots: 2, FoldReason: models.MultiExtractFoldReasonSameRoot,
+			},
+			confidence: models.AnswerConfidenceMedium,
+			request:    validAnswerRequestJSON(),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			serviceResponse := validKnownAnswerResponse()
+			serviceResponse.Belief.Agreement = test.agreement
+			serviceResponse.Belief.Confidence = test.confidence
+			recorder := performAnswerRequest(
+				newAnswerTestRouter(Answer(&recordingAnswerService{response: serviceResponse})),
+				test.request,
+			)
+			if recorder.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body)
+			}
+		})
+	}
+}
+
+func TestValidAnswerAgreementFoldReasonStates(t *testing.T) {
+	tests := []struct {
+		name      string
+		agreement models.MultiExtractAgreement
+		want      bool
+	}{
+		{name: "unfolded", agreement: models.MultiExtractAgreement{Pages: 2, IndependentRoots: 2}, want: true},
+		{name: "mixed folded", agreement: models.MultiExtractAgreement{Pages: 3, IndependentRoots: 1}, want: true},
+		{
+			name: "same root",
+			agreement: models.MultiExtractAgreement{
+				Pages: 2, IndependentRoots: 1, FoldReason: models.MultiExtractFoldReasonSameRoot,
+			},
+			want: true,
+		},
+		{
+			name: "near duplicate",
+			agreement: models.MultiExtractAgreement{
+				Pages: 2, IndependentRoots: 1, FoldReason: models.MultiExtractFoldReasonNearDuplicate,
+			},
+			want: true,
+		},
+		{
+			name: "quote lineage",
+			agreement: models.MultiExtractAgreement{
+				Pages: 2, IndependentRoots: 1, FoldReason: models.MultiExtractFoldReasonQuoteLineage,
+			},
+			want: true,
+		},
+		{
+			name: "unfolded with reason",
+			agreement: models.MultiExtractAgreement{
+				Pages: 2, IndependentRoots: 2, FoldReason: models.MultiExtractFoldReasonSameRoot,
+			},
+		},
+		{
+			name: "unknown",
+			agreement: models.MultiExtractAgreement{
+				Pages: 2, IndependentRoots: 1, FoldReason: models.MultiExtractFoldReason("unknown"),
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := validAnswerAgreement(test.agreement); got != test.want {
+				t.Fatalf("validAnswerAgreement(%#v) = %t, want %t", test.agreement, got, test.want)
+			}
+		})
+	}
+}
+
 func TestAnswerStrictDecoderRejectsUntrustedJSONAndDuplicates(t *testing.T) {
 	service := &recordingAnswerService{response: validUnknownAnswerResponse()}
 	limiter := &recordingAnswerLimiter{allowed: true}

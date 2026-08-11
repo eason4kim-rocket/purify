@@ -429,10 +429,22 @@ func TestExtractMultiDelegatesWithoutCallingLegacySingleService(t *testing.T) {
 		Status:  models.MultiExtractStatusComplete,
 		Data:    json.RawMessage(`{"name":"Ada"}`),
 		Consensus: &models.MultiExtractConsensus{Fields: map[string]models.MultiExtractFieldConsensus{
-			"name": {Value: json.RawMessage(`"Ada"`), Agreement: models.MultiExtractAgreement{Pages: 1, IndependentRoots: 1}},
+			"name": {
+				Value: json.RawMessage(`"Ada"`),
+				Agreement: models.MultiExtractAgreement{
+					Pages:            2,
+					IndependentRoots: 1,
+					FoldReason:       models.MultiExtractFoldReasonSameRoot,
+				},
+				Supports: []models.MultiExtractSupport{
+					{URL: "https://a.example.com/", Root: "example.com"},
+					{URL: "https://b.example.com/", Root: "example.com", FoldReason: models.MultiExtractFoldReasonSameRoot},
+				},
+			},
 		}},
 		Sources: []models.MultiExtractSource{
 			{URL: "https://a.example.com/", FinalURL: "https://a.example.com/", Success: true, Status: models.MultiExtractSourceStatusValid},
+			{URL: "https://b.example.com/", FinalURL: "https://b.example.com/", Success: true, Status: models.MultiExtractSourceStatusValid},
 		},
 		UsageComplete: true,
 	}

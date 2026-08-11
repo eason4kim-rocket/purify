@@ -1014,6 +1014,7 @@ func projectMultiAgreement(input consensus.Agreement) models.MultiExtractAgreeme
 	return models.MultiExtractAgreement{
 		Pages:            input.Pages,
 		IndependentRoots: input.IndependentRoots,
+		FoldReason:       projectMultiFoldReason(input.FoldReason),
 	}
 }
 
@@ -1021,9 +1022,10 @@ func projectMultiSupports(input []consensus.Support) []models.MultiExtractSuppor
 	output := make([]models.MultiExtractSupport, len(input))
 	for index, support := range input {
 		output[index] = models.MultiExtractSupport{
-			URL:     support.URL,
-			Root:    support.Root,
-			Receipt: support.Receipt,
+			URL:        support.URL,
+			Root:       support.Root,
+			Receipt:    support.Receipt,
+			FoldReason: projectMultiFoldReason(support.FoldReason),
 		}
 		if support.Evidence != nil {
 			anchor := *support.Evidence
@@ -1031,6 +1033,19 @@ func projectMultiSupports(input []consensus.Support) []models.MultiExtractSuppor
 		}
 	}
 	return output
+}
+
+func projectMultiFoldReason(input consensus.FoldReason) models.MultiExtractFoldReason {
+	switch input {
+	case consensus.FoldReasonSameRoot:
+		return models.MultiExtractFoldReasonSameRoot
+	case consensus.FoldReasonNearDuplicate:
+		return models.MultiExtractFoldReasonNearDuplicate
+	case consensus.FoldReasonQuoteLineage:
+		return models.MultiExtractFoldReasonQuoteLineage
+	default:
+		return ""
+	}
 }
 
 func validateMultiResponseSize(response *models.MultiExtractResponse) error {

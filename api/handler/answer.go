@@ -540,7 +540,19 @@ func answerPageBudgetFits(initial int, candidates []models.AnswerCandidate) bool
 
 func validAnswerAgreement(agreement models.MultiExtractAgreement) bool {
 	return agreement.Pages >= 1 && agreement.Pages <= models.MaxExtractSources &&
-		agreement.IndependentRoots >= 1 && agreement.IndependentRoots <= agreement.Pages
+		agreement.IndependentRoots >= 1 && agreement.IndependentRoots <= agreement.Pages &&
+		(agreement.Pages != agreement.IndependentRoots || agreement.FoldReason == "") &&
+		validAnswerFoldReason(agreement.FoldReason)
+}
+
+func validAnswerFoldReason(reason models.MultiExtractFoldReason) bool {
+	switch reason {
+	case "", models.MultiExtractFoldReasonSameRoot, models.MultiExtractFoldReasonNearDuplicate,
+		models.MultiExtractFoldReasonQuoteLineage:
+		return true
+	default:
+		return false
+	}
 }
 
 func validAnswerStringValue(raw json.RawMessage, allowNull bool) bool {

@@ -1226,10 +1226,22 @@ func cloneScalar(ctx context.Context, raw json.RawMessage) (json.RawMessage, boo
 
 func validateAgreement(agreement models.MultiExtractAgreement) error {
 	if agreement.Pages < 1 || agreement.Pages > models.MaxExtractSources || agreement.IndependentRoots < 1 ||
-		agreement.IndependentRoots > agreement.Pages {
+		agreement.IndependentRoots > agreement.Pages ||
+		(agreement.Pages == agreement.IndependentRoots && agreement.FoldReason != "") ||
+		!validFoldReason(agreement.FoldReason) {
 		return answerFailed("answer consensus agreement is invalid")
 	}
 	return nil
+}
+
+func validFoldReason(reason models.MultiExtractFoldReason) bool {
+	switch reason {
+	case "", models.MultiExtractFoldReasonSameRoot, models.MultiExtractFoldReasonNearDuplicate,
+		models.MultiExtractFoldReasonQuoteLineage:
+		return true
+	default:
+		return false
+	}
 }
 
 func confidenceFor(independentRoots int) models.AnswerConfidence {

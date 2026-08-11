@@ -84,7 +84,7 @@ func TestMergeCollapsesAnchoredContentCoresAcrossDifferentChrome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reverse Merge() error = %v", err)
 	}
-	if forward.Fields["name"].Agreement != (Agreement{Pages: 2, IndependentRoots: 1}) {
+	if forward.Fields["name"].Agreement != (Agreement{Pages: 2, IndependentRoots: 1, FoldReason: FoldReasonNearDuplicate}) {
 		t.Fatalf("agreement = %#v, want anchored mirror collapse", forward.Fields["name"].Agreement)
 	}
 	forwardJSON, _ := json.Marshal(forward)
@@ -114,7 +114,7 @@ func TestMergeCollapsesChineseAnchoredContentCoresAcrossDifferentChrome(t *testi
 	if err != nil {
 		t.Fatalf("Merge() error = %v", err)
 	}
-	if result.Fields["name"].Agreement != (Agreement{Pages: 2, IndependentRoots: 1}) {
+	if result.Fields["name"].Agreement != (Agreement{Pages: 2, IndependentRoots: 1, FoldReason: FoldReasonNearDuplicate}) {
 		t.Fatalf("agreement = %#v, want CJK rune-shingle mirror collapse", result.Fields["name"].Agreement)
 	}
 }
@@ -179,7 +179,7 @@ func TestMergeIndependentEvidenceBeatsSixMirrors(t *testing.T) {
 		t.Fatalf("winner = %#v", field)
 	}
 	if len(field.Conflicts) != 1 || string(field.Conflicts[0].Value) != "false" ||
-		field.Conflicts[0].Agreement != (Agreement{Pages: 6, IndependentRoots: 1}) {
+		field.Conflicts[0].Agreement != (Agreement{Pages: 6, IndependentRoots: 1, FoldReason: FoldReasonNearDuplicate}) {
 		t.Fatalf("mirror conflict = %#v", field.Conflicts)
 	}
 }
@@ -206,7 +206,7 @@ func TestMergeConflictsSortByIndependentRootsBeforePages(t *testing.T) {
 	if len(field.Conflicts) != 2 || string(field.Conflicts[0].Value) != `"two-roots"` ||
 		field.Conflicts[0].Agreement != (Agreement{Pages: 2, IndependentRoots: 2}) ||
 		string(field.Conflicts[1].Value) != `"three-pages"` ||
-		field.Conflicts[1].Agreement != (Agreement{Pages: 3, IndependentRoots: 1}) {
+		field.Conflicts[1].Agreement != (Agreement{Pages: 3, IndependentRoots: 1, FoldReason: FoldReasonNearDuplicate}) {
 		t.Fatalf("conflicts = %#v", field.Conflicts)
 	}
 }
@@ -351,7 +351,7 @@ func TestMergeLiteralPublicIPRoots(t *testing.T) {
 			t.Fatalf("Merge() error = %v", err)
 		}
 		field := result.Fields["x"]
-		if field.Agreement != (Agreement{Pages: 3, IndependentRoots: 1}) ||
+		if field.Agreement != (Agreement{Pages: 3, IndependentRoots: 1, FoldReason: FoldReasonSameRoot}) ||
 			field.Supports[0].Root != "8.8.8.8" || field.Supports[1].Root != "8.8.8.8" || field.Supports[2].Root != "8.8.8.8" {
 			t.Fatalf("same-IP field = %#v", field)
 		}
@@ -547,9 +547,9 @@ func TestOutputBudgetBoundaryAndExactMeasurement(t *testing.T) {
 	for name, inputs := range cases {
 		t.Run(name, func(t *testing.T) {
 			prepared := prepareSourcesForTest(t, inputs)
-			components := independentComponents(prepared)
+			independence := buildIndependencePlan(prepared)
 			paths := collectPaths(prepared)
-			predicted, err := measuredOutputSize(paths, prepared, components)
+			predicted, err := measuredOutputSize(paths, prepared, independence)
 			if err != nil {
 				t.Fatalf("measuredOutputSize() error = %v", err)
 			}
@@ -681,7 +681,7 @@ func TestMergeMissingCoreSignalPreservesV0AndNeverUsesPageHead(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Merge() error = %v", err)
 		}
-		if result.Fields["x"].Agreement != (Agreement{Pages: 2, IndependentRoots: 1}) {
+		if result.Fields["x"].Agreement != (Agreement{Pages: 2, IndependentRoots: 1, FoldReason: FoldReasonSameRoot}) {
 			t.Fatalf("agreement = %#v, same-root edge was lost", result.Fields["x"].Agreement)
 		}
 	})
@@ -695,7 +695,7 @@ func TestMergeMissingCoreSignalPreservesV0AndNeverUsesPageHead(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Merge() error = %v", err)
 		}
-		if result.Fields["name"].Agreement != (Agreement{Pages: 2, IndependentRoots: 1}) {
+		if result.Fields["name"].Agreement != (Agreement{Pages: 2, IndependentRoots: 1, FoldReason: FoldReasonNearDuplicate}) {
 			t.Fatalf("agreement = %#v, legacy edge was lost", result.Fields["name"].Agreement)
 		}
 	})

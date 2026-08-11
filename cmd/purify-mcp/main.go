@@ -2331,7 +2331,7 @@ func validateAnswerBeliefRaw(belief models.AnswerBelief, raw json.RawMessage) er
 	if err := requirePresentAnswerFields(fields, "answer belief", "value", "confidence", "agreement", "as_of", "evidence", "receipts"); err != nil {
 		return err
 	}
-	if err := validateAnswerAgreementRaw(fields["agreement"], "answer belief agreement"); err != nil {
+	if err := validateAnswerAgreementRaw(belief.Agreement, fields["agreement"], "answer belief agreement"); err != nil {
 		return err
 	}
 	var rawEvidence []json.RawMessage
@@ -2389,12 +2389,15 @@ func validateAnswerClosestRaw(raw json.RawMessage) error {
 	return requirePresentAnswerFields(fields, "answer closest", "value", "independent_roots", "note")
 }
 
-func validateAnswerAgreementRaw(raw json.RawMessage, name string) error {
-	fields, err := answerObjectFields(raw, name, "pages", "independent_roots")
+func validateAnswerAgreementRaw(agreement models.MultiExtractAgreement, raw json.RawMessage, name string) error {
+	fields, err := answerObjectFields(raw, name, "pages", "independent_roots", "fold_reason")
 	if err != nil {
 		return err
 	}
-	return requirePresentAnswerFields(fields, name, "pages", "independent_roots")
+	if err := requirePresentAnswerFields(fields, name, "pages", "independent_roots"); err != nil {
+		return err
+	}
+	return validateMultiExtractAgreementFoldReason(agreement, fields, name)
 }
 
 func validateAnswerCandidateRawArray(raw json.RawMessage, candidates []models.AnswerCandidate, name string, required bool) error {
@@ -2420,7 +2423,7 @@ func validateAnswerCandidateRawArray(raw json.RawMessage, candidates []models.An
 		if err := requirePresentAnswerFields(fields, candidateName, "agreement"); err != nil {
 			return err
 		}
-		if err := validateAnswerAgreementRaw(fields["agreement"], candidateName+" agreement"); err != nil {
+		if err := validateAnswerAgreementRaw(candidates[index].Agreement, fields["agreement"], candidateName+" agreement"); err != nil {
 			return err
 		}
 	}
@@ -2717,14 +2720,8 @@ func answerObjectFields(raw []byte, name string, allowed ...string) (map[string]
 	if err != nil {
 		return nil, err
 	}
-	allowlist := make(map[string]struct{}, len(allowed))
-	for _, field := range allowed {
-		allowlist[field] = struct{}{}
-	}
-	for field := range fields {
-		if _, ok := allowlist[field]; !ok {
-			return nil, fmt.Errorf("%s contains unsupported field %q", name, field)
-		}
+	if err := rejectUnsupportedJSONFields(fields, name, allowed...); err != nil {
+		return nil, err
 	}
 	return fields, nil
 }
@@ -3455,7 +3452,7 @@ func validateMultiExtractConsensus(
 				len(field.Value) != 0 || len(field.Supports) != 0 || len(field.Conflicts) < 2 {
 				return false, fmt.Errorf("consensus field %q has an invalid ambiguous shape", path)
 			}
-			if err := validateMultiExtractAgreementFields(fieldFields["agreement"], "consensus field "+path+" agreement"); err != nil {
+			if err := validateMultiExtractAgreementFields(field.Agreement, fieldFields["agreement"], "consensus field "+path+" agreement"); err != nil {
 				return false, err
 			}
 			if err := rejectPresentJSONFields(fieldFields, "ambiguous consensus field "+path, "value", "supports"); err != nil {
@@ -3550,7 +3547,7 @@ func validateMultiExtractAgreement(
 	raw json.RawMessage,
 	name string,
 ) error {
-	if err := validateMultiExtractAgreementFields(raw, name+" agreement"); err != nil {
+	if err := validateMultiExtractAgreementFields(agreement, raw, name+" agreement"); err != nil {
 		return err
 	}
 	if agreement.Pages < 1 || agreement.IndependentRoots < 1 || agreement.IndependentRoots > agreement.Pages ||
@@ -3561,12 +3558,18 @@ func validateMultiExtractAgreement(
 	return nil
 }
 
-func validateMultiExtractAgreementFields(raw json.RawMessage, name string) error {
+func validateMultiExtractAgreementFields(agreement models.MultiExtractAgreement, raw json.RawMessage, name string) error {
 	fields, err := decodeExtractJSONObject(raw, name)
 	if err != nil {
 		return err
 	}
-	return requirePresentJSONFields(fields, name, "pages", "independent_roots")
+	if err := rejectUnsupportedJSONFields(fields, name, "pages", "independent_roots", "fold_reason"); err != nil {
+		return err
+	}
+	if err := requirePresentJSONFields(fields, name, "pages", "independent_roots"); err != nil {
+		return err
+	}
+	return validateMultiExtractAgreementFoldReason(agreement, fields, name)
 }
 
 func validateMultiExtractSupports(
@@ -3587,7 +3590,13 @@ func validateMultiExtractSupports(
 		if err != nil {
 			return 0, err
 		}
+		if err := rejectUnsupportedJSONFields(fields, supportName, "url", "root", "evidence", "receipt", "fold_reason"); err != nil {
+			return 0, err
+		}
 		if err := requirePresentJSONFields(fields, supportName, "url", "root", "evidence", "receipt"); err != nil {
+			return 0, err
+		}
+		if _, err := validateMultiExtractFoldReasonField(support.FoldReason, fields, supportName); err != nil {
 			return 0, err
 		}
 		canonicalURL, root, err := canonicalMultiExtractSupport(support.URL)
@@ -3611,6 +3620,50 @@ func validateMultiExtractSupports(
 		}
 	}
 	return len(uniqueRoots), nil
+}
+
+func validateMultiExtractAgreementFoldReason(
+	agreement models.MultiExtractAgreement,
+	fields map[string]json.RawMessage,
+	name string,
+) error {
+	present, err := validateMultiExtractFoldReasonField(agreement.FoldReason, fields, name)
+	if err != nil {
+		return err
+	}
+	if present && agreement.Pages <= agreement.IndependentRoots {
+		return fmt.Errorf("%s fold_reason requires fewer independent roots than pages", name)
+	}
+	return nil
+}
+
+func validateMultiExtractFoldReasonField(
+	reason models.MultiExtractFoldReason,
+	fields map[string]json.RawMessage,
+	name string,
+) (bool, error) {
+	raw, present := fields["fold_reason"]
+	if !present {
+		if reason != "" {
+			return false, fmt.Errorf("%s is missing fold_reason", name)
+		}
+		return false, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || !validMultiExtractFoldReason(reason) {
+		return false, fmt.Errorf("%s contains an invalid fold_reason", name)
+	}
+	return true, nil
+}
+
+func validMultiExtractFoldReason(reason models.MultiExtractFoldReason) bool {
+	switch reason {
+	case models.MultiExtractFoldReasonSameRoot,
+		models.MultiExtractFoldReasonNearDuplicate,
+		models.MultiExtractFoldReasonQuoteLineage:
+		return true
+	default:
+		return false
+	}
 }
 
 func canonicalMultiExtractSupport(rawURL string) (string, string, error) {
@@ -3803,6 +3856,19 @@ func decodeExtractJSONObject(raw []byte, name string) (map[string]json.RawMessag
 		return nil, fmt.Errorf("%s must be a JSON object", name)
 	}
 	return fields, nil
+}
+
+func rejectUnsupportedJSONFields(fields map[string]json.RawMessage, objectName string, allowed ...string) error {
+	allowlist := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		allowlist[name] = struct{}{}
+	}
+	for name := range fields {
+		if _, ok := allowlist[name]; !ok {
+			return fmt.Errorf("%s contains unsupported field %q", objectName, name)
+		}
+	}
+	return nil
 }
 
 func rejectPresentJSONFields(fields map[string]json.RawMessage, objectName string, names ...string) error {

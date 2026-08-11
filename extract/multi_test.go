@@ -150,8 +150,65 @@ func TestExtractMultiInjectsCleanedTextForAnchoredCoreConsensus(t *testing.T) {
 		t.Fatalf("response consensus is nil: %#v", response)
 	}
 	field := response.Consensus.Fields["name"]
-	if field.Agreement != (models.MultiExtractAgreement{Pages: 2, IndependentRoots: 1}) {
+	if field.Agreement != (models.MultiExtractAgreement{
+		Pages:            2,
+		IndependentRoots: 1,
+		FoldReason:       models.MultiExtractFoldReasonNearDuplicate,
+	}) {
 		t.Fatalf("agreement = %#v, cleaned text was not used for core folding", field.Agreement)
+	}
+	reasons := make(map[string]models.MultiExtractFoldReason, len(field.Supports))
+	for _, support := range field.Supports {
+		reasons[support.URL] = support.FoldReason
+	}
+	if len(reasons) != 2 || reasons["https://a.example.com/"] != "" ||
+		reasons["https://b.example.net/"] != models.MultiExtractFoldReasonNearDuplicate {
+		t.Fatalf("support fold reasons = %#v", reasons)
+	}
+}
+
+func TestProjectMultiConsensusMapsFoldReasons(t *testing.T) {
+	input := consensus.Result{Fields: map[string]consensus.FieldConsensus{
+		"name": {
+			Value: json.RawMessage(`"Ada"`),
+			Agreement: consensus.Agreement{
+				Pages:            3,
+				IndependentRoots: 1,
+				FoldReason:       consensus.FoldReasonSameRoot,
+			},
+			Supports: []consensus.Support{
+				{URL: "https://a.example/", Root: "a.example"},
+				{URL: "https://b.example/", Root: "b.example", FoldReason: consensus.FoldReasonNearDuplicate},
+			},
+			Conflicts: []consensus.Conflict{{
+				Value: json.RawMessage(`"Grace"`),
+				Agreement: consensus.Agreement{
+					Pages:            2,
+					IndependentRoots: 1,
+					FoldReason:       consensus.FoldReasonQuoteLineage,
+				},
+				Supports: []consensus.Support{{
+					URL:        "https://c.example/",
+					Root:       "c.example",
+					FoldReason: consensus.FoldReasonQuoteLineage,
+				}},
+			}},
+		},
+	}}
+
+	projected := projectMultiConsensus(input)
+	field := projected.Fields["name"]
+	if field.Agreement != (models.MultiExtractAgreement{
+		Pages:            3,
+		IndependentRoots: 1,
+		FoldReason:       models.MultiExtractFoldReasonSameRoot,
+	}) || len(field.Supports) != 2 ||
+		field.Supports[1].FoldReason != models.MultiExtractFoldReasonNearDuplicate ||
+		len(field.Conflicts) != 1 ||
+		field.Conflicts[0].Agreement.FoldReason != models.MultiExtractFoldReasonQuoteLineage ||
+		len(field.Conflicts[0].Supports) != 1 ||
+		field.Conflicts[0].Supports[0].FoldReason != models.MultiExtractFoldReasonQuoteLineage {
+		t.Fatalf("projected fold reasons = %#v", field)
 	}
 }
 
@@ -1153,6 +1210,29 @@ func TestEncodeMultiResponseExactWholeResponseBudget(t *testing.T) {
 	})
 }
 
+func TestValidateMultiResponseSizeAccountsForFoldReasons(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{name: "exact limit", size: models.MaxMultiExtractResponseBytes},
+		{name: "one byte over", size: models.MaxMultiExtractResponseBytes + 1, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := exactSizedMultiResponseWithFoldReasons(t, test.size)
+			encoded, err := json.Marshal(response)
+			if err != nil || len(encoded) != test.size {
+				t.Fatalf("Marshal() bytes/error = %d/%v, want %d/nil", len(encoded), err, test.size)
+			}
+			err = validateMultiResponseSize(response)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validateMultiResponseSize() error = %v, wantErr=%t", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestSignFieldReceiptsFailsBeforeUnboundedMaterialization(t *testing.T) {
 	t.Run("leaf count", func(t *testing.T) {
 		document := make(map[string]int, 10_001)
@@ -1454,6 +1534,48 @@ func exactSizedMultiResponse(t *testing.T, size int) *models.MultiExtractRespons
 	baseline, err := json.Marshal(response)
 	if err != nil {
 		t.Fatalf("marshal multi response baseline: %v", err)
+	}
+	fillerBytes := size - len(baseline)
+	if fillerBytes < 0 {
+		t.Fatalf("response size %d is below baseline %d", size, len(baseline))
+	}
+	response.Error.Message = strings.Repeat("x", fillerBytes)
+	return response
+}
+
+func exactSizedMultiResponseWithFoldReasons(t *testing.T, size int) *models.MultiExtractResponse {
+	t.Helper()
+	response := &models.MultiExtractResponse{
+		Success: false,
+		Consensus: &models.MultiExtractConsensus{Fields: map[string]models.MultiExtractFieldConsensus{
+			"name": {
+				Agreement: models.MultiExtractAgreement{
+					Pages:            3,
+					IndependentRoots: 1,
+					FoldReason:       models.MultiExtractFoldReasonSameRoot,
+				},
+				Supports: []models.MultiExtractSupport{{
+					URL:        "https://b.example/",
+					Root:       "b.example",
+					FoldReason: models.MultiExtractFoldReasonNearDuplicate,
+				}},
+				Conflicts: []models.MultiExtractConflict{{
+					Value: json.RawMessage(`"Grace"`),
+					Agreement: models.MultiExtractAgreement{
+						Pages:            2,
+						IndependentRoots: 1,
+						FoldReason:       models.MultiExtractFoldReasonQuoteLineage,
+					},
+				}},
+			},
+		}},
+		Sources:       []models.MultiExtractSource{},
+		UsageComplete: true,
+		Error:         &models.ErrorDetail{Code: models.ErrCodeInternal},
+	}
+	baseline, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal fold-reason response baseline: %v", err)
 	}
 	fillerBytes := size - len(baseline)
 	if fillerBytes < 0 {

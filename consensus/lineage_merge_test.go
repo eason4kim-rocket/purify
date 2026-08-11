@@ -500,7 +500,7 @@ func lineageMergeAssertAgreement(t *testing.T, result Result, path string, pages
 	if !exists {
 		t.Fatalf("field %q is absent: %#v", path, result.Fields)
 	}
-	if field.Agreement != (Agreement{Pages: pages, IndependentRoots: roots}) {
+	if field.Agreement.Pages != pages || field.Agreement.IndependentRoots != roots {
 		t.Fatalf("field %q agreement = %#v, want pages=%d roots=%d", path, field.Agreement, pages, roots)
 	}
 }

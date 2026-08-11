@@ -92,20 +92,33 @@ type Result struct {
 	Fields map[string]FieldConsensus `json:"fields"`
 }
 
+// FoldReason explains why one source page was folded into another source
+// component. It is additive metadata: scoring continues to depend only on
+// Pages and IndependentRoots.
+type FoldReason string
+
+const (
+	FoldReasonSameRoot      FoldReason = "same_root"
+	FoldReasonNearDuplicate FoldReason = "near_duplicate"
+	FoldReasonQuoteLineage  FoldReason = "quote_lineage"
+)
+
 // Agreement reports unique pages and independent evidence components for one
 // value. Pages are counted only after canonical-URL deduplication.
 type Agreement struct {
-	Pages            int `json:"pages"`
-	IndependentRoots int `json:"independent_roots"`
+	Pages            int        `json:"pages"`
+	IndependentRoots int        `json:"independent_roots"`
+	FoldReason       FoldReason `json:"fold_reason,omitempty"`
 }
 
 // Support keeps a source and its provenance together. Evidence is nil when a
 // caller did not supply an anchor for the field; Receipt is empty when absent.
 type Support struct {
-	URL      string           `json:"url"`
-	Root     string           `json:"root"`
-	Evidence *evidence.Anchor `json:"evidence,omitempty"`
-	Receipt  string           `json:"receipt,omitempty"`
+	URL        string           `json:"url"`
+	Root       string           `json:"root"`
+	Evidence   *evidence.Anchor `json:"evidence,omitempty"`
+	Receipt    string           `json:"receipt,omitempty"`
+	FoldReason FoldReason       `json:"fold_reason,omitempty"`
 }
 
 // Conflict is a non-winning candidate, or any candidate when the top score is
@@ -235,22 +248,22 @@ func merge(results []SourceResult, withMaterialization bool) (Result, Materializ
 	}
 
 	sort.Slice(prepared, func(i, j int) bool { return prepared[i].url < prepared[j].url })
-	components := independentComponents(prepared)
+	independence := buildIndependencePlan(prepared)
 	paths := collectPaths(prepared)
-	if err := preflightOutput(paths, prepared, components); err != nil {
+	if err := preflightOutput(paths, prepared, independence); err != nil {
 		return Result{}, Materialization{}, err
 	}
 	materialization := Materialization{}
 	if withMaterialization {
 		var materializationErr error
-		materialization, materializationErr = materializePrepared(prepared, components)
+		materialization, materializationErr = materializePrepared(prepared, independence.components)
 		if materializationErr != nil {
 			return Result{}, Materialization{}, materializationErr
 		}
 	}
 	fields := make(map[string]FieldConsensus, len(paths))
 	for _, path := range paths {
-		fields[path] = mergeField(path, prepared, components)
+		fields[path] = mergeField(path, prepared, independence)
 	}
 	return Result{Fields: fields}, materialization, nil
 }
@@ -953,29 +966,201 @@ func (set *disjointSet) union(first, second int) {
 	}
 }
 
-func independentComponents(sources []preparedSource) []int {
-	set := newDisjointSet(len(sources))
+type independenceEdge struct {
+	first  int
+	second int
+	reason FoldReason
+}
+
+type independencePlan struct {
+	components   []int
+	forest       []independenceEdge
+	parent       []int
+	parentReason []FoldReason
+}
+
+type independenceNeighbor struct {
+	sourceID int
+	reason   FoldReason
+}
+
+func buildIndependencePlan(sources []preparedSource) independencePlan {
+	candidates := make([]independenceEdge, 0, len(sources)*(len(sources)-1)/2)
 	for first := range sources {
 		for second := first + 1; second < len(sources); second++ {
-			sameRoot := sources[first].root == sources[second].root
-			similar := sources[first].simText != 0 && sources[second].simText != 0 &&
-				simhash.Distance(sources[first].simText, sources[second].simText) <= independenceDistance
-			lineage := quoteLineageSimilar(
-				sources[first].lineage,
-				sources[first].fields,
-				sources[second].lineage,
-				sources[second].fields,
-			)
-			if sameRoot || similar || contentCoresSimilar(sources[first].core, sources[second].core) || lineage {
-				set.union(first, second)
+			reason := sourcePairFoldReason(sources[first], sources[second])
+			if reason == "" {
+				continue
+			}
+			edgeFirst, edgeSecond := first, second
+			if sources[edgeSecond].url < sources[edgeFirst].url {
+				edgeFirst, edgeSecond = edgeSecond, edgeFirst
+			}
+			candidates = append(candidates, independenceEdge{first: edgeFirst, second: edgeSecond, reason: reason})
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		first, second := candidates[i], candidates[j]
+		if foldReasonPriority(first.reason) != foldReasonPriority(second.reason) {
+			return foldReasonPriority(first.reason) < foldReasonPriority(second.reason)
+		}
+		if sources[first.first].url != sources[second.first].url {
+			return sources[first.first].url < sources[second.first].url
+		}
+		return sources[first.second].url < sources[second.second].url
+	})
+
+	set := newDisjointSet(len(sources))
+	forest := make([]independenceEdge, 0, len(sources))
+	for _, edge := range candidates {
+		if set.find(edge.first) == set.find(edge.second) {
+			continue
+		}
+		set.union(edge.first, edge.second)
+		forest = append(forest, edge)
+	}
+
+	adjacency := make([][]independenceNeighbor, len(sources))
+	for _, edge := range forest {
+		adjacency[edge.first] = append(adjacency[edge.first], independenceNeighbor{sourceID: edge.second, reason: edge.reason})
+		adjacency[edge.second] = append(adjacency[edge.second], independenceNeighbor{sourceID: edge.first, reason: edge.reason})
+	}
+	for sourceID := range adjacency {
+		sort.Slice(adjacency[sourceID], func(i, j int) bool {
+			return sources[adjacency[sourceID][i].sourceID].url < sources[adjacency[sourceID][j].sourceID].url
+		})
+	}
+
+	order := make([]int, len(sources))
+	for sourceID := range sources {
+		order[sourceID] = sourceID
+	}
+	sort.Slice(order, func(i, j int) bool { return sources[order[i]].url < sources[order[j]].url })
+	components := make([]int, len(sources))
+	parent := make([]int, len(sources))
+	parentReason := make([]FoldReason, len(sources))
+	for sourceID := range sources {
+		components[sourceID] = -1
+		parent[sourceID] = -1
+	}
+	for _, representative := range order {
+		if components[representative] >= 0 {
+			continue
+		}
+		components[representative] = representative
+		queue := []int{representative}
+		for len(queue) > 0 {
+			current := queue[0]
+			queue = queue[1:]
+			for _, neighbor := range adjacency[current] {
+				if components[neighbor.sourceID] >= 0 {
+					continue
+				}
+				components[neighbor.sourceID] = representative
+				parent[neighbor.sourceID] = current
+				parentReason[neighbor.sourceID] = neighbor.reason
+				queue = append(queue, neighbor.sourceID)
 			}
 		}
 	}
-	components := make([]int, len(sources))
-	for index := range sources {
-		components[index] = set.find(index)
+	return independencePlan{
+		components:   components,
+		forest:       forest,
+		parent:       parent,
+		parentReason: parentReason,
 	}
-	return components
+}
+
+func sourcePairFoldReason(first, second preparedSource) FoldReason {
+	if first.root == second.root {
+		return FoldReasonSameRoot
+	}
+	if quoteLineageSimilar(first.lineage, first.fields, second.lineage, second.fields) {
+		return FoldReasonQuoteLineage
+	}
+	legacySimilar := first.simText != 0 && second.simText != 0 &&
+		simhash.Distance(first.simText, second.simText) <= independenceDistance
+	if legacySimilar || contentCoresSimilar(first.core, second.core) {
+		return FoldReasonNearDuplicate
+	}
+	return ""
+}
+
+func foldReasonPriority(reason FoldReason) int {
+	switch reason {
+	case FoldReasonSameRoot:
+		return 0
+	case FoldReasonQuoteLineage:
+		return 1
+	case FoldReasonNearDuplicate:
+		return 2
+	default:
+		return 3
+	}
+}
+
+func (plan independencePlan) agreementFoldReason(sourceIDs []int) FoldReason {
+	if len(sourceIDs) < 2 {
+		return ""
+	}
+	byComponent := make(map[int][]int, len(sourceIDs))
+	for _, sourceID := range sourceIDs {
+		byComponent[plan.components[sourceID]] = append(byComponent[plan.components[sourceID]], sourceID)
+	}
+	reasons := make(map[FoldReason]struct{}, 2)
+	for _, members := range byComponent {
+		if len(members) < 2 {
+			continue
+		}
+		for _, member := range members[1:] {
+			if !plan.collectPathReasons(members[0], member, reasons) || len(reasons) > 1 {
+				return ""
+			}
+		}
+	}
+	if len(reasons) != 1 {
+		return ""
+	}
+	for reason := range reasons {
+		return reason
+	}
+	return ""
+}
+
+func (plan independencePlan) collectPathReasons(first, second int, reasons map[FoldReason]struct{}) bool {
+	ancestors := make(map[int]struct{}, len(plan.parent))
+	for current := first; current >= 0; current = plan.parent[current] {
+		ancestors[current] = struct{}{}
+	}
+	common := second
+	for {
+		if _, exists := ancestors[common]; exists {
+			break
+		}
+		reason := plan.parentReason[common]
+		if reason == "" {
+			return false
+		}
+		reasons[reason] = struct{}{}
+		common = plan.parent[common]
+		if common < 0 {
+			return false
+		}
+	}
+	for current := first; current != common; current = plan.parent[current] {
+		reason := plan.parentReason[current]
+		if reason == "" {
+			return false
+		}
+		reasons[reason] = struct{}{}
+	}
+	return true
+}
+
+// independentComponents remains the narrow numerical view used by
+// materialization benchmarks and compatibility tests.
+func independentComponents(sources []preparedSource) []int {
+	return buildIndependencePlan(sources).components
 }
 
 func collectPaths(sources []preparedSource) []string {
@@ -1004,7 +1189,7 @@ type fieldPlan struct {
 	ambiguous bool
 }
 
-func planField(path string, sources []preparedSource, components []int) fieldPlan {
+func planField(path string, sources []preparedSource, independence independencePlan) fieldPlan {
 	byValue := make(map[string]*valueGroup)
 	for sourceID, source := range sources {
 		value, exists := source.fields[path]
@@ -1022,9 +1207,13 @@ func planField(path string, sources []preparedSource, components []int) fieldPla
 	for _, group := range byValue {
 		independent := make(map[int]struct{}, len(group.sourceIDs))
 		for _, sourceID := range group.sourceIDs {
-			independent[components[sourceID]] = struct{}{}
+			independent[independence.components[sourceID]] = struct{}{}
 		}
-		group.agreement = Agreement{Pages: len(group.sourceIDs), IndependentRoots: len(independent)}
+		group.agreement = Agreement{
+			Pages:            len(group.sourceIDs),
+			IndependentRoots: len(independent),
+			FoldReason:       independence.agreementFoldReason(group.sourceIDs),
+		}
 		groups = append(groups, group)
 	}
 	sort.Slice(groups, func(i, j int) bool {
@@ -1043,28 +1232,28 @@ func planField(path string, sources []preparedSource, components []int) fieldPla
 	}
 }
 
-func mergeField(path string, sources []preparedSource, components []int) FieldConsensus {
-	plan := planField(path, sources, components)
-	if plan.ambiguous {
-		groups := plan.groups
+func mergeField(path string, sources []preparedSource, independence independencePlan) FieldConsensus {
+	fieldPlan := planField(path, sources, independence)
+	if fieldPlan.ambiguous {
+		groups := fieldPlan.groups
 		conflicts := make([]Conflict, 0, len(groups))
 		for _, group := range groups {
-			conflicts = append(conflicts, makeConflict(path, group, sources))
+			conflicts = append(conflicts, makeConflict(path, group, sources, independence))
 		}
 		return FieldConsensus{Conflicts: conflicts, Ambiguous: true}
 	}
 
-	groups := plan.groups
+	groups := fieldPlan.groups
 	winner := groups[0]
 	field := FieldConsensus{
 		Value:     append(json.RawMessage(nil), winner.value.raw...),
 		Agreement: winner.agreement,
-		Supports:  makeSupports(path, winner.sourceIDs, sources),
+		Supports:  makeSupports(path, winner.sourceIDs, sources, independence),
 	}
 	if len(groups) > 1 {
 		field.Conflicts = make([]Conflict, 0, len(groups)-1)
 		for _, group := range groups[1:] {
-			field.Conflicts = append(field.Conflicts, makeConflict(path, group, sources))
+			field.Conflicts = append(field.Conflicts, makeConflict(path, group, sources, independence))
 		}
 	}
 	return field
@@ -1082,12 +1271,12 @@ func (budget *outputBudget) reserve(size int) error {
 	return nil
 }
 
-func preflightOutput(paths []string, sources []preparedSource, components []int) error {
-	_, err := measuredOutputSize(paths, sources, components)
+func preflightOutput(paths []string, sources []preparedSource, independence independencePlan) error {
+	_, err := measuredOutputSize(paths, sources, independence)
 	return err
 }
 
-func measuredOutputSize(paths []string, sources []preparedSource, components []int) (int, error) {
+func measuredOutputSize(paths []string, sources []preparedSource, independence independencePlan) (int, error) {
 	budget := &outputBudget{}
 	if err := budget.reserve(len(`{"fields":{`)); err != nil {
 		return 0, err
@@ -1101,7 +1290,7 @@ func measuredOutputSize(paths []string, sources []preparedSource, components []i
 		if err := budget.reserve(jsonMarshalStringLen(path) + 1); err != nil { // key + colon
 			return 0, err
 		}
-		if err := reserveFieldOutput(budget, path, planField(path, sources, components), sources); err != nil {
+		if err := reserveFieldOutput(budget, path, planField(path, sources, independence), sources, independence); err != nil {
 			return 0, err
 		}
 	}
@@ -1111,7 +1300,7 @@ func measuredOutputSize(paths []string, sources []preparedSource, components []i
 	return budget.used, nil
 }
 
-func reserveFieldOutput(budget *outputBudget, path string, plan fieldPlan, sources []preparedSource) error {
+func reserveFieldOutput(budget *outputBudget, path string, plan fieldPlan, sources []preparedSource, independence independencePlan) error {
 	if err := budget.reserve(1); err != nil { // {
 		return err
 	}
@@ -1143,7 +1332,7 @@ func reserveFieldOutput(budget *outputBudget, path string, plan fieldPlan, sourc
 		if err := property(`"supports":`); err != nil {
 			return err
 		}
-		if err := reserveSupportsOutput(budget, path, winner.sourceIDs, sources); err != nil {
+		if err := reserveSupportsOutput(budget, path, winner.sourceIDs, sources, independence); err != nil {
 			return err
 		}
 	}
@@ -1174,7 +1363,7 @@ func reserveFieldOutput(budget *outputBudget, path string, plan fieldPlan, sourc
 					return err
 				}
 			}
-			if err := reserveConflictOutput(budget, path, group, sources); err != nil {
+			if err := reserveConflictOutput(budget, path, group, sources, independence); err != nil {
 				return err
 			}
 		}
@@ -1200,10 +1389,15 @@ func reserveAgreementOutput(budget *outputBudget, agreement Agreement) error {
 	if err := budget.reserve(len(`,"independent_roots":`) + decimalIntLen(agreement.IndependentRoots)); err != nil {
 		return err
 	}
+	if agreement.FoldReason != "" {
+		if err := budget.reserve(len(`,"fold_reason":`) + jsonMarshalStringLen(string(agreement.FoldReason))); err != nil {
+			return err
+		}
+	}
 	return budget.reserve(1)
 }
 
-func reserveConflictOutput(budget *outputBudget, path string, group *valueGroup, sources []preparedSource) error {
+func reserveConflictOutput(budget *outputBudget, path string, group *valueGroup, sources []preparedSource, independence independencePlan) error {
 	if err := budget.reserve(len(`{"value":`) + scalarJSONLen(group.value)); err != nil {
 		return err
 	}
@@ -1216,13 +1410,13 @@ func reserveConflictOutput(budget *outputBudget, path string, group *valueGroup,
 	if err := budget.reserve(len(`,"supports":`)); err != nil {
 		return err
 	}
-	if err := reserveSupportsOutput(budget, path, group.sourceIDs, sources); err != nil {
+	if err := reserveSupportsOutput(budget, path, group.sourceIDs, sources, independence); err != nil {
 		return err
 	}
 	return budget.reserve(1)
 }
 
-func reserveSupportsOutput(budget *outputBudget, path string, sourceIDs []int, sources []preparedSource) error {
+func reserveSupportsOutput(budget *outputBudget, path string, sourceIDs []int, sources []preparedSource, independence independencePlan) error {
 	if err := budget.reserve(1); err != nil { // [
 		return err
 	}
@@ -1232,14 +1426,14 @@ func reserveSupportsOutput(budget *outputBudget, path string, sourceIDs []int, s
 				return err
 			}
 		}
-		if err := reserveSupportOutput(budget, path, sources[sourceID]); err != nil {
+		if err := reserveSupportOutput(budget, path, sources[sourceID], independence.parentReason[sourceID]); err != nil {
 			return err
 		}
 	}
 	return budget.reserve(1)
 }
 
-func reserveSupportOutput(budget *outputBudget, path string, source preparedSource) error {
+func reserveSupportOutput(budget *outputBudget, path string, source preparedSource, reason FoldReason) error {
 	if err := budget.reserve(len(`{"url":`) + source.urlJSON); err != nil {
 		return err
 	}
@@ -1256,6 +1450,11 @@ func reserveSupportOutput(budget *outputBudget, path string, source preparedSour
 	}
 	if receipt := source.receipts[path]; receipt != "" {
 		if err := budget.reserve(len(`,"receipt":`) + jsonMarshalStringLen(receipt)); err != nil {
+			return err
+		}
+	}
+	if reason != "" {
+		if err := budget.reserve(len(`,"fold_reason":`) + jsonMarshalStringLen(string(reason))); err != nil {
 			return err
 		}
 	}
@@ -1364,19 +1563,24 @@ func scalarLess(first, second scalarValue) bool {
 	}
 }
 
-func makeConflict(path string, group *valueGroup, sources []preparedSource) Conflict {
+func makeConflict(path string, group *valueGroup, sources []preparedSource, independence independencePlan) Conflict {
 	return Conflict{
 		Value:     append(json.RawMessage(nil), group.value.raw...),
 		Agreement: group.agreement,
-		Supports:  makeSupports(path, group.sourceIDs, sources),
+		Supports:  makeSupports(path, group.sourceIDs, sources, independence),
 	}
 }
 
-func makeSupports(path string, sourceIDs []int, sources []preparedSource) []Support {
+func makeSupports(path string, sourceIDs []int, sources []preparedSource, independence independencePlan) []Support {
 	supports := make([]Support, 0, len(sourceIDs))
 	for _, sourceID := range sourceIDs {
 		source := sources[sourceID]
-		support := Support{URL: source.url, Root: source.root, Receipt: source.receipts[path]}
+		support := Support{
+			URL:        source.url,
+			Root:       source.root,
+			Receipt:    source.receipts[path],
+			FoldReason: independence.parentReason[sourceID],
+		}
 		if anchor, exists := source.basis[path]; exists {
 			anchorCopy := anchor
 			support.Evidence = &anchorCopy
