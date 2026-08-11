@@ -22,12 +22,58 @@ const (
 	MaxLLMResponseBytes = 32 << 20
 
 	defaultHTTPTimeout = 120 * time.Second
+
+	maxResponseFormatCapabilityEntries = 128
 )
 
 // Client is a lightweight OpenAI-compatible API client for structured extraction.
 // It uses net/http directly — no third-party SDK needed.
 type Client struct {
 	httpClient *http.Client
+
+	// rfSupport is per Client so separately configured transports cannot
+	// influence each other's capability probes.
+	rfSupport *responseFormatCapabilityCache
+}
+
+type responseFormatCapabilityKey struct {
+	baseURL string
+	model   string
+}
+
+// responseFormatCapabilityCache remembers whether an OpenAI-compatible
+// endpoint/model pair accepts strict response_format=json_schema. It uses
+// deterministic FIFO eviction to bound attacker-controlled BYOK entries.
+type responseFormatCapabilityCache struct {
+	mu      sync.Mutex
+	entries map[responseFormatCapabilityKey]bool
+	order   []responseFormatCapabilityKey
+}
+
+func (c *responseFormatCapabilityCache) load(key responseFormatCapabilityKey) (bool, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	supported, ok := c.entries[key]
+	return supported, ok
+}
+
+func (c *responseFormatCapabilityCache) store(key responseFormatCapabilityKey, supported bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.entries == nil {
+		c.entries = make(map[responseFormatCapabilityKey]bool, maxResponseFormatCapabilityEntries)
+	}
+	if _, ok := c.entries[key]; ok {
+		c.entries[key] = supported
+		return
+	}
+	if len(c.entries) == maxResponseFormatCapabilityEntries {
+		delete(c.entries, c.order[0])
+		c.order = c.order[1:]
+	}
+	c.entries[key] = supported
+	c.order = append(c.order, key)
 }
 
 // NewClient creates a new LLM client with the given http.Client. A supplied
@@ -36,7 +82,10 @@ func NewClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
-	return &Client{httpClient: httpClient}
+	return &Client{
+		httpClient: httpClient,
+		rfSupport:  &responseFormatCapabilityCache{},
+	}
 }
 
 // ExtractParams holds per-request LLM configuration (BYOK).
@@ -90,10 +139,6 @@ type chatResponse struct {
 	} `json:"usage"`
 }
 
-// rfSupport caches whether an OpenAI-compatible base URL accepts strict
-// response_format=json_schema. Unknown providers are probed on first use.
-var rfSupport sync.Map // normalized baseURL -> bool
-
 type providerResponseError struct {
 	status int
 	body   []byte
@@ -129,15 +174,16 @@ func (c *Client) ExtractWithRepair(
 
 func (c *Client) extract(ctx context.Context, schema json.RawMessage, params ExtractParams, messages []chatMessage) (*ExtractResult, error) {
 	baseURL := strings.TrimRight(params.BaseURL, "/")
+	capabilityKey := responseFormatCapabilityKey{baseURL: baseURL, model: params.Model}
 	strict := true
-	if supported, ok := rfSupport.Load(baseURL); ok {
-		strict = supported.(bool)
+	if supported, ok := c.rfSupport.load(capabilityKey); ok {
+		strict = supported
 	}
 
 	result, err := c.sendChat(ctx, schema, params, messages, strict)
 	if err == nil {
 		if strict {
-			rfSupport.Store(baseURL, true)
+			c.rfSupport.store(capabilityKey, true)
 		}
 		return result, nil
 	}
@@ -145,7 +191,7 @@ func (c *Client) extract(ctx context.Context, schema json.RawMessage, params Ext
 	var providerErr *providerResponseError
 	if strict && errors.As(err, &providerErr) && providerErr.status == http.StatusBadRequest &&
 		strings.Contains(strings.ToLower(string(providerErr.body)), "response_format") {
-		rfSupport.Store(baseURL, false)
+		c.rfSupport.store(capabilityKey, false)
 		result, fallbackErr := c.sendChat(ctx, schema, params, messages, false)
 		if fallbackErr != nil {
 			return nil, normalizeProviderError(fallbackErr)

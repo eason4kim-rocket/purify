@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -60,8 +61,6 @@ func TestExtractUsesStrictJSONSchema(t *testing.T) {
 
 func TestExtractFallsBackAndCachesUnsupportedResponseFormat(t *testing.T) {
 	const baseURL = "https://fallback.test/v1"
-	rfSupport.Delete(baseURL)
-	t.Cleanup(func() { rfSupport.Delete(baseURL) })
 
 	var strictCalls atomic.Int32
 	var objectCalls atomic.Int32
@@ -90,6 +89,100 @@ func TestExtractFallsBackAndCachesUnsupportedResponseFormat(t *testing.T) {
 	}
 	if objectCalls.Load() != 2 {
 		t.Fatalf("json_object calls = %d, want 2", objectCalls.Load())
+	}
+}
+
+func TestResponseFormatCapabilityCacheIsIsolatedPerClient(t *testing.T) {
+	const baseURL = "https://client-isolation.test/v1"
+
+	params := ExtractParams{APIKey: "test", Model: "test", BaseURL: baseURL}
+	schema := json.RawMessage(`{"type":"object"}`)
+	unsupported := NewClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		if strings.Contains(string(body), `"type":"json_schema"`) {
+			return rawHTTPResponse(http.StatusBadRequest, `{"error":{"message":"unsupported response_format json_schema"}}`), nil
+		}
+		return chatHTTPResponse(http.StatusOK, `{"ok":true}`), nil
+	})})
+	if _, err := unsupported.Extract(context.Background(), "content", schema, params); err != nil {
+		t.Fatalf("unsupported client fallback error = %v", err)
+	}
+
+	var supportedFormat responseFormat
+	supported := NewClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var request chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			return nil, err
+		}
+		supportedFormat = *request.ResponseFormat
+		return chatHTTPResponse(http.StatusOK, `{"ok":true}`), nil
+	})})
+	if _, err := supported.Extract(context.Background(), "content", schema, params); err != nil {
+		t.Fatalf("supported client extraction error = %v", err)
+	}
+	if supportedFormat.Type != "json_schema" || supportedFormat.JSONSchema == nil || !supportedFormat.JSONSchema.Strict {
+		t.Fatalf("second client response format = %#v, want fresh strict json_schema probe", supportedFormat)
+	}
+}
+
+func TestResponseFormatCapabilityCacheIsIsolatedPerModel(t *testing.T) {
+	const baseURL = "https://model-isolation.test/v1"
+
+	var supportedFormat responseFormat
+	client := NewClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var request chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			return nil, err
+		}
+		if request.Model == "legacy" && request.ResponseFormat.Type == "json_schema" {
+			return rawHTTPResponse(http.StatusBadRequest, `{"error":{"message":"unsupported response_format json_schema"}}`), nil
+		}
+		if request.Model == "supported" {
+			supportedFormat = *request.ResponseFormat
+		}
+		return chatHTTPResponse(http.StatusOK, `{"ok":true}`), nil
+	})})
+
+	schema := json.RawMessage(`{"type":"object"}`)
+	if _, err := client.Extract(context.Background(), "content", schema, ExtractParams{
+		APIKey: "test", Model: "legacy", BaseURL: baseURL,
+	}); err != nil {
+		t.Fatalf("legacy model fallback error = %v", err)
+	}
+	if _, err := client.Extract(context.Background(), "content", schema, ExtractParams{
+		APIKey: "test", Model: "supported", BaseURL: baseURL,
+	}); err != nil {
+		t.Fatalf("supported model extraction error = %v", err)
+	}
+	if supportedFormat.Type != "json_schema" || supportedFormat.JSONSchema == nil || !supportedFormat.JSONSchema.Strict {
+		t.Fatalf("supported model response format = %#v, want fresh strict json_schema probe", supportedFormat)
+	}
+}
+
+func TestResponseFormatCapabilityCacheIsBounded(t *testing.T) {
+	var cache responseFormatCapabilityCache
+	for i := 0; i <= maxResponseFormatCapabilityEntries; i++ {
+		cache.store(responseFormatCapabilityKey{
+			baseURL: "https://bounded.test/v1",
+			model:   fmt.Sprintf("model-%03d", i),
+		}, true)
+	}
+
+	cache.mu.Lock()
+	entryCount := len(cache.entries)
+	orderCount := len(cache.order)
+	cache.mu.Unlock()
+	if entryCount != maxResponseFormatCapabilityEntries || orderCount != maxResponseFormatCapabilityEntries {
+		t.Fatalf("cache sizes = entries %d, order %d; want both %d", entryCount, orderCount, maxResponseFormatCapabilityEntries)
+	}
+	if _, ok := cache.load(responseFormatCapabilityKey{baseURL: "https://bounded.test/v1", model: "model-000"}); ok {
+		t.Fatal("oldest capability entry survived FIFO eviction")
+	}
+	if supported, ok := cache.load(responseFormatCapabilityKey{baseURL: "https://bounded.test/v1", model: "model-128"}); !ok || !supported {
+		t.Fatalf("newest capability entry = (%v, %v), want (true, true)", supported, ok)
 	}
 }
 
