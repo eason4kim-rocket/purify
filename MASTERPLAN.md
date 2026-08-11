@@ -1452,16 +1452,16 @@ E-6c feat(answer): withhold beliefs on entity mismatch        # 依赖 E-6b
 ## 16. 交接 · 2026-08-11 起 Codex 接续开发
 
 > **给 Codex 的单页入口。** 读完本节 + `AGENTS.md` 即可开工；战略问题回 `PLAN.md`（LOCKED，三层结构与非目标不许推翻）。
-> **状态快照**：原交接 waypoint `c7189c2`（分支 `codex/search-api-v1`）；P1 N_eff v1 已于 2026-08-11 完成至 `94f9f88`。Phase 0–8 代码全收口；EAV 已有真实成绩单（§15 状态行：P=1.000 / R=0.935 / FP=0 / hard R=0.975，341 行 gpt-oss:120b 真实录制）。N_eff v1 收口时全仓 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...` 与 `git diff --check` 全绿。
+> **状态快照**：原交接 waypoint `c7189c2`（分支 `codex/search-api-v1`）；P1 N_eff v1 五卡已于 2026-08-11 完成至 `94f9f88`，整块审查补强至 `d213376`。Phase 0–8 代码全收口；EAV 已有真实成绩单（§15 状态行：P=1.000 / R=0.935 / FP=0 / hard R=0.975，341 行 gpt-oss:120b 真实录制）。N_eff v1 收口时全仓 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...` 与 `git diff --check` 全绿。
 
 ### 16.1 优先队列
 
-**P1 · N_eff v1（PLAN.md §6 步 3，落 `consensus/`）** —— 出处血缘独立。**实况先于计划**：`consensus/merge.go` 的 v0 已比 PLAN.md §5.4 描述的强——`independentComponents`（merge.go:927）已用 union-find 按「同 eTLD+1 根域 ∪ 全页 SimText simhash 距离 ≤ `independenceDistance`(3)」折叠，跨域**完全**镜像已能折。v1 的真实增量按卡执行：
+**P1 · N_eff v1（PLAN.md §6 步 3，落 `consensus/`）** —— 出处血缘独立。**实况先于计划**：在原交接 waypoint `c7189c2`，v0 的 `independentComponents` 已比 PLAN.md §5.4 描述的强——用 union-find 按「同 eTLD+1 根域 ∪ 全页 SimText simhash 距离 ≤ `independenceDistance`(3)」折叠，跨域**完全**镜像已能折。当前 v1 的入口已升级为 `buildIndependencePlan` / `sourcePairFoldReason`，`independentComponents` 只保留为数值兼容包装。v1 的真实增量按卡执行：
 
 - **N-1 · 实况盘点 + 设计定案** ✅（`97490db`）：已通读 `consensus/merge.go`/`materialize.go`、两组测试、`simhash/` 全家及生产接线；v0 边界与 N-2…N-5 实施细则见 §16.2–§16.3。⟳ 关键实况：`Anchor.Quote` 通常只是抽取标量，不是支撑句；内容核/措辞血缘必须从 cleaned content + 已验证 `TextRange` 重建有界邻域。
 - **N-2 · 内容核指纹** ✅（`9a3455e`）：在 v0 边的并集上新增「支撑字段锚点邻域」的规范化 shingle 指纹；不替换同根域/legacy 全页 SimText。en/zh 同稿异站真实经过 production fingerprint 折到 1，独立 hard negatives 不误折。
 - **N-3 · 措辞血缘** ✅（`c78010b`）：相同 path/value 的锚点句段存在足够长逐字包含 ⇒ 视为转载衍生，入 union；95/96/97 rune、CJK、传递链、超长 fragment 与 source-global materialization 均已锁门。
-- **N-4 · 折叠原因导出（additive）** ✅（`e17086c`）：`Support`/`Agreement` 增加 omitempty 字段暴露折叠证据（`fold_reason: same_root | near_duplicate | quote_lineage`）；deterministic forest、mixed witness、REST/MCP/Answer 投影与 32 MiB 预算均已锁门，公开契约只加不改。
+- **N-4 · 折叠原因导出（additive）** ✅（`e17086c`，整块审查补强 `d213376`）：`Support`/`Agreement` 增加 omitempty 字段暴露折叠证据（`fold_reason: same_root | near_duplicate | quote_lineage`）；deterministic forest、mixed witness、REST/MCP/Answer 投影与 32 MiB 预算均已锁门，MCP multi decoder 同时拒绝普通/Unicode-escaped 重复 JSON key，公开契约只加不改。
 - **N-5 · 构造集评测门** ✅（`94f9f88`）：`consensus/testdata/neff/` 已有 33 个 source / 12 个 case，覆盖六类、en/zh、1+7 镜像、8 独立源、95-rune、lineage、mixed、compat 与 bridge；严格 loader、v0/v1 有界排列和 exact reason 门已并入普通 `go test`。
 
 **P2 · EAV 校准迭代（小卡）**：
@@ -1568,11 +1568,12 @@ N-2  9a3455e  feat(consensus): fingerprint anchored content cores
 N-3  c78010b  feat(consensus): fold verbatim quote lineage
 N-4  e17086c  feat(consensus): expose source fold reasons
 N-5  94f9f88  test(consensus): gate effective source independence
+REV   d213376  fix(mcp): reject duplicate multi response fields
 ```
 
 每卡都先红测试后实现，且 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...` 与 `git diff --check` 全绿才 commit。**非目标**：方向性转载图/发布时间先后、claim 级不同 component、改 answer 置信度公式、步 4 重排、ledger 持久化、Wikidata/外部查重、提高 `MaxSources`。
 
-> **收口状态（2026-08-11）**：N-1…N-5 五卡全部完成；生产增量按内容核、逐字血缘、可审计折叠原因三个单关注提交落地，构造集以 33 source / 12 case 对六类信号做 exact gate。三路独立审计均无阻塞；收口快照全仓 test/race/vet/build/diff-check 通过。下一步可按优先队列进入 P2；P3 的接口依赖也已满足，但仍须先开设计卡。
+> **收口状态（2026-08-11）**：N-1…N-5 五卡全部完成；生产增量按内容核、逐字血缘、可审计折叠原因三个单关注提交落地，构造集以 33 source / 12 case 对六类信号做 exact gate。分卡审计全部 PASS；随后对 `c7189c2..c12fbdc` 做整块审查，发现 MCP multi strict decoder 可被重复 `fold_reason` 的 last-wins 语义绕过，已由红测试复现并在 `d213376` 递归拒绝 exact/Unicode-escaped duplicate key，发现者复审 PASS。最终快照全仓 test/race/vet/build/diff-check 通过。下一步可按优先队列进入 P2；P3 的接口依赖也已满足，但仍须先开设计卡。
 
 > **EN —** N_eff v1 preserves document-global components and adds bounded, anchor-centered content-core similarity plus exact long-fragment lineage as conservative union edges. Missing enhanced input retains v0 compatibility; malformed or hard-size-invalid input fails explicitly, while richer derived inputs are sampled deterministically within fixed bounds. Sampling may miss an enhanced fold and thus overcount independence relative to an unbounded ideal, but never removes the v0 signals. N-2/N-3 may change winners, materialization outcomes, and confidence through the new N_eff, while their schemas/formulas stay intact; N-4 itself only adds fold metadata from a deterministic forest.
 
