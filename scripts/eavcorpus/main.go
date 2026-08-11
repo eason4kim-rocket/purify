@@ -13,6 +13,18 @@
 // EAVCORPUS_MODEL, EAVCORPUS_BASE_URL) and captures raw extraction and
 // referee replies for offline replay in the golden tests. Drafts must be
 // human-audited before they replace the committed corpus.
+//
+// The audited real-fetched corpus is staged under scripts/eavcorpus/corpus/
+// (docs.jsonl + labels.jsonl). Promotion into verify/eav/testdata/golden/
+// happens only together with fresh recordings:
+//
+//	EAVCORPUS_API_KEY=... eavcorpus -mode record \
+//	  -docs scripts/eavcorpus/corpus/docs.jsonl \
+//	  -labels scripts/eavcorpus/corpus/labels.jsonl \
+//	  -out scripts/eavcorpus/corpus/recordings
+//
+// then copy docs.jsonl, labels.jsonl, and recordings/ over testdata/golden/
+// and run the golden gates.
 package main
 
 import (
@@ -78,7 +90,7 @@ func main() {
 	case "fetch":
 		err = runFetch(*seedsPath, *outDir)
 	case "pair":
-		err = runPair(*seedsPath, *outDir)
+		err = runPair(*seedsPath, *docsPath, *outDir)
 	case "record":
 		err = runRecord(*docsPath, *labelsPath, *outDir)
 	default:
@@ -185,7 +197,11 @@ func fetchOne(client *http.Client, pipeline *cleaner.Cleaner, domain string, ent
 	}, nil
 }
 
-func runPair(seedsPath, outDir string) error {
+// hardConfusabilityFloor separates a hard (lexically confusable) mismatch
+// draft row from an ordinary sibling row.
+const hardConfusabilityFloor = 0.34
+
+func runPair(seedsPath, docsPath, outDir string) error {
 	seeds, err := loadSeeds(seedsPath)
 	if err != nil {
 		return err
@@ -193,10 +209,34 @@ func runPair(seedsPath, outDir string) error {
 	if outDir == "" {
 		return fmt.Errorf("-out is required")
 	}
-	labels := make([]corpusLabel, 0, 256)
+	fetched := map[string]struct{}{}
+	if docsPath != "" {
+		if err := readJSONL(docsPath, func(line []byte) error {
+			var doc corpusDoc
+			if err := json.Unmarshal(line, &doc); err != nil {
+				return err
+			}
+			fetched[doc.ID] = struct{}{}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("read docs: %w", err)
+		}
+	}
+	hasDoc := func(docID string) bool {
+		if docsPath == "" {
+			return true
+		}
+		_, ok := fetched[docID]
+		return ok
+	}
+
+	labels := make([]corpusLabel, 0, 512)
 	for _, domain := range seeds {
 		for index, entity := range domain.Entities {
 			docID := domain.Domain + "/" + entity.ID
+			if !hasDoc(docID) {
+				continue
+			}
 			labels = append(labels, corpusLabel{
 				Subject: entity.Subject, Doc: docID, Label: "match",
 				Domain: domain.Domain, Note: "UNAUDITED DRAFT",
@@ -207,19 +247,14 @@ func runPair(seedsPath, outDir string) error {
 					Domain: domain.Domain, Note: "UNAUDITED DRAFT: alias",
 				})
 			}
-			hardest, easiest := siblingPair(domain.Entities, index)
-			if hardest >= 0 {
+			for _, pick := range siblingPicks(domain.Entities, index) {
+				note := "UNAUDITED DRAFT: sibling"
+				if pick.hard {
+					note = "UNAUDITED DRAFT: confusable sibling"
+				}
 				labels = append(labels, corpusLabel{
-					Subject: domain.Entities[hardest].Subject, Doc: docID, Label: "mismatch",
-					Domain: domain.Domain, Hard: true,
-					Note: "UNAUDITED DRAFT: confusable sibling",
-				})
-			}
-			if easiest >= 0 && easiest != hardest {
-				labels = append(labels, corpusLabel{
-					Subject: domain.Entities[easiest].Subject, Doc: docID, Label: "mismatch",
-					Domain: domain.Domain,
-					Note:   "UNAUDITED DRAFT: sibling",
+					Subject: domain.Entities[pick.index].Subject, Doc: docID, Label: "mismatch",
+					Domain: domain.Domain, Hard: pick.hard, Note: note,
 				})
 			}
 		}
@@ -232,25 +267,58 @@ func runPair(seedsPath, outDir string) error {
 	})
 }
 
-// siblingPair returns the most lexically confusable sibling (hard mismatch)
-// and the least similar one (easy mismatch) for the entity at index.
-func siblingPair(entities []seedEntity, index int) (int, int) {
+type siblingPick struct {
+	index int
+	hard  bool
+}
+
+// siblingPicks returns up to three mismatch partners for the entity at
+// index: the two most lexically confusable siblings and the least similar
+// one. Hardness is decided by the confusability score itself, not by rank,
+// so a domain of fully distinct names yields no false hard rows.
+func siblingPicks(entities []seedEntity, index int) []siblingPick {
 	subject := eav.Normalize(entities[index].Subject)
-	hardest, easiest := -1, -1
-	hardestScore, easiestScore := -1.0, 2.0
+	type scored struct {
+		index int
+		score float64
+	}
+	siblings := make([]scored, 0, len(entities)-1)
 	for sibling := range entities {
 		if sibling == index {
 			continue
 		}
-		score := confusability(subject, eav.Normalize(entities[sibling].Subject))
-		if score > hardestScore {
-			hardestScore, hardest = score, sibling
+		siblings = append(siblings, scored{
+			index: sibling,
+			score: confusability(subject, eav.Normalize(entities[sibling].Subject)),
+		})
+	}
+	sort.Slice(siblings, func(first, second int) bool {
+		if siblings[first].score != siblings[second].score {
+			return siblings[first].score > siblings[second].score
 		}
-		if score < easiestScore {
-			easiestScore, easiest = score, sibling
+		return entities[siblings[first].index].Subject < entities[siblings[second].index].Subject
+	})
+	picks := make([]siblingPick, 0, 3)
+	for _, candidate := range siblings {
+		if len(picks) == 2 {
+			break
+		}
+		picks = append(picks, siblingPick{index: candidate.index, hard: candidate.score >= hardConfusabilityFloor})
+	}
+	if len(siblings) > len(picks) {
+		last := siblings[len(siblings)-1]
+		duplicate := false
+		for _, pick := range picks {
+			if pick.index == last.index {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			picks = append(picks, siblingPick{index: last.index, hard: last.score >= hardConfusabilityFloor})
 		}
 	}
-	return hardest, easiest
+	return picks
 }
 
 // confusability is a draft-labeling heuristic only: token overlap plus a
