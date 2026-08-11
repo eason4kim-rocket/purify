@@ -1481,7 +1481,7 @@ E-6c feat(answer): withhold beliefs on entity mismatch        # 依赖 E-6b
 - **E-7 · 提示词逐字强化 + 重录对比** ✅（`18411d7`）：保留 shortest/proves 语义并强化逐字复制；golden 现逐一锁住 78/78 extraction quote 为 cleaned 原文子串且通过 production anchoring。首次 frozen-prompt 全量与随后预声明 5 文档 / 22 标签的 paired repair 分开记账；晋级 replay 为 P=1.000 / R=0.996 / FP=0 / U=0.003 / silent=0、hard R=0.975，详见 §15。改 prompt/`match.go` 阈值仍**必须过 golden 门**。
 - **E-8 · managed LLM 私网豁免配置** ✅（`c60ec5f`，整块审查补强 `22c379e`，Compose 接线 `1a2c601`）：新增 `PURIFY_EAV_LLM_ALLOW_PRIVATE`（默认 false），只给**运营者固定配置的** managed EAV 独立 policy/client 开私网；request BYOK 与 Search/relay/compiler/webhook 等共享 egress 仍是公网 only。loopback、默认拒绝、同进程隔离与零凭据泄漏均有回归门；LLM response-format capability cache 也已改为 per-client、per-model 且 128 项有界，request/managed 不再共享降级状态；主 Compose 路径显式转发全部 7 个 EAV 键。
 
-**P3 · 步 4 重排器 + 信任排序（N-4 已解锁，待开卡）**：PLAN.md §4.3。先开设计卡再动工；EAV 侧接口 `MultiExtractSource.Entity` 与 N_eff 侧 `fold_reason` 均已备好。
+**P3 · 步 4 重排器 + 信任排序** 🚧：PLAN.md §4.3。R-1 实况盘点与设计定案已写入 §17；⟳ 交接时说“`Entity`/`fold_reason` 已备好”只表示 transport 字段存在，**不等于 Search 已有逐结果信任分**。实现须先落基础 relevance，再补 component analysis + shared artifact seam，最后才开放显式 `trust` 模式。
 
 **P4 · 旧账（№ 不阻塞上面）**：§10 准确率 CI（golden 门已现成，接 CI 即可）；commons 冷启动 ≥30 垂类（要运行实例 + key）；P7 自适应租约。
 
@@ -1586,7 +1586,7 @@ REV   d213376  fix(mcp): reject duplicate multi response fields
 
 每卡都先红测试后实现，且 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...` 与 `git diff --check` 全绿才 commit。**非目标**：方向性转载图/发布时间先后、claim 级不同 component、改 answer 置信度公式、步 4 重排、ledger 持久化、Wikidata/外部查重、提高 `MaxSources`。
 
-> **收口状态（2026-08-11）**：N-1…N-5 五卡全部完成；生产增量按内容核、逐字血缘、可审计折叠原因三个单关注提交落地，构造集以 33 source / 12 case 对六类信号做 exact gate。分卡审计全部 PASS；随后对 `c7189c2..c12fbdc` 做整块审查，发现 MCP multi strict decoder 可被重复 `fold_reason` 的 last-wins 语义绕过，已由红测试复现并在 `d213376` 递归拒绝 exact/Unicode-escaped duplicate key，发现者复审 PASS。最终快照全仓 test/race/vet/build/diff-check 通过。P2 也已完成；下一步进入 P3，但仍须先开设计卡。
+> **收口状态（2026-08-11）**：N-1…N-5 五卡全部完成；生产增量按内容核、逐字血缘、可审计折叠原因三个单关注提交落地，构造集以 33 source / 12 case 对六类信号做 exact gate。分卡审计全部 PASS；随后对 `c7189c2..c12fbdc` 做整块审查，发现 MCP multi strict decoder 可被重复 `fold_reason` 的 last-wins 语义绕过，已由红测试复现并在 `d213376` 递归拒绝 exact/Unicode-escaped duplicate key，发现者复审 PASS。最终快照全仓 test/race/vet/build/diff-check 通过。P2 也已完成；P3 的 R-1 设计定案见 §17，下一步从 R-2 pure relevance core 开始。
 
 > **EN —** N_eff v1 preserves document-global components and adds bounded, anchor-centered content-core similarity plus exact long-fragment lineage as conservative union edges. Missing enhanced input retains v0 compatibility; malformed or hard-size-invalid input fails explicitly, while richer derived inputs are sampled deterministically within fixed bounds. Sampling may miss an enhanced fold and thus overcount independence relative to an unbounded ideal, but never removes the v0 signals. N-2/N-3 may change winners, materialization outcomes, and confidence through the new N_eff, while their schemas/formulas stay intact; N-4 itself only adds fold metadata from a deterministic forest.
 
@@ -1612,4 +1612,177 @@ E-7 先以最终冻结提示词做一次空目录全量重录，再对预先声�
 
 单关注提交 · 测试先行 · `go test ./...` + `-race` + vet + build 全绿后才 commit · `git diff --check` · 不带任何 AI 署名尾注 · 公开契约 additive-only · 不 push/merge/tag/deploy 除非明确决定 · PLAN.md 三层结构与非目标不可推翻 · MASTERPLAN 状态标记（✅/🚧/⬜/⟳）随实况回写。
 
-> **EN —** Handoff from waypoint `c7189c2`: P1 N_eff v1 and P2 EAV calibration are complete. N_eff now adds bounded content-core fingerprints, quote lineage, and additive fold-reason export on top of the existing same-root/whole-page-simhash folds. EAV now enforces verbatim extraction quotes through the golden replay gate and can opt only its operator-managed client into private networking while request BYOK remains public-only. Next is P3: open the trust-ranking reranker design card before implementation; P4 remains the old backlog.
+> **EN —** Handoff from waypoint `c7189c2`: P1 N_eff v1 and P2 EAV calibration are complete. N_eff now adds bounded content-core fingerprints, quote lineage, and additive fold-reason export on top of the existing same-root/whole-page-simhash folds. EAV now enforces verbatim extraction quotes through the golden replay gate and can opt only its operator-managed client into private networking while request BYOK remains public-only. P3's R-1 design is now locked in §17; implementation starts with the pure relevance core, while P4 remains the old backlog.
+
+---
+
+## 17. P3 · 0.6B relevance reranker + trust-aware ranking（R-1 设计定案）
+
+> **状态（2026-08-11）**：R-1 只锁实况、契约、资源、安全、评测与拆卡；本卡不改生产排序、不加公开字段、不下载模型、不启动 sidecar。v1 默认始终是 `provider`，relevance/trust 只能显式 opt-in；真实 0.6B recording 门未过前不得在生产启用 relevance capability，trust oracle 门未过前不得开放 `trust`。
+
+### 17.1 先纠正五个实况
+
+1. **当前不是 provider 聚合器，也没有重排器**。`search.Service` 只持有一个 `Provider`；生产顺序是 provider 原序 → domain / canonical URL 过滤 → 可选 `title+snippet` SimHash component 折叠（provider 最早成员胜）→ `limit` → 最多前 5 条 enrichment。P3 不顺手造多 provider federation，自建索引仍是 PLAN 的明确非目标。
+2. **公开 `limit` 目前同时限制 provider fan-out**。`limit=5` 只请求 5 条，任何 scorer 都不可能把 provider rank 6–20 拉进 top 5。opt-in relevance/trust 必须把内部候选池与公开输出数分离；默认 provider 模式继续传原 `limit`，保持旧调用、cache key、排序与成本。
+3. **`SearchResult.Score` 是 provider score**。它为 nil 就表示 provider 未提供（当前 Brave 即如此），不得覆盖、补造或重解释为 cross-encoder 分。baseline cache 也明确只存 provider-neutral 的 title/URL/snippet/provider score/time，不存 ranking 输出、artifact、cleaned text、schema、subject 或任何凭据。
+4. **EAV 与 N_eff 现在都来不及影响 Search 候选**。EAV 只在带显式 `ExpectedSubject` 的 multi extraction 内对成功提取页运行；N_eff 又依赖 final URL、全页 SimText、CleanedText 与已定位 Basis。`/answer` 先选最多 8 个 Search URL，随后才 `ExtractMulti`，所以现有 `MultiExtractSource.Entity` / Agreement 并不是 Search 输入；generic query 也不能被静默猜成实体 subject。
+5. **`fold_reason` 不是逐页 N_eff 分，也不足以找 component**。`Agreement.IndependentRoots` 属于某个 path/value cohort；`Support.fold_reason` 只记录 canonical-URL forest 中非根页的 parent-edge 原因，不含 parent/component ID。空值可能是 lexical representative、真 singleton、组外 bridge 或无 support，绝不能获“独立”奖励；lexical representative 更不能冒充最相关页面。P3 必须从 consensus 同一份 independence plan 导出窄的 component analysis，Search 不复制 DSU，也不从公开字段反推。
+
+### 17.2 公共模式与兼容边界
+
+新增 additive 请求枚举 `ranking`：
+
+```text
+provider   现有行为；省略值与显式 provider 完全等价
+relevance  20 候选 metadata cross-encoder 重排
+trust      relevance + 显式 subject + 有界 artifact/EAV/N_eff group-first 排序
+```
+
+- `SearchRequest.ranking,omitempty` 省略默认 `provider`。`provider` 继续使用公开 `limit` 作为 provider fan-out；`relevance|trust` 固定向 provider 请求最多 20 条，再输出 caller 的 `limit`。
+- `SearchRequest.expected_subject,omitempty` 复用 `models.SubjectSpec`；**仅** `trust` 可带且必须带。进入 clone/capability/provider 之前先锁：Name trim 后非空、合法 UTF-8、无 control、≤`eav.MaxSubjectBytes`(1,200 bytes)；Hint 合法 UTF-8、无 control、≤`eav.MaxHintBytes`(512 bytes)。N/N+1、normalization-empty 与 direct Go caller 都必须拒绝；`provider|relevance` 带 subject、`trust` 缺 subject、unknown/null/case-smuggled enum 均 `INVALID_INPUT`，不从 query/title/domain 推断主体。
+- `trust` 的公开输出上限锁为 5；省略 `limit` 时默认 5，显式 6–20 拒绝。它在 metadata relevance 排序后最多评估 8 个候选（新增独立常量 `MaxSearchTrustCandidates=8`，与 `consensus.MaxSources` 相等），因此能用 rank 6–8 的独立页替换 top-5 镜像；只评估原 top 5 会改变次序却不能降低 top-5 镜像占比，禁止这种空实现。Defaults 必须先解析 mode：`provider|relevance` 缺 limit→10、`trust`→5；默认 outer timeout 同理前两者→30s、trust→60s（仍允许显式 1–120s）。MCP 为了 additive compatibility **保留**现有 schema 的 `limit=10`/`timeout=30` default annotation，但 description 补充 mode-aware 规则，server payload 按 raw presence 先解析 ranking、绝不把 annotation 物化为请求值。所以省略仍服务端得 trust=5/60；某客户端若真的显式发 `limit:10`，那是 trust 的越界输入应拒绝，不能为它放宽上限。
+- mode-aware default 只能有一个 pure resolver，models `Defaults`、service preparation、HTTP rate/outer-context 都先调它，不得在 handler 预先把0写死成30。MCP `searchPayload` 须保留 limit/timeout 的 raw presence：省略时 outbound JSON 仍 omitempty，但本地 `context.WithTimeout` 使用 resolver 得到的 effective 30s/60s，不能用将被省略的0建立立即取消的 context；显式值原样发送且本地同值。HTTP omitted/explicit、service direct caller、MCP local deadline/outbound body 四层对 provider/relevance/trust 的 exact 门不可少。
+- 未配置显式模式所需 capability 时，在 provider 调用前返回 `SEARCH_UNAVAILABLE`。capability 已配置但 scorer 超时/panic/坏响应时，整批 score 作废，**跳过 trust**，并完整回到旧 pipeline：metadata DSU 取 earliest-provider winner、provider order、再 truncate；opt-in summary 为 `status=degraded/reason=reranker_failed`，没有任何伪造 relevance score。outer context 真取消仍返回整体 `TIMEOUT`。
+- domain/URL 过滤后零候选时 scorer/fetch/judge/analyzer 全部零调用：relevance 返空 results + `applied,candidate_count=0,rerank_ms=0`；trust 按无可消费 independence 返空 results + `degraded/trust_unavailable`，四个 trust counter 均为0、rerank/trust timing 都显式0。HTTP/MCP 空结果 presence 门锁住这一形状，不依赖 vLLM empty-documents 行为。
+- trust 的 artifact/analyzer 局部失败可形成 `status=partial`：只消费已证实的独立性，无法 analysis 的页不计 effective component；一个可用 independence signal 都没有时退回 relevance 顺序并标 `degraded/trust_unavailable`。EAV provider/referee error 继续按现纪律产出 `entity_uncertain`，另带 operational degradation 供 partial accounting，绝不升级成 mismatch。默认 provider 响应不出现任何新字段，旧 JSON bytes、Answer 的 source 选择、MCP strict response 与 `BypassProviderCache` 语义均须精确不变。
+
+### 17.3 候选流水线（顺序锁定）
+
+```text
+provider baseline (provider: N；relevance/trust: 20)
+  → normalize + domain filter + exact canonical-URL dedup
+  → relevance batch score all remaining candidates（opt-in only）
+  → optional title+snippet SimHash components
+       provider mode: earliest provider member wins（旧行为）
+       relevance/trust: highest relevance wins，随后 provider rank / URL tie-break
+  → relevance total order
+  → trust only: fetch top min(8,N)，EAV + independence analysis，group-first
+  → public truncate（trust ≤5；others ≤20）+ contiguous Rank
+  → requested content/verify/schema enrichment，复用已有 artifact
+```
+
+- normalization 即使丢掉非法 URL 也不得重编 provider 次序：`baselineResult` additive 保留原始 `ProviderResult.Rank`，cache clone / size accounting 同步更新但 key 不变；所有 tie-break 与 opt-in `provider_rank` 用这个原始 rank，不得用过滤后 slice index+1 冒充。默认 wire 仍不增字段。
+- metadata SimHash 仍在完整候选图上取传递闭包，绝不能先 truncate；`deduplicate=true` 时 relevance/trust 取每 component 的最高 relevance member，`deduplicate=false` 时跳过该折叠并把全部 canonical candidates 按 relevance 排序。opt-in scorer 先给全部候选打分，再决定 component winner，避免 provider 最早镜像吞掉更相关原页。
+- trust pool 明确分支：`deduplicate=true` 取 metadata-component winners 的 relevance top 8；`false` 直接取未折叠 relevance top 8。cheap metadata component 大小不冒充 N_eff。`candidate_count` 是 domain/exact-URL 后实际送 scorer 的页数；`attempted_pages` 是 top-8 实抓数；`evaluated_pages` 是去 stale/final-alias 后真正进入 independence analysis 的唯一 final URL 数；`effective_sources≤evaluated_pages` 只陈述该集合，不能暗示覆盖 provider 全 20。
+- fetch 完成后先验证 status/final identity，并在 EAV/analyzer **之前**做全 outcome 的 effective-identity coalesce，继续满足 MCP 的全结果 identity 唯一不变量。404/410 先按现语义从最终 results 删除并计 `DroppedStale`。其余 outcome 的 effective identity 是 validated canonical final URL；完全没有 final identity 的 fetch error 才回退 requested canonical URL。每个 identity 若有至少一个可分析2xx，失败项无权当 winner，成功项按 `relevance DESC → original provider rank ASC → requested canonical URL ASC` 选一个，其余成功/失败都只计 `Deduplicated`、不计 `failed_pages/evaluated`；若全是失败，则按同一全序只留一个 operational unknown，计一次 `failed_pages`，最终返回时带 `stage=trust`，其余失败计 `Deduplicated`。只有留下的2xx进 EAV/analyzer；不抓 rank 9+ backfill。所以“高分404/低分200同 final”和“高分500/低分200同 final”都必须保留200而不让失败项吞掉成功；500+500同 identity 只留最高 relevance unknown；无 final 的 fetch-error requested URL 与另一成功 final URL 碰撞时仍由成功项胜出。同 final URL 的两个成功但不同 snippet/Basis 也只会有一个进入 consensus，不触发 `ErrDuplicateSourceConflict`。
+- `trust + include_content/verify/schema` 对同一 URL 只抓一次，同一个 bounded immutable artifact projection 先供 trust，再供最终 top-5 enrichment；禁止再调一次 `ExtractMulti` 造成双 fetch/双 extract。
+- 抽出窄 `PublicArtifactFetcher`，不为了 trust 伪依赖 receipt signer；R-7 在现有 `ArtifactService` 内扩出**直接返回 bounded Search projection**的同一 fetch/sanitize 路径，不在 caller 长期 retained 一个已物化无界 ancillary slices 的 full Artifact。R-7 还必须在 EAV orchestration **未吞 error 之前**新增 additive detailed API：保留 extraction provider/referee 的 completed/error/panic stage，再投影出旧 `AnchoredExtraction`/`JudgeDocument` 行为。共享 typed seam 输出 `{attribution, operational_error, failure_kind, stage}`，但**不自作主张映射 panic**：Extract 继续 20s judge 预算，普通 provider/referee error 投 uncertain，panic 必须重抛/等价送入现有 `extractMultiSource` recover，仍是整页 extraction_failed/排除；Search 才在 8s parent context 内把 panic/error 投 uncertain + per-page partial。verdict/quote 校验与 observation stamp 仍只有一份。Extract 与 Search 不能在已吞掉 error 的 `SourceJudge` 外层伪称能恢复 completion，也不能复制 `judgeSourceAttribution`；它们复用同一 process-owned judge/client/cache、绝不再建第二 runtime。Answer 始终发省略/`provider` ranking；即使 reranker enabled/unavailable也不得被调用，捕获的 SearchRequest 与最终 URL 序列须与 P3 前 exact 相同，随后仍只做自己的一次 `ExtractMulti`。
+- trust 资源边界不借 outer timeout 碰运气：全进程最多 2 个并行 trust request；每请求本地 worker 上限4，并与现有 Search enrichment 共享进程级 4-slot artifact-source semaphore，所以普通 Search+trust 的 source work 合计≤4。ExtractMulti/Answer 保留现有独立 sourceSlots=4；P3 不新建第三个 pool，所以跨 Search+Extract 的 artifact work 上界仍是现存 8，另以一个共享 managed-EAV judge semaphore 把两路 LLM judge 总并发压在4。默认 outer=60s 时整个 trust phase 还有独立 deadline `min(40s, outer_deadline-5s)`，保留至少5s 给降级排序/编码；scorer 5s、单页 fetch 8s、Search judge（含可能 referee）8s 再取 phase/context 剩余值。两个 trust request 共享4 worker 时未完成页会在 phase deadline 变 partial，不拖到 outer `TIMEOUT`；等 slot 可 cancel，late result 丢弃，panic/error 只标记该页。需有 2/3 trust request、Search 4/5 source、跨 Search/Extract 8/9 artifact、共享 judge 4/5、phase/outer deadline、cancel/panic/leak 门。
+- bounded projection 必须在 ArtifactService 的 fetch/sanitize worker **交付 caller 之前**构造：worker 内部短暂可见的 full `extract.Artifact` 不得跨 handoff retained，Links/Images/Quality 等 ancillary fields 在同一 worker 内释放；只返回 immutable **bounded Search artifact projection**。投影仅保留 final URL/status/snapshot/fetchedAt 等≤32 KiB metadata 及 cleaned/raw 各≤4 MiB；EAV、snippet alignment、最终 content/verify/schema 都消费这一投影，不为 top-5 再 fetch。每请求 text≤64 MiB + metadata≤256 KiB，total≤65 MiB，2 个 active trust request≤130 MiB；超任一单页/聚合界只使该页 operational failure。该 projection 与 8 MiB text / 256 KiB metadata / 65 MiB total 的 N/N+1、丢 ancillary 后单-fetch heavy 回归必须同卡锁住；不能用 full Artifact 的无界 slice 宣称 64 MiB 上限。
+
+### 17.4 基础 scorer 契约与预算
+
+`search/rerank/` 暴露 provider-neutral pure boundary；reference adapter 首版只实现 vLLM-compatible `/v1/rerank`：
+
+```text
+Score(ctx, {
+  query,
+  candidates: [{stable_id, provider_rank, text}]
+}) -> [{stable_id, relevance_score}]
+```
+
+- 内部 `stable_id = lowerhex(SHA-256("rerank-candidate-v1\0" || canonicalURL UTF-8 bytes))`，不得使用数组位置或 Go map 序。adapter 只把它与 input index 建立当次映射；vLLM wire 不传/不回 stable ID，且 response `results` 本来可按 score 排序，所以绝不信返回顺序。
+- pinned vLLM 请求 exact 对象是 `{model,query,documents,top_n}`，`top_n=N`；响应 root exact 形状是 `{id,model,usage,results:[{index,document,relevance_score}]}`，v0.23.0 nested exact 形状是 `usage:{prompt_tokens,total_tokens}` 与 `document:{text,multi_modal:null}`，两者字段都必现。必须校验 response model 与 profile served-model ID 相同、`id`≤256 bytes、两个 token count 均为 0..1,000,000 且相等、`document.text` 逐字回显输入且 `multi_modal` 必为 null；result 数量必须为 N、index 唯一且刚好覆盖 `[0,N)`。unknown/duplicate/Unicode-duplicate/case-smuggled/trailing/null/missing/extra 一律整批失败。score 必须 finite 且在 `[0,1]`；该分数只是 model-relative relevance，不宣称校准概率。
+- relevance total order 固定为 `relevance_score DESC → original provider rank ASC → canonical URL ASC`；不得用 float epsilon 造“近似 tie”，不得修改 caller slice。零分合法，NaN/Inf/<0/>1、wrong count、duplicate index、late success 全批失败。
+- 模型输入只含现有 `normalizeProviderResults` 校验/归一后的 title/snippet，不再 lower/去标点/改写，也不含 URL/hostname、cleaned content、凭据或 caller prompt。精确构造为 `titlePart=UTF8Prefix(title,1536 bytes)`，`document=titlePart+"\n"+UTF8Prefix(snippet,6144-1-len(titlePart))`；换行永远存在且计入 6 KiB。query 用 `prepareRequest` 已归一的 query，沿用 400 rune / 50 word 上限；N≤20；aggregate documents≤120 KiB，最终 canonical JSON request≤256 KiB、response≤1 MiB，N/N+1 均有门。input digest 在此裁剪后的 canonical request 上计算；JSON escape expansion 超限就整批降级，不放宽预算。
+- v1 只接受编译时认证 profile `qwen3-reranker-0.6b-v1`：exact model `Qwen/Qwen3-Reranker-0.6B`、HF revision `e61197ed45024b0ed8a2d74b80b4d909f1255473`、normalized `[0,1]` score domain。固定 instruction 逐字为 `Given a web search query, retrieve relevant passages that answer the query`，它来自 server-side `qwen3_reranker.jinja`而不是 API body。recording manifest 必须同时固定 profile/instruction text+version/template SHA/vLLM image digest+version/HF revision/served-model ID/`hf_overrides`/`max-model-len`；只有 R-6 晋级的 manifest 才能进入编译时 allowlist。startup 对**可观测的** profile/config/endpoint 与 committed manifest ID exact fail closed，response 再校验 served-model ID；镜像、权重、模板和 argv 的真实性由项目控制 sidecar 的 deployment admission/attestation 门负责，不能谎称标准 API 可远程证明。任一认证 tuple 变化都必须重录、重审并更新 allowlist；不接受“改一个任意 MODEL 环境变量即沿用旧成绩”。
+- scorer child timeout 默认 5s、配置最大 10s且不得超过 outer deadline；进程共享 4 slots，第 5 个等待可 cancel。panic、4xx/5xx、malformed/oversize body 只出稳定 domain error，不泄 endpoint、model、document 或 key。
+
+### 17.5 真正的 trust input 与 component analysis
+
+新增只读 `consensus.AnalyzeIndependence(ctx, []SourceResult)`（最终命名可等价，但语义不可缩）：与 `Merge` 共用 URL/Data/Basis/CleanedText admission、`prepareSource` 与 `buildIndependencePlan`，返回按 canonical URL 的 `{component representative/id, component_size, parent_url, parent_reason}` 及 effective component count；不复制/重写 same-root、legacy SimText、content-core、quote-lineage 的任一算法。shared prepare/core/lineage/pair loops 新增 context-aware 路径，在每 source、anchor scan 有界 chunk 与 pair 边界检查 cancel；`Merge` 用 `context.Background()`/等价 no-cancel 路径保持旧契约。Search 必须同步等 analyzer 退出，cancel 后返回稳定 context error 并释放 projection，禁止“丢掉 late goroutine 但它继续持有65 MiB”。它是内部分析投影，不改变 `Merge` wire、winner 或 materialization；定向 cancel/race/leak 门必须证明结束后 active analyzer=0。
+
+Search 对每个成功 artifact 构造诚实的 analysis source：
+
+1. URL 用 validated final URL；`SimText=simhash.Fingerprint(cleaned)`；`CleanedText=cleaned`。
+2. 总有内部标量 `page=true`，但它**没有 Basis**，所以只让同一分析 cohort 成形，不能凭空触发 core/lineage。
+3. snippet 是唯一可选增强 anchor，且 admission 局部 fail-soft：只对非空、合法 UTF-8、≤8 KiB 的 canonical provider snippet 调 `evidence.AlignValueContext(ctx,snippet,cleaned,"")`，经共享的 unsigned align/validate/stamp helper 复核 quote/range/method，selector 清空或限在4 KiB，并从同一 artifact 填 SnapshotID/FetchedAt，才加 `snippet=<actual snippet>` + Basis。>8 KiB、empty/unlocated、selector/range/observation 非法只省略该 anchor，不污染整批，`page` + same-root/full-page legacy 仍有效；8 KiB N/N+1、4 KiB selector N/N+1 与 stamp exact 都是门。不同 snippet 不伪造共同 value，不用 raw HTML selector 再扫 4 MiB 文档。
+4. independence 与 EAV 是完全分离的两轴：**所有成功 artifact 都先做 verdict-neutral analysis**，不把 expected subject、entity verdict 或 EAV Evidence 伪造成 consensus claim/Basis。EAV 只在 fusion 阶段把 explicit mismatch 降到末尾；match/uncertain/error 不改 component 图、不加分，operational error 只触发 partial accounting。这避免“同内容一页 match、一页 judge timeout”被假拆成两个 singleton。
+5. analyzer 输出的 lexical representative 只供稳定 component identity/forest audit。Search 对每个 component 自己选择最高 relevance 的非 mismatch member，绝不拿 lexical root 当排序赢家。公开 `component_id = lowerhex(SHA-256("search-component-v1\0" || 对 sorted unique canonical final URLs 逐个追加 uvarint(byte_len)+UTF-8 bytes))`；长度前缀消除 URL 边界碰撞，不泄新信息，也不把数组位置当身份。
+
+### 17.6 trust fusion：不用伪精确乘法
+
+PLAN.md 的 `relevance × N_eff × EAV` 是产品方向，不是三个已校准概率。v1 明确**不**制造不可解释的 composite float，也不把 component size 越大反向奖励。采用约束式 group-first：
+
+1. 对成功 independence analysis 的候选，先排除 explicit mismatch，再按 component 分组；每组 relevance total order 第一名是 Search leader。EAV match/uncertain 不改组与组内次序。
+2. 最终 bucket 全序锁死为：`analyzed non-mismatch component leaders → operationally unknown/unanalysed neutral candidates → analyzed non-mismatch non-leaders → explicit mismatches`；每个 bucket 内均用 relevance total order。unknown 不获“新 component”身份、不计 effective source，但也不会被一串已知镜像无条件压住；只有 mismatch 是明确负证据。
+3. 在线不存在 gold “relevant”标签或隐式 score threshold。只要有至少 5 个已分析、非 mismatch component，top 5 必须一组一页；不足才按上述次序补 unknown、duplicate、mismatch。“relevant component”只出现在独立 gold 评测中，不作运行时分支。
+4. 若 `evaluated_pages<2`、analyzer 整批失败或没有任何可消费的 independence 结果，不把未知当独立：整个 trust 层降级为 relevance 顺序，保留已得 EAV mismatch 诊断但不用它改排序，状态为 `degraded/trust_unavailable`。
+5. mixed reasons、组外 bridge、same-root/near-duplicate/quote-lineage 都只决定 component；不按 reason 任意设置不同罚分。component 的最高 relevance leader 即使在 consensus lexical forest 中有非空 parent reason，也仍可当 Search leader。
+
+### 17.7 additive wire（仅 opt-in 出现）
+
+- `SearchResult.Score` 原样保留。新增 `SearchResult.Ranking,omitempty`：`provider_rank`、可选 `relevance_score`，trust 时再带可选 `entity` 与 `independence{component_id,component_size,component_leader,fold_reasons[]}`。`fold_reasons` 是 component forest 的去重枚举集，wire 唯一顺序锁为 consensus priority `same_root → quote_lineage → near_duplicate`，permutation/golden/exact JSON 均按此；它不冒充某页父关系，singleton 省略。新增 `SearchResultError.stage=trust`，不得用 fetch/extract 假装。
+- `SearchResponse.Ranking,omitempty` 对每个显式 relevance/trust 请求**必须存在且非 null**：`mode`、`status ∈ {applied,partial,degraded}`、`candidate_count`，trust 另有 `attempted_pages/evaluated_pages/effective_sources/failed_pages`。relevance 只能 `applied|degraded`（scorer 是 all-or-nothing）；`partial` 只用于 trust 有可用 analysis 但至少一页 operational failure。`degraded_reason ∈ {reranker_failed,trust_unavailable}` 仅 status=degraded 必需，其余状态禁止。计数口径分别是送 scorer 的 domain/URL-filtered 候选、实际发起 fetch 的 top-8、final-URL coalesce 后进 analyzer 的页、至少含一个非 mismatch member 的 component 数、以及 fetch/judge/analyzer 任一 operational failure 的去重页数；alias loser 只计 `Deduplicated`，所有计数均不得重复累加同一页。
+- presence matrix 是 wire 契约：(1) relevance applied 时每个 result 的 Ranking 必含 original provider_rank+relevance_score，entity/independence 禁止；(2) trust applied/partial 时每个 result 仍必含 rank+score，judge 有结果则 entity 存在，页进 analyzer 则 independence 存在，二轴互不依赖；返回的 operationally unknown 没有 independence，并带 `stage=trust`；(3) `degraded/reranker_failed` 时所有 result Ranking 都禁止，不补造0分/provider_rank；(4) `degraded/trust_unavailable` 时 relevance 已成功，所以 result 保留 rank+score，entity/independence 只作已完成诊断、不参与排序。null、missing、empty 必须按此矩阵区分，MCP exact validator 不靠 Go 零值猜。
+- `SearchTimingInfo` additive 增指针 `rerank_ms,omitempty` / `trust_ms,omitempty`：显式 relevance/trust 必有 rerank_ms（可为0），trust 必有 trust_ms（可为0）；provider 两者禁止。feature-off 其他指针/omitempty 都为空，旧 exact JSON 不变。
+- `SearchResponse.Partial` 继续严格等于**最终返回 results** 中是否存在 `Errors`；全局 scorer fallback 不滥用它。top-8 中未返回的 rank 6–8 失败只使 Ranking `status=partial`、增 `failed_pages`，不凭空设 Response.Partial；失败候选若最终被返回，才带 `stage=trust` 并令 Partial=true。其他 enrichment error 可使 applied 响应 Partial=true，两个状态不互相代替。
+- models、HTTP handler、MCP tool schema/argument allowlist/payload、strict response decoder/exact validators 必须同卡锁步更新。HTTP 在引入 `ranking` 成本开关前先补 recursive duplicate-key、Unicode-escaped duplicate 与 exact-case allowlist，堵住 Go decoder 的 last-wins/case-insensitive smuggling。
+- Search 32 MiB preflight、service encoder、handler fallback 与 MCP body limit都计入新字段并做完整 response N/N+1。新 pointer/map/slice 必须在 cache/result clone 路径深拷；旧 MCP 客户端不能请求新模式，默认响应仍是旧 shape。
+
+### 17.8 cache、费率与 capability gate
+
+- baseline cache 继续是唯一 Search cache：1 minute / 256 entries / 16 MiB，存 pre-ranking provider baseline。rerank/trust 每次从 deep clone 重算；未来若加 ranking cache，必须另卡、独立有界，并把 scorer/model/instruction/algorithm version、candidate digest、subject/mode 纳入 key，绝不存 credential/artifact/cleaned。
+- `BypassProviderCache` 只绕 provider baseline；不绕过也不复用 scorer/trust 输出。`relevance|trust` 的 provider candidate limit 固定 20，故不同 public output limit 可合法共享同一 baseline key；provider mode仍按旧 limit 分 key。
+- 当前 `MaxSearchRequestCost=22` 被 router 与 `cmd/purify` managed Search runtime 同时当“是否注册/构造整条 Search”的 capability 门。R-5 必须新增 `MinSearchRequestCost=1` 并在**这两处同时**解耦：burst=0 仍禁用，burst≥1 就可构造/注册 baseline route；请求的实际计费由 limiter 单独拒绝。因此旧 burst=22 部署仍能跑所有旧请求，昂贵 trust 不会让整个 `/search` 消失；0/1/22/58/59 两个 capability call site 都有 exact 门。
+- 锁定最坏预收单位：candidate fan-out 仍 `ceil(candidate_limit/10)`（opt-in=2）；relevance batch `+2`；trust 每页 `+5`（fetch 1 + EAV extraction LLM 2 + 可能 referee LLM 2）、最多 8 页即 `+40`。该 `+40` 不因 EAV/referee cache hit 或本次未进 gray zone 而减少，因为 admission 在执行之前；trust 已含 fetch，`include_content` 不重复收费。verify/schema 仍按最终最多 5 条分别 `+1/+2`，因此 relevance 全组合最大 24，trust 全组合最大 **59**。每种组合、cache hit/miss、referee on/off、低于 59 的 limiter 都要 exact 测试；后续只能按实测向上调整，不能无记录减费。Compose/.env/README 必须在 R-5 同卡更新 59 的运营含义，不拖到 optional R-9。
+
+### 17.9 runtime / network / deploy 边界
+
+- 0.6B 模型不塞进现有 Purify 镜像。当前 Go+Chromium 容器只有 2 CPU/4 GiB、无 Python/CUDA；Qwen 0.6B BF16 权重约 1.2 GB，连同 runtime/KV/Chromium 共驻没有可信余量。transport 形态允许独立 vLLM sidecar 或 managed HTTPS，但 v1 reference-certified capability 只开 pinned sidecar；默认 Compose 不拉模型、不 runtime download、不用 floating `latest`。
+- 新 `RerankConfig` 全部 process-owned：`PURIFY_RERANK_ENABLED=false`、`PURIFY_RERANK_ENDPOINT`、`..._API_KEY`、`..._PROFILE=qwen3-reranker-0.6b-v1`、`..._ALLOW_PRIVATE=false`、`..._TIMEOUT_SECONDS=5`。disabled 时完全 inert，stale/invalid 其他字段不造 runtime；enabled 时 endpoint/key/profile 必填，profile 必须存在于由 R-6 committed manifest 生成的编译时 allowlist，startup 只核对它能观测的 config/endpoint/profile，不能拿 operator 字符串冒充完整 deployment 证明。endpoint≤16 KiB、key≤16 KiB、profile≤128 bytes，均须 UTF-8、无 control/首尾空白；timeout 是 1–10 的整数。endpoint 必须 absolute、无 userinfo/query/fragment，path exact `/v1/rerank`；首版不接受请求 BYOK，不把 endpoint/profile/key/document 写响应、cache、日志或 error。这些 N/N+1 与 disabled-inert 都在 config 门里。
+- 公网 endpoint **必须 HTTPS**。HTTP 仅在 `ALLOW_PRIVATE=true` 且实际解析/锁定的所有地址均为 loopback/private operator sidecar 时允许，绝不让一个 bool 顺带允许公网明文 key。reranker 使用独立 immutable publicnet policy + hardened client；默认拒 literal/private/mixed DNS/rebinding，HTTPS 强制 TLS≥1.2、全部 redirect 拒绝、ambient HTTP(S)_PROXY 忽略，只认显式 `PURIFY_PROXY`。`ALLOW_PRIVATE` 只放宽该 operator-managed reranker，不能复用或修改 EAV、request LLM、Search provider、relay/compiler/webhook 的 policy。
+- reference runtime 只认证 `linux/amd64`：vLLM `v0.23.0`、image child `vllm/vllm-openai@sha256:3a1e7f5904e1a1192a02aa0086ceaffc33985d7044c7bb25b3a43d61bdbe3ac0`（multi-arch index 仅作 provenance：`sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`）。required argv exact 为 `vllm serve Qwen/Qwen3-Reranker-0.6B --revision e61197ed45024b0ed8a2d74b80b4d909f1255473 --tokenizer-revision e61197ed45024b0ed8a2d74b80b4d909f1255473 --served-model-name Qwen/Qwen3-Reranker-0.6B --runner pooling --max-model-len 8192 --no-enable-prefix-caching --hf-overrides '{"architectures":["Qwen3ForSequenceClassification"],"classifier_from_token":["no","yes"],"is_original_qwen3_reranker":true}' --chat-template /run/purify/qwen3_reranker.jinja`，**禁止**把 key 放进 argv。reference profile 显式禁用 vLLM prefix cache，避免 replay/scorecard 的重复 query 借 KV 命中伪造 cold latency。sidecar 只从 deployment secret store 注入 `VLLM_API_KEY`；Purify 的 API key 配置引用同一 secret，adapter 固定发 `Authorization: Bearer <key>`，两边都不把 secret 写入 Compose literal。挂载 template SHA-256 必须是 `e1ee98e69aab7b2da366edf1c50efcef37e34b4a0c50fb816336213e68d9047a`；production model snapshot 预置且 `HF_HUB_OFFLINE=1`，不在启动时下载 moving main。arm64/其他平台必须独立录制、定 digest 与重过 R-6，不能借 multi-arch tag 冒充已认证。
+- R-3 首个红门必须从这个 exact image/argv/profile 录一份 request/response fixture，并将 image/platform、template+model snapshot digests、canonical non-secret argv 与 argv digest 写入 versioned deployment attestation/recording manifest；另只记 `api_auth=VLLM_API_KEY` 与 `api_key_present=true`，真实 secret 绝不进入 argv、digest input、recording、语料、日志或仓库。R-3 必须交付 project-owned deployment admission 工具：在启动 sidecar/开放 Purify capability **之前**，从只读 OCI/container spec 与 mounted snapshot/template 计算这些可验证值，和 committed manifest exact 比较；任一不符就拒绝启动 sidecar并令 capability unavailable。Purify 进程本身只验证上一段的可观测 config/profile/served-model 子集，不冒充 deployment controller。fixture 与本节 nested wire 不合时先修 R-1 设计卡，不允许 adapter 自由猜；R-6 未晋级前生产 capability 始终 unavailable。
+- 标准 `/v1/rerank` 运行时只能观测 served model ID，无法证明远端实际 HF revision/template/image/hf_overrides。因此 v1 的 `reference-certified` capability 只授予项目控制的上述 pinned sidecar；managed HTTPS 在 v1 只保留 transport 扩展点、**不实现/不启用生产 profile**，除非后续独立卡定义可验证的 immutable deployment attestation。`PROFILE` 不是可盲信的 operator assertion，运行时 response model exact 校验也不被夸大成权重证明。
+- Purify client 只调已验证的 `/v1/rerank`，但这**不等于**关掉 vLLM 同端口的其他路由：官方明确 `--api-key` 只保护 `/v1`/`/v2`/`/inference`，`/rerank`、`/score` 及操作端点仍可未鉴权。因此 production capability 启用前必须证明 sidecar 只绑 loopback/可信私网且无 host publish，或由 firewall/reverse proxy exact allowlist `/v1/rerank` 并拒绝其余路由；这是 R-3/R-6 安全门，不是 R-9 可选文档。
+- Qwen 官方 model card锁定其 Apache-2.0、0.6B、100+ languages 与 instruction-aware 身份。官方入口：<https://huggingface.co/Qwen/Qwen3-Reranker-0.6B>、<https://docs.vllm.ai/en/latest/examples/pooling/score/>、<https://docs.vllm.ai/en/latest/serving/online_serving/>、<https://docs.vllm.ai/en/latest/usage/security/>。默认 Compose 不加模型；R-3 的 Purify 配置键须在同卡进 Compose/.env，R-9 只负责可选 sidecar profile、SBOM/归属与运维说明。
+
+### 17.10 评测门（不是“看起来变好”）
+
+**A. pure orchestration / ordinary `go test`**
+
+- fake scorer 按 stable candidate ID 回分，不按 slice index；identity/reverse/rotations/固定 seed permutations 全部 exact order、Rank 与 input immutability。覆盖 tie/zero/CJK裁剪、panic/cancel/timeout/late success、slot 4/5、wrong count/index/float/range。
+- candidate=20/output=N 的 N/N+1；domain/exact URL先过滤；原 provider rank 穿过过滤/cache；relevance winner替代 provider winner；metadata SimHash 传递图仍在 limit 前完成；`deduplicate=false` 不丢页。scorer 整批失败必须回旧 earliest-provider DSU/order 且 per-result Ranking 全空。默认 mode 对 provider query limit、cache hit、order、Score pointer 与 exact JSON 全回归。
+- trust fake 必过：EAV match/mismatch/uncertain/error 与 independence 两轴隔离（同内容 match/timeout 仍同 component）；same-root/legacy/core/lineage/mixed bridge 与 production component/reason exact；最高 relevance leader ≠ lexical URL root；8 KiB snippet、4 KiB selector、stamp N/N+1；unlocated/超界 snippet 不造 core/lineage也不毒整批、不同 snippet 不造 lineage；top-8 可用 rank 6–8 替换 top-5 mirror；`deduplicate=false` 的全部成员仍可进 top-8；404/410、同 final URL 异 snippet、500+200、500+500、无-final fetch error 与 success-final collision 的 identity/coalesce exact门；known leaders → unknown → duplicates → mismatch exact；隐藏 rank6–8 失败只改 ranking status/counter；partial/no-signal fallback；trust+heavy 单 fetch。
+- 资源/wire 构造门：trust request slots 2/3、Search source 4/5、跨 Search/Extract artifact 8/9、共享 managed judge 4/5、outer/trust-phase/worker cancel、panic/late result/goroutine leak；projection 单页 text 8 MiB/metadata 32 KiB、每请求 text 64 MiB+metadata 256 KiB/total 65 MiB、两请求130 MiB 都有 N/N+1，并断 Links/Images/Quality 不被 retained。applied/partial/degraded 的 required/forbidden/null 矩阵、hidden-vs-returned Partial 不变式、candidate/attempted/evaluated/effective/failed 计数 exact。Answer fake 必须捕获省略/`provider` SearchRequest、证明 reranker 在 enabled/unavailable 两种情形都零调用、URL 序列 exact 不变，随后仍只做一次 `ExtractMulti`。
+
+**B. pinned 0.6B relevance replay**
+
+- `docs.jsonl` / `labels.jsonl` / `recordings.jsonl` 分离，逐行 exact allowlist，拒 BOM/空行/非 UTF-8/duplicate/Unicode-duplicate/case-smuggle/unknown/trailing/null。三文件 case ID exact one-to-one join，拒 orphan/unused；case/query ID 非空唯一，candidate ID 唯一、provider_rank 必须刚好是 1..N，N=10..20，grade 是 0..3 整数且 IDCG@5>0。单行≤256 KiB、单文件≤16 MiB、单 string≤64 KiB、JSON depth/数组均有界。recording 保存完整认证 manifest、input digest、exact candidate-score key set、usage/latency；不存任意 fixture hash 来代替 production input builder。
+- NDCG 公式 exact 锁为 `DCG@5=Σ(i=1..min(5,N)) (2^grade_i-1)/log2(i+1)`，IDCG 是 grade 降序的同式、IDCG=0 拒绝，`NDCG=DCG/IDCG`；macro 是 case 等权算术平均，gate 前不 round。不依赖 response 自称顺序，仍按 score + 产品 tie-break 重建。
+- 首个 construction gate 至少 24 queries / 240 candidates，`language∈{en,zh}`、`bucket∈{lexical,semantic,entity_collision,numeric_recency,long_noisy,prompt_injection}` 为严格枚举，每个 language×bucket 至少一个非空 case。每 case 必填 `hard` boolean；loader 另从结构推导 `objective_hard = (provider top5 至少一个 grade=0 distractor && rank6..N 至少一个 grade≥2 candidate)`，并强制 `hard == objective_hard`，不能把客观 hard case 标 false 逃门，note 不参与判断。六个 bucket 每类至少一个 hard case、en/zh hard 各≥2，因此 hard aggregate 与逐 bucket 分母都不会空过。macro `ΔNDCG@5≥+0.05`；每 language 与**每个 hard bucket** delta≥0，hard aggregate≥+0.03；≥80% case non-regression；任一 case drop≤0.15。hits/total 用整数门，分母为0不得作100%。
+- 24-case 只称构造准入，不能写“统计显著”。要宣称显著须≥50个独立 judged queries，用 seed `0x5055524946595231`、10,000 次 **paired bootstrap** 对 per-case delta 重采样：case 先按 ID byte-lexical 排序；自该 seed 起用 uint64 overflow 的 SplitMix64（`state+=0x9e3779b97f4a7c15; z=state; z=(z^(z>>30))*0xbf58476d1ce4e5b9; z=(z^(z>>27))*0x94d049bb133111eb; z^=z>>31`）连续出数，每轮有放回抽 `n` 次、index=`z%n`，记录该轮均值。10,000 个均值升序后以 nearest-rank 2.5 percentile，即 zero-based `[249]`，作为 95% CI lower bound，必须 >0；不把 randomization p-value 叫 lower bound。普通测试只 replay，不联网；record 命令另跑，跨硬件门 order/NDCG 而不门 bit-exact float。
+
+**C. independently-labelled trust golden**
+
+- gold `component_id` / entity verdict 必须人工或独立标注，绝不能拿待测 production N_eff/EAV 输出反标自己；fusion 也只能读 production analysis，不得注入 gold component。所有 trust oracle case 机器强制 `deduplicate=false`，并对信号 case exact 断言 production component partition/reasons == 独立 oracle，避免旧 metadata DSU 先折掉 1+7 mirror 而让 trust 假绿。
+- 严格 bucket 覆盖 `neutral|mirror_1_7|independent_8|mixed|same_root|near_duplicate|quote_lineage|mismatch|uncertain|combined|all_mirror`，en/zh 与 `N_eff_only|EAV_only|combined` 的要求分桶均非空；每 case pool/results 非空、分母可机器验证，不允许 singleton/无 expectation 空壳。
+- 指标口径锁死：`K=min(5,len(results))`，`unique_component@5=topK 中 oracle component 去重数`，`mirror@5=(K-unique_component@5)/K`（K=0拒绝）；`relevant-component recall@5=顶部 grade>0 且 verdict!=mismatch 的去重 component数 / trust pool 中同类 component数`（相关桶分母0拒绝）；`mismatch@5` 是 topK explicit mismatch 数。所有 aggregate 是 case 等权 macro。
+- neutral 只要求 **Results URL+Rank 顺序** exact 等于 relevance-only，不要求含不同 mode/status 的整包 JSON bytes。全体 macro `Δunique_component@5≥+0.25`、`Δmirror@5≤-0.05`、relevant-component recall@5 不降、NDCG@5 下降≤0.02；有≥5个 relevant non-mismatch oracle components 时 unique=5/mirror=0，有≥5个 non-mismatch alternatives 时 mismatch@5=0。各信号隔离桶还须 exact order，不只看总分。
+
+**D. scorecard / safety**
+
+- scorecard 对同一 query/candidate 集合先做每条路径各10次 warmup（丢弃），再做100个 cold-cache / `BypassProviderCache` measured pair；sidecar 必须由 attestation 证明带 `--no-enable-prefix-caching`，否则本轮无效，不能把第2轮起的 KV hit 叫 cold。case 按 ID byte-lexical 排序，pair `i` 用 case `i mod n`；A=新鲜 provider baseline、B=同一 baseline input 的 rerank batch，偶数 pair 固定 A→B、奇数 pair B→A。不得按结果挑顺序或重试；provider cache-hit 路径另记但不进入 `rerank_ms < provider_ms` 比值，避免 provider_ms=0 空门/死门。p50/p95 用100个原始样本升序后的 nearest-rank（zero-based `[49]`/`[94]`）；记录 hardware/GPU/region/runtime image digest/model/template/revision/provider 版本与全部原始样本，不只报一个中位数。
+- PLAN 的“增量成本低于 provider”只对基础 0.6B relevance batch验收：上述 paired 环境 median rerank_ms < median fresh provider_ms，且推理计费 < provider 调用计费。managed 成本保存当日官方价格快照；local 成本用明确的 GPU 每小时价 × 实测 batch 耗时/吞吐摊销公式。trust 是显式重型模式，单独出 fetch/EAV/token/retained-byte/并发成绩，不伪称便宜。
+- config/network/credential leak、request/response/body 预算、HTTP/MCP strict JSON、rate combinations、32 MiB response、race/vet/build 都是发布门。没有 GPU/sidecar 的 CI 只跑 fake + recordings，不因此跳过契约测试。
+
+### 17.11 实施卡与提交边界
+
+```text
+R-1  实况盘点 + 本设计定案（docs only）
+R-2  pure rerank core + fake executor + NDCG math（无 HTTP / 无 wire）
+R-3  strict vLLM /v1/rerank adapter + config + 独立 network runtime（不接 Search）
+R-4  内部 rankCandidates：candidate-20 → relevance → metadata dedup → truncate（package seam/tests，无公开 request 字段）
+R-5  relevance models / HTTP / MCP + Search service switch + strict duplicate guard + rate/capability 接线
+R-6  pinned Qwen recordings + relevance golden + latency/token/cost scorecard
+R-7  consensus independence analysis + shared artifact/EAV trust seam（不公开 trust wire）
+R-8  group-first trust fusion + public wire + independent oracle golden
+R-9  optional sidecar/profile、SBOM/Apache attribution 与运维文档（未授权不 deploy）
+```
+
+每卡单关注：先红测试、实现后定向 + 全仓 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...`、`git diff --check` 全绿才 commit；卡后做只读审查，发现项另提 review-fix commit。R-6 不通过就不在生产启用 relevance capability；R-8 不通过就不开放 trust；即使两门都过，v1 请求默认仍为 `provider`。
+
+**明确非目标**：多 provider federation、自建索引、把模型/Python塞进 Purify 主容器、公开 reranker BYOK、从 query 猜 subject、抓20页做 trust、把 provider `Score` 改义、用 `fold_reason==""` 奖励独立、把 lexical forest root 当最佳页、claim级 component、方向性首发判定、修改 Answer confidence、缓存 artifact/cleaned/credential、未授权 push/deploy。
+
+> **EN —** P3 separates a cheap metadata reranker from an explicit heavy trust mode. Default Search remains byte-for-byte provider ordered. Relevance mode scores a bounded 20-candidate pool without overwriting provider scores. Trust mode requires an explicit subject, fetches at most eight candidates once, judges entity mismatch, reuses the production independence graph, and ranks the highest-scored member of each provenance component before duplicates. No scalar “trust probability” is invented; every signal stays auditable and every deployment capability remains process-owned and opt-in.
