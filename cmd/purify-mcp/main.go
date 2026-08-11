@@ -3160,6 +3160,9 @@ func decodeMultiExtractResponse(body []byte) (models.MultiExtractResponse, error
 	if !utf8.Valid(body) {
 		return models.MultiExtractResponse{}, fmt.Errorf("response must be valid UTF-8")
 	}
+	if err := rejectDuplicateJSONFields(body); err != nil {
+		return models.MultiExtractResponse{}, err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 

@@ -1796,6 +1796,24 @@ func TestDecodeMultiExtractResponseRejectsInvalidFoldReasons(t *testing.T) {
 			support[reasonField] = reason
 		})
 	}
+	duplicateFoldReasonBody := func(body []byte, escaped bool) []byte {
+		t.Helper()
+		marker := []byte(`"fold_reason":"same_root"`)
+		if count := bytes.Count(body, marker); count != 1 {
+			t.Fatalf("fold_reason marker count = %d, want 1: %s", count, body)
+		}
+		duplicateKey := `"fold_reason"`
+		if escaped {
+			duplicateKey = `"\u0066old_reason"`
+		}
+		mutated := bytes.Replace(
+			body,
+			marker,
+			[]byte(`"fold_reason":"other",`+duplicateKey+`:"same_root"`),
+			1,
+		)
+		return mutated
+	}
 	tests := []struct {
 		name string
 		body []byte
@@ -1805,10 +1823,12 @@ func TestDecodeMultiExtractResponseRejectsInvalidFoldReasons(t *testing.T) {
 		{name: "agreement unknown", body: agreementBody("fold_reason", "other", true)},
 		{name: "agreement reason without an actual fold", body: agreementBody("fold_reason", "same_root", false)},
 		{name: "agreement case-smuggled field", body: agreementBody("Fold_Reason", "same_root", true)},
+		{name: "agreement duplicate field", body: duplicateFoldReasonBody(agreementBody("fold_reason", "same_root", true), false)},
 		{name: "support null", body: supportBody("fold_reason", nil)},
 		{name: "support empty", body: supportBody("fold_reason", "")},
 		{name: "support unknown", body: supportBody("fold_reason", "other")},
 		{name: "support case-smuggled field", body: supportBody("Fold_Reason", "same_root")},
+		{name: "support escaped duplicate field", body: duplicateFoldReasonBody(supportBody("fold_reason", "same_root"), true)},
 	}
 
 	for _, test := range tests {
