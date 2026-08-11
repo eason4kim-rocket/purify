@@ -68,8 +68,12 @@ func buildContentCore(cleaned string, basis map[string]evidence.Anchor) (coreDes
 	if err != nil {
 		return coreDescriptor{}, err
 	}
+	return buildContentCoreFromAnchors(cleaned, anchors), nil
+}
+
+func buildContentCoreFromAnchors(cleaned string, anchors []coreAnchor) coreDescriptor {
 	if len(anchors) == 0 {
-		return coreDescriptor{}, nil
+		return coreDescriptor{}
 	}
 
 	sampler := newCoreShingleSampler(maxCoreShingles)
@@ -78,7 +82,7 @@ func buildContentCore(cleaned string, basis map[string]evidence.Anchor) (coreDes
 		start, end := coreWindowBounds(cleaned, anchor.start, anchor.end)
 		normalizedAlnumRunes += addCoreWindowShingles(sampler, cleaned[start:end])
 	}
-	return describeContentCore(sampler.sorted(), normalizedAlnumRunes), nil
+	return describeContentCore(sampler.sorted(), normalizedAlnumRunes)
 }
 
 // selectCoreAnchors returns the deterministic bottom path sample. Eligibility

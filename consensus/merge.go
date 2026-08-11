@@ -140,6 +140,7 @@ type preparedSource struct {
 	receipts  map[string]string
 	cleaned   string
 	core      coreDescriptor
+	lineage   lineageIndex
 }
 
 type scalarKind uint8
@@ -335,9 +336,15 @@ func prepareSource(index int, result SourceResult) (preparedSource, int, int, er
 	if err != nil {
 		return preparedSource{}, 0, 0, err
 	}
-	core, err := buildContentCore(result.CleanedText, basis)
-	if err != nil {
-		return preparedSource{}, 0, 0, fmt.Errorf("source %d content core: %w", index, err)
+	var core coreDescriptor
+	var lineage lineageIndex
+	if result.CleanedText != "" {
+		anchors, anchorErr := selectCoreAnchors(result.CleanedText, basis)
+		if anchorErr != nil {
+			return preparedSource{}, 0, 0, fmt.Errorf("source %d enhanced evidence: %w", index, anchorErr)
+		}
+		core = buildContentCoreFromAnchors(result.CleanedText, anchors)
+		lineage = buildLineageIndexFromAnchors(result.CleanedText, anchors)
 	}
 	receipts, receiptBytes, err := prepareReceipts(index, result.Receipts, fields)
 	if err != nil {
@@ -363,6 +370,7 @@ func prepareSource(index int, result SourceResult) (preparedSource, int, int, er
 		receipts:  receipts,
 		cleaned:   result.CleanedText,
 		core:      core,
+		lineage:   lineage,
 	}, len(result.Data), metadataBytes, nil
 }
 
@@ -952,7 +960,13 @@ func independentComponents(sources []preparedSource) []int {
 			sameRoot := sources[first].root == sources[second].root
 			similar := sources[first].simText != 0 && sources[second].simText != 0 &&
 				simhash.Distance(sources[first].simText, sources[second].simText) <= independenceDistance
-			if sameRoot || similar || contentCoresSimilar(sources[first].core, sources[second].core) {
+			lineage := quoteLineageSimilar(
+				sources[first].lineage,
+				sources[first].fields,
+				sources[second].lineage,
+				sources[second].fields,
+			)
+			if sameRoot || similar || contentCoresSimilar(sources[first].core, sources[second].core) || lineage {
 				set.union(first, second)
 			}
 		}
