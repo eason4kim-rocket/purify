@@ -15,6 +15,7 @@ import (
 	"github.com/use-agent/purify/config"
 	"github.com/use-agent/purify/engine"
 	"github.com/use-agent/purify/models"
+	"github.com/use-agent/purify/publicnet"
 	"github.com/use-agent/purify/scraper"
 )
 
@@ -92,6 +93,44 @@ func TestNewOutboundPolicyValidatesConfiguredProxy(t *testing.T) {
 				t.Fatalf("newOutboundPolicy(%q) = (%#v, %v), want nil + error", proxyURL, policy, err)
 			}
 		})
+	}
+}
+
+func TestManagedEAVPolicyDoesNotWidenOutboundPolicy(t *testing.T) {
+	strict, err := newOutboundPolicy("")
+	if err != nil {
+		t.Fatalf("newOutboundPolicy() error = %v", err)
+	}
+	managedStrict, err := newManagedEAVPolicy("", false)
+	if err != nil {
+		t.Fatalf("newManagedEAVPolicy(false) error = %v", err)
+	}
+	managedPrivate, err := newManagedEAVPolicy("", true)
+	if err != nil {
+		t.Fatalf("newManagedEAVPolicy(true) error = %v", err)
+	}
+	if strict == managedStrict || strict == managedPrivate || managedStrict == managedPrivate {
+		t.Fatal("global and managed policies must be independently owned")
+	}
+
+	for name, policy := range map[string]*publicnet.Policy{
+		"global outbound": strict,
+		"managed default": managedStrict,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := policy.Resolve(context.Background(), "127.0.0.1"); !errors.Is(err, publicnet.ErrNotPublic) {
+				t.Fatalf("Resolve(loopback) error = %v, want ErrNotPublic", err)
+			}
+		})
+	}
+	addresses, err := managedPrivate.Resolve(context.Background(), "127.0.0.1")
+	if err != nil || len(addresses) != 1 || addresses[0].String() != "127.0.0.1" {
+		t.Fatalf("private managed Resolve(loopback) = %#v, %v", addresses, err)
+	}
+	// The managed opt-in constructs a distinct immutable policy. It must never
+	// mutate or replace the public-only policy shared by request-driven callers.
+	if _, err := strict.Resolve(context.Background(), "127.0.0.1"); !errors.Is(err, publicnet.ErrNotPublic) {
+		t.Fatalf("global Resolve(loopback) after managed opt-in = %v, want ErrNotPublic", err)
 	}
 }
 

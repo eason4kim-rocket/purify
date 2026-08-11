@@ -67,6 +67,9 @@ type EAVConfig struct {
 	APIKey         string
 	Model          string
 	BaseURL        string
+	// AllowPrivate permits only the process-owned EAV provider to resolve and
+	// dial private networks. Request-scoped LLM providers remain public-only.
+	AllowPrivate bool
 }
 
 // HealConfig controls the optional process-owned lifecycle webhook emitted by
@@ -255,6 +258,7 @@ func Load() *Config {
 			APIKey:         os.Getenv("PURIFY_EAV_LLM_API_KEY"),
 			Model:          envOr("PURIFY_EAV_LLM_MODEL", "gpt-4o-mini"),
 			BaseURL:        envOr("PURIFY_EAV_LLM_BASE_URL", "https://api.openai.com/v1"),
+			AllowPrivate:   envBoolOr("PURIFY_EAV_LLM_ALLOW_PRIVATE", false),
 		},
 		Heal: HealConfig{
 			WebhookURL:    os.Getenv("PURIFY_HEAL_WEBHOOK_URL"),

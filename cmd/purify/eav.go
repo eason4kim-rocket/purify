@@ -6,16 +6,69 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/use-agent/purify/config"
 	extractdomain "github.com/use-agent/purify/extract"
 	"github.com/use-agent/purify/llm"
+	"github.com/use-agent/purify/publicnet"
 	"github.com/use-agent/purify/verify/eav"
 )
 
 var errManagedEAVUnavailable = errors.New("managed entity attribution is unavailable")
+
+// managedSourceJudgeRuntime owns the process-scoped EAV transport separately
+// from the request-scoped LLM client. Embedding the judge keeps the extract
+// service boundary transport-neutral while Close releases only managed idles.
+type managedSourceJudgeRuntime struct {
+	extractdomain.SourceJudge
+	closeHTTP func()
+	closeOnce sync.Once
+}
+
+func (runtime *managedSourceJudgeRuntime) Close() {
+	if runtime == nil {
+		return
+	}
+	runtime.closeOnce.Do(func() {
+		if runtime.closeHTTP != nil {
+			runtime.closeHTTP()
+		}
+	})
+}
+
+// newManagedSourceJudgeRuntime constructs a hardened, independently owned HTTP
+// and LLM client around the injected managed-only policy. Disabled EAV remains
+// inert and does not require or construct network state.
+func newManagedSourceJudgeRuntime(
+	cfg config.EAVConfig,
+	policy *publicnet.Policy,
+) (*managedSourceJudgeRuntime, error) {
+	if !cfg.Enabled {
+		return nil, nil
+	}
+	if err := config.ValidateEAVConfig(cfg); err != nil {
+		return nil, err
+	}
+	if policy == nil {
+		return nil, errManagedEAVUnavailable
+	}
+	httpClient, err := llm.NewPublicHTTPClient(policy, 0)
+	if err != nil {
+		return nil, fmt.Errorf("%w: construct HTTP client: %w", errManagedEAVUnavailable, err)
+	}
+	judge, err := newManagedSourceJudge(cfg, llm.NewClient(httpClient))
+	if err != nil {
+		httpClient.CloseIdleConnections()
+		return nil, err
+	}
+	return &managedSourceJudgeRuntime{
+		SourceJudge: judge,
+		closeHTTP:   httpClient.CloseIdleConnections,
+	}, nil
+}
 
 // newManagedSourceJudge assembles the production entity-attribution judge:
 // an LLM-backed blind extractor behind a content-keyed cache, an optional

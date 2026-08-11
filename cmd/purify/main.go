@@ -280,12 +280,21 @@ func run() error {
 		return fmt.Errorf("initialise request LLM HTTP client: %w", err)
 	}
 	defer requestLLMHTTPClient.CloseIdleConnections()
-	llmClient := llm.NewClient(requestLLMHTTPClient)
-	sourceJudge, err := newManagedSourceJudge(cfg.EAV, llmClient)
-	if err != nil {
-		return fmt.Errorf("initialise entity attribution: %w", err)
+	requestLLMClient := llm.NewClient(requestLLMHTTPClient)
+	var sourceJudge extractdomain.SourceJudge
+	if cfg.EAV.Enabled {
+		managedEAVPolicy, policyErr := newManagedEAVPolicy(cfg.Browser.DefaultProxy, cfg.EAV.AllowPrivate)
+		if policyErr != nil {
+			return fmt.Errorf("initialise entity-attribution network policy: %w", policyErr)
+		}
+		managedEAV, managedErr := newManagedSourceJudgeRuntime(cfg.EAV, managedEAVPolicy)
+		if managedErr != nil {
+			return fmt.Errorf("initialise entity attribution: %w", managedErr)
+		}
+		defer managedEAV.Close()
+		sourceJudge = managedEAV
 	}
-	extractService, err := extractdomain.NewService(scrapeService, llmClient, receiptSigner, extractdomain.Config{
+	extractService, err := extractdomain.NewService(scrapeService, requestLLMClient, receiptSigner, extractdomain.Config{
 		CompiledRepository: compilerBindings.compiledRepository,
 		CompileObserver:    compilerBindings.compileObserver,
 		SafeProxyURL:       safeProxyURL,
@@ -542,15 +551,35 @@ func newRodFetch(sc boundedRodScraper) engine.RodFetchFunc {
 }
 
 func newOutboundPolicy(defaultProxyURL string) (*publicnet.Policy, error) {
+	options, err := networkPolicyOptions(defaultProxyURL)
+	if err != nil {
+		return nil, err
+	}
+	return publicnet.NewPolicy(options), nil
+}
+
+// newManagedEAVPolicy is the only construction boundary that can opt out of
+// public-only destination checks. Its result is used only by the process-owned
+// entity-attribution runtime and is never shared with request-driven clients.
+func newManagedEAVPolicy(defaultProxyURL string, allowPrivate bool) (*publicnet.Policy, error) {
+	options, err := networkPolicyOptions(defaultProxyURL)
+	if err != nil {
+		return nil, err
+	}
+	options.AllowPrivateNetworks = allowPrivate
+	return publicnet.NewPolicy(options), nil
+}
+
+func networkPolicyOptions(defaultProxyURL string) (publicnet.Options, error) {
 	options := publicnet.Options{}
 	if defaultProxyURL != "" {
 		dialContext, err := proxy.NewExternalDialContext(defaultProxyURL)
 		if err != nil {
-			return nil, err
+			return publicnet.Options{}, err
 		}
 		options.DialContext = dialContext
 	}
-	return publicnet.NewPolicy(options), nil
+	return options, nil
 }
 
 func verifyRevisitTimeout(scraperConfig config.ScraperConfig) time.Duration {

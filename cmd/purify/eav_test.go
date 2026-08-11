@@ -4,11 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/use-agent/purify/config"
 	"github.com/use-agent/purify/llm"
+	"github.com/use-agent/purify/publicnet"
 	"github.com/use-agent/purify/verify/eav"
 )
 
@@ -72,6 +79,191 @@ func TestNewManagedSourceJudge(t *testing.T) {
 	judge, err := newManagedSourceJudge(validEAVConfig(), &eavExtractorStub{reply: `{"primary":null,"reason_if_none":null}`})
 	if err != nil || judge == nil {
 		t.Fatalf("valid configuration must build a judge, got (%v, %v)", judge, err)
+	}
+}
+
+func TestManagedSourceJudgeRuntimeDisabledIsInert(t *testing.T) {
+	runtime, err := newManagedSourceJudgeRuntime(config.EAVConfig{AllowPrivate: true}, nil)
+	if err != nil || runtime != nil {
+		t.Fatalf("disabled runtime = %#v, %v; want nil, nil", runtime, err)
+	}
+
+	cfg := validEAVConfig()
+	if runtime, err := newManagedSourceJudgeRuntime(cfg, nil); !errors.Is(err, errManagedEAVUnavailable) || runtime != nil {
+		t.Fatalf("enabled runtime without policy = %#v, %v", runtime, err)
+	}
+}
+
+func TestManagedEAVLoopbackPolicyAndBYOKIsolation(t *testing.T) {
+	provider, capture := newEAVProviderServer(t)
+	baseURL := provider.URL + "/v1"
+	doc := managedEAVTestDocument(provider.URL)
+
+	strictPolicy, err := newManagedEAVPolicy("", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strictCfg := validEAVConfig()
+	strictCfg.BaseURL = baseURL
+	strictRuntime, err := newManagedSourceJudgeRuntime(strictCfg, strictPolicy)
+	if err != nil {
+		t.Fatalf("newManagedSourceJudgeRuntime(strict) error = %v", err)
+	}
+	t.Cleanup(strictRuntime.Close)
+	judgment, err := strictRuntime.JudgeDocument(context.Background(), eav.Subject{Name: "Apple Bank"}, doc)
+	if err != nil || judgment.Verdict != eav.VerdictUncertain {
+		t.Fatalf("strict loopback judgment = %#v, %v", judgment, err)
+	}
+	if hits, _, _ := capture.snapshot(); hits != 0 {
+		t.Fatalf("strict managed loopback provider hits = %d, want zero", hits)
+	}
+
+	privatePolicy, err := newManagedEAVPolicy("", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateCfg := validEAVConfig()
+	privateCfg.AllowPrivate = true
+	privateCfg.BaseURL = baseURL
+	privateRuntime, err := newManagedSourceJudgeRuntime(privateCfg, privatePolicy)
+	if err != nil {
+		t.Fatalf("newManagedSourceJudgeRuntime(private) error = %v", err)
+	}
+	t.Cleanup(privateRuntime.Close)
+	judgment, err = privateRuntime.JudgeDocument(context.Background(), eav.Subject{Name: "Apple Bank"}, doc)
+	if err != nil || judgment.Verdict != eav.VerdictMatch {
+		t.Fatalf("private loopback judgment = %#v, %v", judgment, err)
+	}
+	hits, authorizations, bodies := capture.snapshot()
+	if hits != 1 || len(authorizations) != 1 || authorizations[0] != "Bearer key" {
+		t.Fatalf("private managed provider hits/auth = %d/%#v", hits, authorizations)
+	}
+
+	// Recreate the production request-scoped client from the immutable global
+	// policy after private managed EAV is enabled. The same target must remain
+	// unreachable and the caller credential must never reach the provider.
+	requestPolicy, err := newOutboundPolicy("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestHTTPClient, err := llm.NewPublicHTTPClient(requestPolicy, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(requestHTTPClient.CloseIdleConnections)
+	const byokSecret = "byok-must-not-leak"
+	_, err = llm.NewClient(requestHTTPClient).Extract(
+		context.Background(),
+		"request content",
+		json.RawMessage(`{"type":"object"}`),
+		llm.ExtractParams{APIKey: byokSecret, Model: "request-model", BaseURL: baseURL},
+	)
+	if !errors.Is(err, publicnet.ErrNotPublic) {
+		t.Fatalf("BYOK loopback error = %v, want ErrNotPublic", err)
+	}
+	if strings.Contains(err.Error(), byokSecret) {
+		t.Fatalf("BYOK error leaked credential: %v", err)
+	}
+	afterHits, afterAuthorizations, afterBodies := capture.snapshot()
+	if afterHits != hits || len(afterAuthorizations) != len(authorizations) || len(afterBodies) != len(bodies) {
+		t.Fatalf("BYOK reached private provider: hits/auth/bodies = %d/%d/%d", afterHits, len(afterAuthorizations), len(afterBodies))
+	}
+	for _, value := range append(afterAuthorizations, afterBodies...) {
+		if strings.Contains(value, byokSecret) {
+			t.Fatal("private provider captured BYOK credential")
+		}
+	}
+}
+
+func TestManagedEAVStrictPolicyReachesPublicProvider(t *testing.T) {
+	provider, capture := newEAVProviderServer(t)
+	serverAddress := provider.Listener.Addr().String()
+	_, rawPort, err := net.SplitHostPort(serverAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := publicnet.NewPolicy(publicnet.Options{
+		Resolver: eavStaticResolver{"provider.test": {netip.MustParseAddr("1.1.1.1")}},
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, serverAddress)
+		},
+	})
+	cfg := validEAVConfig()
+	cfg.BaseURL = "http://provider.test:" + rawPort + "/v1"
+	runtime, err := newManagedSourceJudgeRuntime(cfg, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Close)
+	judgment, err := runtime.JudgeDocument(
+		context.Background(),
+		eav.Subject{Name: "Apple Bank"},
+		managedEAVTestDocument("http://provider.test:"+rawPort),
+	)
+	if err != nil || judgment.Verdict != eav.VerdictMatch {
+		t.Fatalf("public provider judgment = %#v, %v", judgment, err)
+	}
+	if hits, _, _ := capture.snapshot(); hits != 1 {
+		t.Fatalf("public provider hits = %d, want one", hits)
+	}
+}
+
+type eavStaticResolver map[string][]netip.Addr
+
+func (resolver eavStaticResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, error) {
+	addresses, ok := resolver[host]
+	if !ok {
+		return nil, errors.New("unexpected host")
+	}
+	return append([]netip.Addr(nil), addresses...), nil
+}
+
+type eavProviderCapture struct {
+	mu             sync.Mutex
+	hits           int
+	authorizations []string
+	bodies         []string
+}
+
+func (capture *eavProviderCapture) snapshot() (int, []string, []string) {
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	return capture.hits, append([]string(nil), capture.authorizations...), append([]string(nil), capture.bodies...)
+}
+
+func newEAVProviderServer(t *testing.T) (*httptest.Server, *eavProviderCapture) {
+	t.Helper()
+	capture := &eavProviderCapture{}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			http.Error(writer, "read request", http.StatusBadRequest)
+			return
+		}
+		capture.mu.Lock()
+		capture.hits++
+		capture.authorizations = append(capture.authorizations, request.Header.Get("Authorization"))
+		capture.bodies = append(capture.bodies, string(body))
+		capture.mu.Unlock()
+
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"choices": []any{map[string]any{
+				"message": map[string]any{
+					"content": `{"primary":{"name":"Apple Bank","kind":"organization","aliases":[],"quote":"Apple Bank was founded in 1863."},"reason_if_none":null}`,
+				},
+			}},
+		})
+	}))
+	t.Cleanup(server.Close)
+	return server, capture
+}
+
+func managedEAVTestDocument(rawURL string) eav.Document {
+	return eav.Document{
+		URL:     rawURL,
+		Title:   "Apple Bank",
+		Cleaned: "Apple Bank was founded in 1863.",
 	}
 }
 

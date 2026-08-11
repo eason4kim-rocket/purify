@@ -63,6 +63,43 @@ func TestCompilerConfigEnvironment(t *testing.T) {
 	}
 }
 
+func TestEAVAllowPrivateConfigDefaultsAndEnvironment(t *testing.T) {
+	t.Setenv("PURIFY_EAV_LLM_ALLOW_PRIVATE", "")
+	if cfg := Load(); cfg.EAV.AllowPrivate {
+		t.Fatalf("default EAV AllowPrivate = true, want false")
+	}
+
+	t.Setenv("PURIFY_EAV_LLM_ALLOW_PRIVATE", "true")
+	if cfg := Load(); !cfg.EAV.AllowPrivate {
+		t.Fatalf("configured EAV AllowPrivate = false, want true")
+	}
+
+	t.Setenv("PURIFY_EAV_LLM_ALLOW_PRIVATE", "false")
+	if cfg := Load(); cfg.EAV.AllowPrivate {
+		t.Fatalf("explicit-false EAV AllowPrivate = true, want false")
+	}
+
+	// Load has no error return. Invalid boolean environment values must retain
+	// the secure zero-value default rather than enabling private networking.
+	t.Setenv("PURIFY_EAV_LLM_ALLOW_PRIVATE", "not-a-boolean")
+	if cfg := Load(); cfg.EAV.AllowPrivate {
+		t.Fatalf("invalid EAV AllowPrivate = true, want fail-closed false")
+	}
+}
+
+func TestValidateEAVConfigDisabledAllowPrivateIsInert(t *testing.T) {
+	err := ValidateEAVConfig(EAVConfig{
+		AllowPrivate: true,
+		APIKey:       "   ",
+		Model:        "invalid model",
+		BaseURL:      "://invalid",
+		CacheEntries: -1,
+	})
+	if err != nil {
+		t.Fatalf("ValidateEAVConfig(disabled) error = %v", err)
+	}
+}
+
 func TestHealConfigDefaultsAndEnvironment(t *testing.T) {
 	t.Setenv("PURIFY_HEAL_WEBHOOK_URL", "")
 	t.Setenv("PURIFY_HEAL_WEBHOOK_SECRET", "")
