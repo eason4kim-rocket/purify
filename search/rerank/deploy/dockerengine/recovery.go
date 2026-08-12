@@ -35,9 +35,9 @@ var errRecoveryJournal = errors.New("rerank docker engine: recovery journal reje
 
 // recoveryRecord contains only the deterministic identity needed to recover
 // one controller-owned container. SnapshotDir is the only operator input: it
-// is required to reconstruct the exact recovery Create fence. The record
-// intentionally cannot contain the API key, environment, argv, or session
-// credential.
+// binds the exact host-cleanup paths and secret-redacted spec identity. The
+// record intentionally cannot contain the API key, environment, argv, or
+// session credential.
 type recoveryRecord struct {
 	Version       string `json:"version"`
 	State         string `json:"state"`
@@ -246,9 +246,10 @@ func (journal *recoveryJournal) records() ([]recoveryRecord, error) {
 }
 
 func (journal *recoveryJournal) remove(current recoveryRecord) error {
-	// A creating record is deliberately not removable: absence by deterministic
-	// name is not proof that an in-flight daemon handler cannot still commit the
-	// Create. Recovery must first fence/resolve the request and persist owned.
+	// A creating record is deliberately not removable. Docker's public API has
+	// no cross-implementation completion barrier for an ambiguous Create, so
+	// automatic recovery quarantines it until a future authenticated recovery
+	// protocol can persist owned authority.
 	if journal == nil || !validRecoveryRecord(current) || current.State == recoveryStateCreating {
 		return errRecoveryJournal
 	}

@@ -71,9 +71,10 @@ type Engine interface {
 	InspectImage(context.Context, string) (ImageInspection, error)
 	Create(context.Context, CreateSpec) (CreateResult, error)
 	// ResolveCreate is restricted to the exact deterministic name derived from
-	// a fully admitted create spec. It exists only to recover cleanup authority
-	// after an ambiguous create response; it is not a generic name lookup or
-	// adoption surface.
+	// a fully admitted create spec. The current automatic recovery coordinator
+	// intentionally never calls it: a lookup result alone grants no cleanup
+	// authority without a stronger authenticated completion protocol. It is not
+	// a generic name lookup or adoption surface.
 	ResolveCreate(context.Context, CreateSpec) (OwnershipInspection, error)
 	Start(context.Context, string) error
 	Inspect(context.Context, string) (ContainerInspection, error)
