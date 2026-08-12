@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"container/heap"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -89,8 +90,25 @@ func buildContentCoreFromAnchors(cleaned string, anchors []coreAnchor) coreDescr
 // is deliberately narrower than general consensus evidence, but every eligible
 // range is checked before truncation so sampling cannot hide malformed input.
 func selectCoreAnchors(cleaned string, basis map[string]evidence.Anchor) ([]coreAnchor, error) {
+	return selectCoreAnchorsContext(context.Background(), cleaned, basis)
+}
+
+func selectCoreAnchorsContext(ctx context.Context, cleaned string, basis map[string]evidence.Anchor) ([]coreAnchor, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: context is required", ErrInvalidInput)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	anchors := make([]coreAnchor, 0, min(len(basis), maxCoreAnchors))
+	seen := 0
 	for path, anchor := range basis {
+		seen++
+		if seen%independenceAnchorCancelChunk == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		if !eligibleCoreAnchor(anchor) {
 			continue
 		}

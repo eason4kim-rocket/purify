@@ -4,6 +4,7 @@ package consensus
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -248,7 +249,7 @@ func merge(results []SourceResult, withMaterialization bool) (Result, Materializ
 	}
 
 	sort.Slice(prepared, func(i, j int) bool { return prepared[i].url < prepared[j].url })
-	independence := buildIndependencePlan(prepared)
+	independence := buildIndependencePlan(prepared) // Merge keeps the no-cancel path.
 	paths := collectPaths(prepared)
 	if err := preflightOutput(paths, prepared, independence); err != nil {
 		return Result{}, Materialization{}, err
@@ -269,6 +270,20 @@ func merge(results []SourceResult, withMaterialization bool) (Result, Materializ
 }
 
 func prepareSource(index int, result SourceResult) (preparedSource, int, int, error) {
+	return prepareSourceContext(context.Background(), index, result)
+}
+
+func prepareSourceContext(ctx context.Context, index int, result SourceResult) (preparedSource, int, int, error) {
+	if ctx == nil {
+		return preparedSource{}, 0, 0, fmt.Errorf("%w: context is required", ErrInvalidInput)
+	}
+	if err := ctx.Err(); err != nil {
+		return preparedSource{}, 0, 0, err
+	}
+	return prepareSourceBody(ctx, index, result)
+}
+
+func prepareSourceBody(ctx context.Context, index int, result SourceResult) (preparedSource, int, int, error) {
 	if len(result.URL) == 0 {
 		return preparedSource{}, 0, 0, fmt.Errorf("%w: source %d URL is empty", ErrInvalidInput, index)
 	}
@@ -352,9 +367,12 @@ func prepareSource(index int, result SourceResult) (preparedSource, int, int, er
 	var core coreDescriptor
 	var lineage lineageIndex
 	if result.CleanedText != "" {
-		anchors, anchorErr := selectCoreAnchors(result.CleanedText, basis)
+		anchors, anchorErr := selectCoreAnchorsContext(ctx, result.CleanedText, basis)
 		if anchorErr != nil {
 			return preparedSource{}, 0, 0, fmt.Errorf("source %d enhanced evidence: %w", index, anchorErr)
+		}
+		if err := ctx.Err(); err != nil {
+			return preparedSource{}, 0, 0, err
 		}
 		core = buildContentCoreFromAnchors(result.CleanedText, anchors)
 		lineage = buildLineageIndexFromAnchors(result.CleanedText, anchors)
@@ -985,9 +1003,26 @@ type independenceNeighbor struct {
 }
 
 func buildIndependencePlan(sources []preparedSource) independencePlan {
+	plan, _ := buildIndependencePlanContext(context.Background(), sources)
+	return plan
+}
+
+func buildIndependencePlanContext(ctx context.Context, sources []preparedSource) (independencePlan, error) {
+	if ctx == nil {
+		return independencePlan{}, fmt.Errorf("%w: context is required", ErrInvalidInput)
+	}
+	if err := ctx.Err(); err != nil {
+		return independencePlan{}, err
+	}
 	candidates := make([]independenceEdge, 0, len(sources)*(len(sources)-1)/2)
 	for first := range sources {
+		if err := ctx.Err(); err != nil {
+			return independencePlan{}, err
+		}
 		for second := first + 1; second < len(sources); second++ {
+			if err := ctx.Err(); err != nil {
+				return independencePlan{}, err
+			}
 			reason := sourcePairFoldReason(sources[first], sources[second])
 			if reason == "" {
 				continue
@@ -1068,7 +1103,7 @@ func buildIndependencePlan(sources []preparedSource) independencePlan {
 		forest:       forest,
 		parent:       parent,
 		parentReason: parentReason,
-	}
+	}, nil
 }
 
 func sourcePairFoldReason(first, second preparedSource) FoldReason {
