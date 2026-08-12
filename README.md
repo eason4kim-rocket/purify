@@ -448,6 +448,34 @@ Compiled schema validation uses a success-only LRU bounded to 128 entries and
 overflow compiles bypass the cache, while failed schemas and caller-owned
 buffers are not retained.
 
+#### Process-owned metadata reranker
+
+The metadata reranker is a separate, default-off process capability. Its
+configuration is never populated from request BYOK fields:
+
+```bash
+PURIFY_RERANK_ENABLED=false
+PURIFY_RERANK_ENDPOINT=
+PURIFY_RERANK_API_KEY=
+PURIFY_RERANK_PROFILE=qwen3-reranker-0.6b-v1
+PURIFY_RERANK_ALLOW_PRIVATE=false
+PURIFY_RERANK_TIMEOUT_SECONDS=5
+```
+
+The Compose stack forwards these values and `PURIFY_PROXY` from the project
+`.env` file, but does not start or download a model sidecar. When running the
+binary directly, export the values into its process environment first. Public
+reranker endpoints must use HTTPS. Plain HTTP is accepted only with
+`PURIFY_RERANK_ALLOW_PRIVATE=true`; the dedicated runtime additionally requires
+the resolved and pinned destination to be an operator-private or loopback
+address before sending the process credential.
+
+The profile name is not deployment proof. Until the R-6a authenticated
+deployment admission and pinned R-6 recording manifest have both passed review,
+the production reranker remains unavailable even if these variables are set.
+The API key is process-owned and is never a fallback for request-scoped LLM
+credentials.
+
 #### Managed entity attribution
 
 Per-source entity attribution is an explicit, default-off process capability:
@@ -846,6 +874,7 @@ All configuration via environment variables:
 | `PURIFY_AUTH_ENABLED` | `true` | Enable API key authentication |
 | `PURIFY_API_KEYS` | — | Comma-separated valid API keys |
 | `PURIFY_MAX_PAGES` | `10` | Max concurrent browser tabs |
+| `PURIFY_PROXY` | — | Explicit outbound proxy; ambient `HTTP_PROXY`/`HTTPS_PROXY` variables are ignored |
 | `PURIFY_DEFAULT_TIMEOUT` | `30s` | Default scrape timeout |
 | `PURIFY_RATE_RPS` | `5` | Rate limit (requests/sec/key) |
 | `PURIFY_RATE_BURST` | `10` | Rate limit burst |
@@ -853,6 +882,12 @@ All configuration via environment variables:
 | `PURIFY_DATA_DIR` | `./data` | Durable snapshots, signing key, SQLite verification ledger, and webhook outbox |
 | `PURIFY_SNAPSHOT_ENABLED` | `true` | Persist content-addressed HTML snapshots |
 | `PURIFY_SIGNING_KEY` | generated | Optional 32-byte Ed25519 seed encoded as hex |
+| `PURIFY_RERANK_ENABLED` | `false` | Configure the process-owned metadata reranker; certified capability remains gated by an admitted manifest |
+| `PURIFY_RERANK_ENDPOINT` | — | Exact managed `/v1/rerank` endpoint; public destinations require HTTPS |
+| `PURIFY_RERANK_API_KEY` | — | Process-owned reranker credential; never a request BYOK fallback |
+| `PURIFY_RERANK_PROFILE` | `qwen3-reranker-0.6b-v1` | Requested pinned profile name; not proof of deployment identity |
+| `PURIFY_RERANK_ALLOW_PRIVATE` | `false` | Permit the dedicated runtime to use an operator-private endpoint |
+| `PURIFY_RERANK_TIMEOUT_SECONDS` | `5` | Reranker timeout in whole seconds (`1`–`10`) |
 | `PURIFY_COMPILER_ENABLED` | `false` | Enable process-owned background synthesis; compiled execution remains available when false |
 | `PURIFY_COMPILER_API_KEY` | — | Process-owned provider key used only by the managed compiler |
 | `PURIFY_COMPILER_MODEL` | `gpt-4o-mini` | Managed compiler truth-extraction model |

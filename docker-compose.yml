@@ -11,6 +11,8 @@ services:
       # ── Server ──
       PURIFY_MODE: release
       PURIFY_MAX_PAGES: "10"
+      # Ambient HTTP(S)_PROXY is ignored; this is the only explicit proxy.
+      PURIFY_PROXY: "${PURIFY_PROXY:-}"
       # ── Auth (generate a strong key: openssl rand -hex 32) ──
       PURIFY_AUTH_ENABLED: "true"
       PURIFY_API_KEYS: "${PURIFY_API_KEYS}"
@@ -21,6 +23,13 @@ services:
       PURIFY_RATE_BURST: "30"
       # ── Search provider (empty leaves search/answer/watch disabled) ──
       PURIFY_SEARCH_BRAVE_KEY: "${PURIFY_SEARCH_BRAVE_KEY:-}"
+      # ── Process-owned metadata reranker (default-off; no sidecar here) ──
+      PURIFY_RERANK_ENABLED: "${PURIFY_RERANK_ENABLED:-false}"
+      PURIFY_RERANK_ENDPOINT: "${PURIFY_RERANK_ENDPOINT:-}"
+      PURIFY_RERANK_API_KEY: "${PURIFY_RERANK_API_KEY:-}"
+      PURIFY_RERANK_PROFILE: "${PURIFY_RERANK_PROFILE:-qwen3-reranker-0.6b-v1}"
+      PURIFY_RERANK_ALLOW_PRIVATE: "${PURIFY_RERANK_ALLOW_PRIVATE:-false}"
+      PURIFY_RERANK_TIMEOUT_SECONDS: "${PURIFY_RERANK_TIMEOUT_SECONDS:-5}"
       # ── Managed entity attribution (default-off) ──
       PURIFY_EAV_ENABLED: "${PURIFY_EAV_ENABLED:-false}"
       PURIFY_EAV_REFEREE_ENABLED: "${PURIFY_EAV_REFEREE_ENABLED:-true}"

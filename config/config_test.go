@@ -134,6 +134,211 @@ func TestSearchConfigDefaultsAndEnvironment(t *testing.T) {
 	}
 }
 
+func TestRerankConfigDefaultsAndEnvironment(t *testing.T) {
+	for _, key := range []string{
+		"PURIFY_RERANK_ENABLED",
+		"PURIFY_RERANK_ENDPOINT",
+		"PURIFY_RERANK_API_KEY",
+		"PURIFY_RERANK_PROFILE",
+		"PURIFY_RERANK_ALLOW_PRIVATE",
+		"PURIFY_RERANK_TIMEOUT_SECONDS",
+	} {
+		t.Setenv(key, "")
+	}
+
+	cfg := Load()
+	wantDefault := RerankConfig{
+		Profile:        DefaultRerankProfile,
+		TimeoutSeconds: 5,
+	}
+	if cfg.Rerank != wantDefault {
+		t.Fatalf("Rerank defaults = %#v, want %#v", cfg.Rerank, wantDefault)
+	}
+	if err := ValidateRerankConfig(cfg.Rerank); err != nil {
+		t.Fatalf("ValidateRerankConfig(default disabled) error = %v", err)
+	}
+
+	t.Setenv("PURIFY_RERANK_ENABLED", "true")
+	t.Setenv("PURIFY_RERANK_ENDPOINT", "http://reranker.internal:8000/v1/rerank")
+	t.Setenv("PURIFY_RERANK_API_KEY", "process-rerank-key")
+	t.Setenv("PURIFY_RERANK_PROFILE", "test-profile-v1")
+	t.Setenv("PURIFY_RERANK_ALLOW_PRIVATE", "true")
+	t.Setenv("PURIFY_RERANK_TIMEOUT_SECONDS", "10")
+	cfg = Load()
+	wantConfigured := RerankConfig{
+		Enabled:        true,
+		Endpoint:       "http://reranker.internal:8000/v1/rerank",
+		APIKey:         "process-rerank-key",
+		Profile:        "test-profile-v1",
+		AllowPrivate:   true,
+		TimeoutSeconds: 10,
+	}
+	if cfg.Rerank != wantConfigured {
+		t.Fatalf("Rerank environment = %#v, want %#v", cfg.Rerank, wantConfigured)
+	}
+	if err := ValidateRerankConfig(cfg.Rerank); err != nil {
+		t.Fatalf("ValidateRerankConfig(environment) error = %v", err)
+	}
+}
+
+func TestRerankTimeoutEnvironmentIsStrictAndDisabledInert(t *testing.T) {
+	setValidRerankEnvironment(t)
+	for _, raw := range []string{"5s", "1.5", "+5", " 5", "five"} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("PURIFY_RERANK_ENABLED", "true")
+			t.Setenv("PURIFY_RERANK_TIMEOUT_SECONDS", raw)
+			cfg := Load()
+			if cfg.Rerank.TimeoutSeconds != 0 {
+				t.Fatalf("malformed timeout %q loaded as %d, want invalid sentinel 0", raw, cfg.Rerank.TimeoutSeconds)
+			}
+			if err := ValidateRerankConfig(cfg.Rerank); !errors.Is(err, ErrInvalidRerankConfig) {
+				t.Fatalf("ValidateRerankConfig(malformed timeout %q) = %v", raw, err)
+			}
+
+			t.Setenv("PURIFY_RERANK_ENABLED", "false")
+			cfg = Load()
+			if err := ValidateRerankConfig(cfg.Rerank); err != nil {
+				t.Fatalf("ValidateRerankConfig(disabled malformed timeout %q) = %v", raw, err)
+			}
+		})
+	}
+}
+
+func TestValidateRerankConfigMatrixAndRedaction(t *testing.T) {
+	valid := RerankConfig{
+		Enabled:        true,
+		Endpoint:       "https://rerank.example.test/v1/rerank",
+		APIKey:         "rerank-process-secret",
+		Profile:        DefaultRerankProfile,
+		TimeoutSeconds: 5,
+	}
+	tests := []struct {
+		name    string
+		config  RerankConfig
+		invalid bool
+	}{
+		{name: "valid HTTPS", config: valid},
+		{name: "valid private HTTP", config: withRerankEndpoint(valid, "http://reranker.internal:8000/v1/rerank", true)},
+		{name: "disabled stale values are inert", config: RerankConfig{Endpoint: "://bad", APIKey: "\xff", Profile: " bad ", AllowPrivate: true}, invalid: false},
+		{name: "missing endpoint", config: withRerankEndpoint(valid, "", false), invalid: true},
+		{name: "endpoint leading space", config: withRerankEndpoint(valid, " "+valid.Endpoint, false), invalid: true},
+		{name: "endpoint trailing space", config: withRerankEndpoint(valid, valid.Endpoint+" ", false), invalid: true},
+		{name: "endpoint invalid UTF-8", config: withRerankEndpoint(valid, "https://rerank.example.test/\xff", false), invalid: true},
+		{name: "endpoint control", config: withRerankEndpoint(valid, "https://rerank.example.test/v1/rerank\n", false), invalid: true},
+		{name: "relative endpoint", config: withRerankEndpoint(valid, "/v1/rerank", false), invalid: true},
+		{name: "unsupported scheme", config: withRerankEndpoint(valid, "ftp://rerank.example.test/v1/rerank", false), invalid: true},
+		{name: "uppercase scheme", config: withRerankEndpoint(valid, "HTTPS://rerank.example.test/v1/rerank", false), invalid: true},
+		{name: "missing host", config: withRerankEndpoint(valid, "https:///v1/rerank", false), invalid: true},
+		{name: "opaque endpoint", config: withRerankEndpoint(valid, "https:rerank.example.test/v1/rerank", false), invalid: true},
+		{name: "userinfo", config: withRerankEndpoint(valid, "https://user:secret@rerank.example.test/v1/rerank", false), invalid: true},
+		{name: "query", config: withRerankEndpoint(valid, "https://rerank.example.test/v1/rerank?token=secret", false), invalid: true},
+		{name: "empty query", config: withRerankEndpoint(valid, "https://rerank.example.test/v1/rerank?", false), invalid: true},
+		{name: "fragment", config: withRerankEndpoint(valid, "https://rerank.example.test/v1/rerank#secret", false), invalid: true},
+		{name: "empty fragment", config: withRerankEndpoint(valid, "https://rerank.example.test/v1/rerank#", false), invalid: true},
+		{name: "wrong path", config: withRerankEndpoint(valid, "https://rerank.example.test/rerank", false), invalid: true},
+		{name: "trailing slash", config: withRerankEndpoint(valid, "https://rerank.example.test/v1/rerank/", false), invalid: true},
+		{name: "escaped path", config: withRerankEndpoint(valid, "https://rerank.example.test/v1/%72erank", false), invalid: true},
+		{name: "empty port", config: withRerankEndpoint(valid, "https://rerank.example.test:/v1/rerank", false), invalid: true},
+		{name: "zero port", config: withRerankEndpoint(valid, "https://rerank.example.test:0/v1/rerank", false), invalid: true},
+		{name: "port too large", config: withRerankEndpoint(valid, "https://rerank.example.test:65536/v1/rerank", false), invalid: true},
+		{name: "maximum port", config: withRerankEndpoint(valid, "https://rerank.example.test:65535/v1/rerank", false)},
+		{name: "zoned IPv6", config: withRerankEndpoint(valid, "https://[fe80::1%25eth0]/v1/rerank", true), invalid: true},
+		{name: "public HTTP without opt-in", config: withRerankEndpoint(valid, "http://rerank.example.test/v1/rerank", false), invalid: true},
+		{name: "empty key", config: withRerankKey(valid, ""), invalid: true},
+		{name: "key leading space", config: withRerankKey(valid, " "+valid.APIKey), invalid: true},
+		{name: "key trailing space", config: withRerankKey(valid, valid.APIKey+" "), invalid: true},
+		{name: "key invalid UTF-8", config: withRerankKey(valid, "\xff"), invalid: true},
+		{name: "key control", config: withRerankKey(valid, "secret\nvalue"), invalid: true},
+		{name: "empty profile", config: withRerankProfile(valid, ""), invalid: true},
+		{name: "profile leading space", config: withRerankProfile(valid, " "+valid.Profile), invalid: true},
+		{name: "profile trailing space", config: withRerankProfile(valid, valid.Profile+" "), invalid: true},
+		{name: "profile invalid UTF-8", config: withRerankProfile(valid, "\xff"), invalid: true},
+		{name: "profile control", config: withRerankProfile(valid, "profile\nname"), invalid: true},
+		{name: "timeout zero", config: withRerankTimeout(valid, 0), invalid: true},
+		{name: "timeout over maximum", config: withRerankTimeout(valid, 11), invalid: true},
+		{name: "timeout minimum", config: withRerankTimeout(valid, 1)},
+		{name: "timeout maximum", config: withRerankTimeout(valid, 10)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateRerankConfig(test.config)
+			if got := errors.Is(err, ErrInvalidRerankConfig); got != test.invalid {
+				t.Fatalf("ValidateRerankConfig() = %v, invalid=%v want=%v", err, got, test.invalid)
+			}
+			if err == nil {
+				return
+			}
+			for _, secret := range []string{test.config.Endpoint, test.config.APIKey, test.config.Profile} {
+				if secret != "" && strings.Contains(err.Error(), secret) {
+					t.Fatalf("validation error leaked configuration: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestRerankConfigResourceLimitsAreInclusive(t *testing.T) {
+	endpointPrefix := "https://"
+	endpointSuffix := "/v1/rerank"
+	value := RerankConfig{
+		Enabled:        true,
+		Endpoint:       endpointPrefix + strings.Repeat("a", maximumRerankEndpointBytes-len(endpointPrefix)-len(endpointSuffix)) + endpointSuffix,
+		APIKey:         strings.Repeat("k", maximumRerankAPIKeyBytes),
+		Profile:        strings.Repeat("p", maximumRerankProfileBytes),
+		TimeoutSeconds: 5,
+	}
+	if err := ValidateRerankConfig(value); err != nil {
+		t.Fatalf("ValidateRerankConfig(at limits) = %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*RerankConfig)
+	}{
+		{name: "endpoint N plus 1", mutate: func(config *RerankConfig) { config.Endpoint += "a" }},
+		{name: "key N plus 1", mutate: func(config *RerankConfig) { config.APIKey += "k" }},
+		{name: "profile N plus 1", mutate: func(config *RerankConfig) { config.Profile += "p" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := value
+			test.mutate(&candidate)
+			if err := ValidateRerankConfig(candidate); !errors.Is(err, ErrInvalidRerankConfig) {
+				t.Fatalf("ValidateRerankConfig() = %v, want ErrInvalidRerankConfig", err)
+			}
+		})
+	}
+}
+
+func setValidRerankEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv("PURIFY_RERANK_ENDPOINT", "https://rerank.example.test/v1/rerank")
+	t.Setenv("PURIFY_RERANK_API_KEY", "process-rerank-key")
+	t.Setenv("PURIFY_RERANK_PROFILE", DefaultRerankProfile)
+	t.Setenv("PURIFY_RERANK_ALLOW_PRIVATE", "false")
+}
+
+func withRerankEndpoint(source RerankConfig, endpoint string, allowPrivate bool) RerankConfig {
+	source.Endpoint = endpoint
+	source.AllowPrivate = allowPrivate
+	return source
+}
+
+func withRerankKey(source RerankConfig, key string) RerankConfig {
+	source.APIKey = key
+	return source
+}
+
+func withRerankProfile(source RerankConfig, profile string) RerankConfig {
+	source.Profile = profile
+	return source
+}
+
+func withRerankTimeout(source RerankConfig, timeout int) RerankConfig {
+	source.TimeoutSeconds = timeout
+	return source
+}
+
 func TestValidateHealConfigMatrixAndRedaction(t *testing.T) {
 	valid := HealConfig{WebhookURL: "https://hooks.example.com/heal", WebhookSecret: "process-secret"}
 	tests := []struct {

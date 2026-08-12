@@ -19,7 +19,22 @@ const maximumCompilerModelBytes = 256
 const maximumCompilerCredentialBytes = 16 << 10
 const maximumCompilerBaseURLBytes = 16 << 10
 
+const (
+	// DefaultRerankProfile names the only reference profile described by the
+	// current deployment contract. Runtime certification remains a separate,
+	// fail-closed gate populated only after authenticated deployment admission
+	// and acceptance of its matching recording manifest.
+	DefaultRerankProfile = "qwen3-reranker-0.6b-v1"
+
+	maximumRerankEndpointBytes = 16 << 10
+	maximumRerankAPIKeyBytes   = 16 << 10
+	maximumRerankProfileBytes  = 128
+)
+
 var ErrInvalidCompilerConfig = errors.New("config: invalid managed compiler configuration")
+
+// ErrInvalidRerankConfig marks unusable process-owned reranker settings.
+var ErrInvalidRerankConfig = errors.New("config: invalid reranker configuration")
 
 // ErrInvalidEAVConfig marks unusable entity-attribution settings.
 var ErrInvalidEAVConfig = errors.New("config: invalid entity attribution configuration")
@@ -45,6 +60,7 @@ type Config struct {
 	EAV          EAVConfig
 	Heal         HealConfig
 	Search       SearchConfig
+	Rerank       RerankConfig
 }
 
 // CompilerConfig controls process-owned background extractor synthesis. The
@@ -84,6 +100,18 @@ type HealConfig struct {
 // credential leaves Search unavailable without constructing provider state.
 type SearchConfig struct {
 	BraveKey string
+}
+
+// RerankConfig controls the process-owned metadata reranker. It only describes
+// operator-observable settings; an enabled runtime must separately prove that
+// Profile belongs to the committed certified-profile registry.
+type RerankConfig struct {
+	Enabled        bool
+	Endpoint       string
+	APIKey         string
+	Profile        string
+	AllowPrivate   bool
+	TimeoutSeconds int
 }
 
 // StorageConfig controls durable snapshots, the ledger, and receipt signing.
@@ -267,6 +295,14 @@ func Load() *Config {
 		Search: SearchConfig{
 			BraveKey: os.Getenv("PURIFY_SEARCH_BRAVE_KEY"),
 		},
+		Rerank: RerankConfig{
+			Enabled:        envBoolOr("PURIFY_RERANK_ENABLED", false),
+			Endpoint:       os.Getenv("PURIFY_RERANK_ENDPOINT"),
+			APIKey:         os.Getenv("PURIFY_RERANK_API_KEY"),
+			Profile:        envOr("PURIFY_RERANK_PROFILE", DefaultRerankProfile),
+			AllowPrivate:   envBoolOr("PURIFY_RERANK_ALLOW_PRIVATE", false),
+			TimeoutSeconds: envStrictDecimalIntOr("PURIFY_RERANK_TIMEOUT_SECONDS", 5),
+		},
 	}
 }
 
@@ -340,6 +376,68 @@ func ValidateEAVConfig(value EAVConfig) error {
 		return fmt.Errorf("%w: cache entries must be between 1 and %d", ErrInvalidEAVConfig, maximumEAVCacheEntries)
 	}
 	return nil
+}
+
+// ValidateRerankConfig validates only the process-observable syntax and
+// resource bounds. It deliberately does not treat an operator profile string
+// as proof of the model, template, image, or recording manifest behind it.
+// Disabled configuration is inert, including stale or malformed provider
+// values left in the environment.
+func ValidateRerankConfig(value RerankConfig) error {
+	if !value.Enabled {
+		return nil
+	}
+	if err := validateRerankEndpoint(value.Endpoint, value.AllowPrivate); err != nil {
+		return fmt.Errorf("%w: endpoint is invalid", ErrInvalidRerankConfig)
+	}
+	if !validRerankString(value.APIKey, maximumRerankAPIKeyBytes) {
+		return fmt.Errorf("%w: API key is invalid", ErrInvalidRerankConfig)
+	}
+	if !validRerankString(value.Profile, maximumRerankProfileBytes) {
+		return fmt.Errorf("%w: profile is invalid", ErrInvalidRerankConfig)
+	}
+	if value.TimeoutSeconds < 1 || value.TimeoutSeconds > 10 {
+		return fmt.Errorf("%w: timeout must be between 1 and 10 seconds", ErrInvalidRerankConfig)
+	}
+	return nil
+}
+
+func validateRerankEndpoint(endpoint string, allowPrivate bool) error {
+	if !validRerankString(endpoint, maximumRerankEndpointBytes) {
+		return ErrInvalidRerankConfig
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil || !parsed.IsAbs() || parsed.Opaque != "" || parsed.Host == "" || parsed.Hostname() == "" ||
+		parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" ||
+		strings.Contains(endpoint, "#") || parsed.Path != "/v1/rerank" || parsed.RawPath != "" ||
+		parsed.EscapedPath() != "/v1/rerank" || strings.HasSuffix(parsed.Host, ":") ||
+		strings.Contains(parsed.Hostname(), "%") {
+		return ErrInvalidRerankConfig
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if parsed.Scheme != scheme || parsed.String() != endpoint ||
+		scheme != "http" && scheme != "https" || scheme == "http" && !allowPrivate {
+		return ErrInvalidRerankConfig
+	}
+	if port := parsed.Port(); port != "" {
+		numericPort, convertErr := strconv.Atoi(port)
+		if convertErr != nil || numericPort < 1 || numericPort > 65_535 {
+			return ErrInvalidRerankConfig
+		}
+	}
+	return nil
+}
+
+func validRerankString(value string, maximumBytes int) bool {
+	if value == "" || len(value) > maximumBytes || !utf8.ValidString(value) || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateProviderCredential(apiKey string) error {
@@ -423,6 +521,27 @@ func envIntOr(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+// envStrictDecimalIntOr accepts only an unadorned ASCII base-10 integer. A
+// malformed configured value maps to zero so an enabled feature's validator
+// fails closed; an unset or explicitly empty value keeps the documented
+// default. Disabled feature validation remains deliberately inert.
+func envStrictDecimalIntOr(key string, fallback int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	for _, character := range raw {
+		if character < '0' || character > '9' {
+			return 0
+		}
+	}
+	value, err := strconv.ParseUint(raw, 10, 31)
+	if err != nil {
+		return 0
+	}
+	return int(value)
 }
 
 func envBoolOr(key string, fallback bool) bool {

@@ -65,6 +65,9 @@ func run() error {
 	if err := validateManagedSearchConfig(cfg.Search); err != nil {
 		return fmt.Errorf("validate managed search configuration: %w", err)
 	}
+	if err := validateManagedRerankConfig(cfg.Rerank); err != nil {
+		return fmt.Errorf("validate managed reranker configuration: %w", err)
+	}
 
 	// ── 2. Initialise structured logging ────────────────────────────
 	initLogger(cfg.Log)
