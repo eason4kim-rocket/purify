@@ -103,8 +103,8 @@ type SearchConfig struct {
 }
 
 // RerankConfig controls the process-owned metadata reranker. It only describes
-// operator-observable settings; an enabled runtime must separately prove that
-// Profile belongs to the committed certified-profile registry.
+// operator-observable settings; a future enabled runtime must separately pass
+// authenticated deployment admission and the matching recorded-profile gate.
 type RerankConfig struct {
 	Enabled        bool
 	Endpoint       string

@@ -882,7 +882,7 @@ All configuration via environment variables:
 | `PURIFY_DATA_DIR` | `./data` | Durable snapshots, signing key, SQLite verification ledger, and webhook outbox |
 | `PURIFY_SNAPSHOT_ENABLED` | `true` | Persist content-addressed HTML snapshots |
 | `PURIFY_SIGNING_KEY` | generated | Optional 32-byte Ed25519 seed encoded as hex |
-| `PURIFY_RERANK_ENABLED` | `false` | Configure the process-owned metadata reranker; certified capability remains gated by an admitted manifest |
+| `PURIFY_RERANK_ENABLED` | `false` | Configure the process-owned metadata reranker; capability remains gated by authenticated deployment admission plus an admitted manifest |
 | `PURIFY_RERANK_ENDPOINT` | — | Exact managed `/v1/rerank` endpoint; public destinations require HTTPS |
 | `PURIFY_RERANK_API_KEY` | — | Process-owned reranker credential; never a request BYOK fallback |
 | `PURIFY_RERANK_PROFILE` | `qwen3-reranker-0.6b-v1` | Requested pinned profile name; not proof of deployment identity |
