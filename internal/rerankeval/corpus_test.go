@@ -12,7 +12,7 @@ import (
 	"github.com/use-agent/purify/search/rerank"
 )
 
-const testManifestID = "bec55c54b64116c16242f8bab05b0dd6cbbf3ab963ea9d13ec20f1ccfcc8d0cf"
+const testManifestID = "2c40e264225c52f43431d0593c772b80f9e97b4e87cf757aaefa941c7e880e35"
 
 type testDocumentCase struct {
 	CaseID     string                  `json:"case_id"`

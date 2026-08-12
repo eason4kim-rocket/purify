@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	ManifestSchemaVersion  = "rerank-recording-manifest-v1"
+	ManifestSchemaVersion  = "rerank-recording-manifest-v2"
 	manifestIdentityDomain = ManifestSchemaVersion + "\x00"
 )
 
@@ -33,36 +33,41 @@ const MaxManifestBytes = 256 << 10
 // are produced. ManifestID is a canonical content identity, never an
 // attestation or certification claim.
 type Manifest struct {
-	SchemaVersion             string   `json:"schema_version"`
-	ManifestID                string   `json:"manifest_id"`
-	ProfileID                 string   `json:"profile_id"`
-	InstructionVersion        string   `json:"instruction_version"`
-	Instruction               string   `json:"instruction"`
-	VLLMVersion               string   `json:"vllm_version"`
-	ImageDigest               string   `json:"image_digest"`
-	ImageIndexDigest          string   `json:"image_index_digest"`
-	Platform                  string   `json:"platform"`
-	ModelRevision             string   `json:"model_revision"`
-	TokenizerRevision         string   `json:"tokenizer_revision"`
-	SnapshotManifestSHA256    string   `json:"snapshot_manifest_sha256"`
-	ServedModelID             string   `json:"served_model_id"`
-	Runner                    string   `json:"runner"`
-	MaxModelLen               int      `json:"max_model_len"`
-	HFOverrides               string   `json:"hf_overrides"`
-	ScoreMinimum              float64  `json:"score_minimum"`
-	ScoreMaximum              float64  `json:"score_maximum"`
-	PrefixCaching             bool     `json:"prefix_caching"`
-	Route                     string   `json:"route"`
-	TemplatePath              string   `json:"template_path"`
-	TemplateSHA256            string   `json:"template_sha256"`
-	EnvironmentPolicyVersion  string   `json:"environment_policy_version"`
-	EnvironmentDigest         string   `json:"environment_digest"`
-	APIAuth                   string   `json:"api_auth"`
-	APIKeyRequired            bool     `json:"api_key_required"`
-	RequiresPrivateIngress    bool     `json:"requires_private_ingress"`
-	RequiresNoHostPublish     bool     `json:"requires_no_host_publish"`
-	RequiresDefaultDenyEgress bool     `json:"requires_default_deny_egress"`
-	Argv                      []string `json:"argv"`
+	SchemaVersion                  string   `json:"schema_version"`
+	ManifestID                     string   `json:"manifest_id"`
+	ProfileID                      string   `json:"profile_id"`
+	InstructionVersion             string   `json:"instruction_version"`
+	Instruction                    string   `json:"instruction"`
+	VLLMVersion                    string   `json:"vllm_version"`
+	ImageDigest                    string   `json:"image_digest"`
+	ImageIndexDigest               string   `json:"image_index_digest"`
+	ImageConfigID                  string   `json:"image_config_id"`
+	ImageEntrypoint                []string `json:"image_entrypoint"`
+	Platform                       string   `json:"platform"`
+	ModelRevision                  string   `json:"model_revision"`
+	TokenizerRevision              string   `json:"tokenizer_revision"`
+	SnapshotPath                   string   `json:"snapshot_path"`
+	SnapshotManifestSHA256         string   `json:"snapshot_manifest_sha256"`
+	ServedModelID                  string   `json:"served_model_id"`
+	Runner                         string   `json:"runner"`
+	MaxModelLen                    int      `json:"max_model_len"`
+	HFOverrides                    string   `json:"hf_overrides"`
+	ScoreMinimum                   float64  `json:"score_minimum"`
+	ScoreMaximum                   float64  `json:"score_maximum"`
+	PrefixCaching                  bool     `json:"prefix_caching"`
+	Route                          string   `json:"route"`
+	UDSPath                        string   `json:"uds_path"`
+	TemplatePath                   string   `json:"template_path"`
+	TemplateSHA256                 string   `json:"template_sha256"`
+	EnvironmentPolicyVersion       string   `json:"environment_policy_version"`
+	ImageBaselineEnvironmentDigest string   `json:"image_baseline_environment_digest"`
+	EnvironmentDigest              string   `json:"environment_digest"`
+	APIAuth                        string   `json:"api_auth"`
+	APIKeyRequired                 bool     `json:"api_key_required"`
+	RequiresPrivateIngress         bool     `json:"requires_private_ingress"`
+	RequiresNoHostPublish          bool     `json:"requires_no_host_publish"`
+	RequiresDefaultDenyEgress      bool     `json:"requires_default_deny_egress"`
+	Argv                           []string `json:"argv"`
 }
 
 // ReferenceManifest derives the recording tuple from the single R-3 deploy
@@ -75,35 +80,40 @@ func ReferenceManifest() (Manifest, error) {
 		return Manifest{}, ErrInvalidManifest
 	}
 	manifest := Manifest{
-		SchemaVersion:             ManifestSchemaVersion,
-		ProfileID:                 descriptor.ProfileID,
-		InstructionVersion:        descriptor.InstructionVersion,
-		Instruction:               descriptor.Instruction,
-		VLLMVersion:               descriptor.VLLMVersion,
-		ImageDigest:               descriptor.ImageDigest,
-		ImageIndexDigest:          descriptor.ImageIndexDigest,
-		Platform:                  descriptor.Platform,
-		ModelRevision:             descriptor.ModelRevision,
-		TokenizerRevision:         descriptor.TokenizerRevision,
-		SnapshotManifestSHA256:    descriptor.SnapshotManifestSHA256,
-		ServedModelID:             descriptor.ServedModel,
-		Runner:                    descriptor.Runner,
-		MaxModelLen:               descriptor.MaxModelLen,
-		HFOverrides:               descriptor.HFOverrides,
-		ScoreMinimum:              descriptor.ScoreMinimum,
-		ScoreMaximum:              descriptor.ScoreMaximum,
-		PrefixCaching:             descriptor.PrefixCaching,
-		Route:                     descriptor.Route,
-		TemplatePath:              descriptor.TemplatePath,
-		TemplateSHA256:            descriptor.TemplateSHA256,
-		EnvironmentPolicyVersion:  descriptor.EnvironmentPolicyVersion,
-		EnvironmentDigest:         descriptor.EnvironmentDigest,
-		APIAuth:                   descriptor.APIAuth,
-		APIKeyRequired:            descriptor.APIKeyRequired,
-		RequiresPrivateIngress:    descriptor.RequiresPrivateIngress,
-		RequiresNoHostPublish:     descriptor.RequiresNoHostPublish,
-		RequiresDefaultDenyEgress: descriptor.RequiresDefaultDenyEgress,
-		Argv:                      append([]string(nil), descriptor.Argv...),
+		SchemaVersion:                  ManifestSchemaVersion,
+		ProfileID:                      descriptor.ProfileID,
+		InstructionVersion:             descriptor.InstructionVersion,
+		Instruction:                    descriptor.Instruction,
+		VLLMVersion:                    descriptor.VLLMVersion,
+		ImageDigest:                    descriptor.ImageDigest,
+		ImageIndexDigest:               descriptor.ImageIndexDigest,
+		ImageConfigID:                  descriptor.ImageConfigID,
+		ImageEntrypoint:                append([]string(nil), descriptor.ImageEntrypoint...),
+		Platform:                       descriptor.Platform,
+		ModelRevision:                  descriptor.ModelRevision,
+		TokenizerRevision:              descriptor.TokenizerRevision,
+		SnapshotPath:                   descriptor.SnapshotPath,
+		SnapshotManifestSHA256:         descriptor.SnapshotManifestSHA256,
+		ServedModelID:                  descriptor.ServedModel,
+		Runner:                         descriptor.Runner,
+		MaxModelLen:                    descriptor.MaxModelLen,
+		HFOverrides:                    descriptor.HFOverrides,
+		ScoreMinimum:                   descriptor.ScoreMinimum,
+		ScoreMaximum:                   descriptor.ScoreMaximum,
+		PrefixCaching:                  descriptor.PrefixCaching,
+		Route:                          descriptor.Route,
+		UDSPath:                        descriptor.UDSPath,
+		TemplatePath:                   descriptor.TemplatePath,
+		TemplateSHA256:                 descriptor.TemplateSHA256,
+		EnvironmentPolicyVersion:       descriptor.EnvironmentPolicyVersion,
+		ImageBaselineEnvironmentDigest: descriptor.ImageBaselineEnvironmentDigest,
+		EnvironmentDigest:              descriptor.EnvironmentDigest,
+		APIAuth:                        descriptor.APIAuth,
+		APIKeyRequired:                 descriptor.APIKeyRequired,
+		RequiresPrivateIngress:         descriptor.RequiresPrivateIngress,
+		RequiresNoHostPublish:          descriptor.RequiresNoHostPublish,
+		RequiresDefaultDenyEgress:      descriptor.RequiresDefaultDenyEgress,
+		Argv:                           append([]string(nil), descriptor.Argv...),
 	}
 	manifest.ManifestID = ManifestID(manifest)
 	return manifest, nil
@@ -150,10 +160,10 @@ func DecodeManifest(raw []byte) (Manifest, error) {
 	}
 	fields := []string{
 		"schema_version", "manifest_id", "profile_id", "instruction_version", "instruction", "vllm_version",
-		"image_digest", "image_index_digest", "platform", "model_revision", "tokenizer_revision",
-		"snapshot_manifest_sha256", "served_model_id", "runner", "max_model_len", "hf_overrides",
-		"score_minimum", "score_maximum", "prefix_caching", "route", "template_path", "template_sha256",
-		"environment_policy_version", "environment_digest", "api_auth", "api_key_required",
+		"image_digest", "image_index_digest", "image_config_id", "image_entrypoint", "platform", "model_revision", "tokenizer_revision",
+		"snapshot_path", "snapshot_manifest_sha256", "served_model_id", "runner", "max_model_len", "hf_overrides",
+		"score_minimum", "score_maximum", "prefix_caching", "route", "uds_path", "template_path", "template_sha256",
+		"environment_policy_version", "image_baseline_environment_digest", "environment_digest", "api_auth", "api_key_required",
 		"requires_private_ingress", "requires_no_host_publish", "requires_default_deny_egress", "argv",
 	}
 	var root map[string]json.RawMessage
@@ -194,6 +204,7 @@ func assetDigestMatches(raw []byte, want string) bool {
 
 func cloneManifest(source Manifest) Manifest {
 	cloned := source
+	cloned.ImageEntrypoint = append([]string(nil), source.ImageEntrypoint...)
 	cloned.Argv = append([]string(nil), source.Argv...)
 	return cloned
 }
