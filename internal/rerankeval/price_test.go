@@ -13,6 +13,15 @@ import (
 
 const testBravePriceHTML = `<!doctype html><html><body><div class="card plan"><h2>Search</h2><p>Complete search results.</p><div class="price-item"><span>$</span><span>5.00</span><span> per <b>1,000</b> requests</span></div></div><div class="card plan"><h2>Answers</h2><div class="price-item"><span>$4.00 per 1,000 queries</span></div></div></body></html>`
 
+func TestExtractBraveSearchPriceRejectsLiveSvelteMarkup(t *testing.T) {
+	// Shape taken from the 2026-08-12 official pricing page: extra $ credits
+	// copy and placeholder price-item nodes make the Search card ambiguous.
+	const liveShaped = `<!doctype html><html><body><div class="card plan svelte-wmwow3"><h2>Search</h2><div class="price-item svelte-wmwow3"><span>$</span><span>5.00</span><span> per 1,000 requests</span></div><div class="price-item svelte-wmwow3">` + "\u00a0" + `</div><div>Includes free $5 in credits every month.</div></div></body></html>`
+	if money, err := extractBraveSearchPrice([]byte(liveShaped)); err == nil {
+		t.Fatalf("extractBraveSearchPrice() = %#v, want rejection", money)
+	}
+}
+
 func TestLoadPriceEvidenceBindsOfficialBytesAndDerivesUnitCost(t *testing.T) {
 	directory, manifest := writeTestPriceEvidence(t, testBravePriceHTML)
 	evidence, err := LoadPriceEvidence(directory)
