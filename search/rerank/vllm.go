@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,11 +26,28 @@ const (
 	maxRerankEndpointBytes = 16 << 10
 )
 
+const referenceCandidateDigestDomain = "rerank-recording-input-v1\x00"
+
 type vllmRequest struct {
 	Model     string   `json:"model"`
 	Query     string   `json:"query"`
 	Documents []string `json:"documents"`
 	TopN      int      `json:"top_n"`
+}
+
+// ReferenceUsage is the exact usage shape returned by the pinned vLLM
+// profile. Both counts are validated and equal before exposure.
+type ReferenceUsage struct {
+	PromptTokens int64
+	TotalTokens  int64
+}
+
+// ReferenceObservation is the pure, credential-free projection used by the
+// offline recorder. It does not construct a client or admit a deployment.
+type ReferenceObservation struct {
+	ResponseID string
+	Usage      ReferenceUsage
+	Scores     []ScoreResult
 }
 
 // VLLMScorer is the low-level strict adapter for the pinned reference
@@ -70,32 +88,40 @@ func newVLLMScorer(client rerankHTTPDoer, endpoint, apiKey string, profile profi
 // response before exposing any score. Dependency details are deliberately
 // collapsed into stable domain errors.
 func (scorer *VLLMScorer) Score(ctx context.Context, request ScoreRequest) ([]ScoreResult, error) {
-	if scorer == nil || scorer.client == nil {
-		return nil, ErrNotConfigured
-	}
-	if ctx == nil {
-		return nil, ErrInvalidInput
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := validateAdapterRequest(request); err != nil {
-		return nil, ErrInvalidInput
-	}
-	if len(request.Candidates) == 0 {
-		return make([]ScoreResult, 0), nil
-	}
-	encoded, _, err := canonicalVLLMRequest(request)
+	observation, err := scorer.scoreObservation(ctx, request)
 	if err != nil {
 		return nil, err
 	}
+	return observation.Scores, nil
+}
+
+func (scorer *VLLMScorer) scoreObservation(ctx context.Context, request ScoreRequest) (ReferenceObservation, error) {
+	if scorer == nil || scorer.client == nil {
+		return ReferenceObservation{}, ErrNotConfigured
+	}
+	if ctx == nil {
+		return ReferenceObservation{}, ErrInvalidInput
+	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return ReferenceObservation{}, err
+	}
+	if err := validateAdapterRequest(request); err != nil {
+		return ReferenceObservation{}, ErrInvalidInput
+	}
+	if len(request.Candidates) == 0 {
+		return ReferenceObservation{Scores: make([]ScoreResult, 0)}, nil
+	}
+	encoded, _, err := canonicalVLLMRequest(request)
+	if err != nil {
+		return ReferenceObservation{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return ReferenceObservation{}, err
 	}
 
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, scorer.endpoint, bytes.NewReader(encoded))
 	if err != nil {
-		return nil, ErrScoringFailed
+		return ReferenceObservation{}, ErrScoringFailed
 	}
 	httpRequest.Header.Set("Accept", "application/json")
 	httpRequest.Header.Set("Content-Type", "application/json")
@@ -106,33 +132,33 @@ func (scorer *VLLMScorer) Score(ctx context.Context, request ScoreRequest) ([]Sc
 		if response != nil && response.Body != nil {
 			_ = response.Body.Close()
 		}
-		return nil, ctxErr
+		return ReferenceObservation{}, ctxErr
 	}
 	if err != nil {
 		if response != nil && response.Body != nil {
 			_ = response.Body.Close()
 		}
-		return nil, ErrScoringFailed
+		return ReferenceObservation{}, ErrScoringFailed
 	}
 	if response == nil || response.Body == nil {
-		return nil, ErrScoringFailed
+		return ReferenceObservation{}, ErrScoringFailed
 	}
 	defer response.Body.Close()
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, MaxVLLMResponseBytes+1))
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, ctxErr
+		return ReferenceObservation{}, ctxErr
 	}
 	if readErr != nil || len(body) > MaxVLLMResponseBytes || response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, ErrScoringFailed
+		return ReferenceObservation{}, ErrScoringFailed
 	}
-	results, err := decodeVLLMResponse(body, request, scorer.profile)
+	observation, err := decodeReferenceObservation(body, request, scorer.profile)
 	if err != nil {
-		return nil, ErrScoringFailed
+		return ReferenceObservation{}, ErrScoringFailed
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return ReferenceObservation{}, err
 	}
-	return results, nil
+	return observation, nil
 }
 
 func (scorer *VLLMScorer) CloseIdleConnections() {
@@ -150,6 +176,62 @@ func canonicalVLLMRequest(request ScoreRequest) ([]byte, string, error) {
 		return nil, "", ErrInvalidInput
 	}
 	return encoded, digest, nil
+}
+
+// ReferenceInputDigest returns the SHA-256 identity of the exact canonical
+// request bytes sent to the pinned reference adapter. It exposes no endpoint,
+// credential, transport, or production construction path; recording/replay
+// tooling uses it to prove that a score row was built by the production input
+// builder rather than an independently serialized fixture.
+func ReferenceInputDigest(request ScoreRequest) (string, error) {
+	_, digest, err := canonicalVLLMRequest(request)
+	return digest, err
+}
+
+// ReferenceCandidateDigest binds the exact canonical wire request to the
+// ordered stable-ID/provider-rank mapping that vLLM itself does not carry.
+// Recordings persist both digests so changing URL identity while preserving
+// identical model text cannot silently reuse an old score-to-candidate join.
+func ReferenceCandidateDigest(request ScoreRequest) (string, error) {
+	encoded, _, err := canonicalVLLMRequest(request)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.New()
+	_, _ = digest.Write([]byte(referenceCandidateDigestDomain))
+	var length [binary.MaxVarintLen64]byte
+	written := binary.PutUvarint(length[:], uint64(len(encoded)))
+	_, _ = digest.Write(length[:written])
+	_, _ = digest.Write(encoded)
+	for _, candidate := range request.Candidates {
+		written = binary.PutUvarint(length[:], uint64(len(candidate.StableID)))
+		_, _ = digest.Write(length[:written])
+		_, _ = digest.Write([]byte(candidate.StableID))
+		written = binary.PutUvarint(length[:], uint64(candidate.ProviderRank))
+		_, _ = digest.Write(length[:written])
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+// EncodeReferenceRequest returns detached exact bytes and their digest from
+// the same canonical builder used by VLLMScorer. It is intentionally pure and
+// contains neither endpoint nor credential handling.
+func EncodeReferenceRequest(request ScoreRequest) ([]byte, string, error) {
+	encoded, digest, err := canonicalVLLMRequest(request)
+	return append([]byte(nil), encoded...), digest, err
+}
+
+// DecodeReferenceResponse applies the production strict decoder and exposes
+// the recording-only response ID/usage projection. It does not trust response
+// ordering and cannot create a network or production scorer.
+func DecodeReferenceResponse(raw []byte, request ScoreRequest) (ReferenceObservation, error) {
+	if len(request.Candidates) == 0 {
+		return ReferenceObservation{}, ErrInvalidInput
+	}
+	if _, _, err := canonicalVLLMRequest(request); err != nil {
+		return ReferenceObservation{}, err
+	}
+	return decodeReferenceObservation(raw, request, referenceProfile)
 }
 
 func canonicalVLLMRequestUnbounded(request ScoreRequest) ([]byte, string, error) {
@@ -248,57 +330,65 @@ func parseVLLMEndpoint(raw string) (*url.URL, error) {
 }
 
 func decodeVLLMResponse(raw []byte, request ScoreRequest, profile profileDescriptor) ([]ScoreResult, error) {
-	if len(raw) == 0 || !utf8.Valid(raw) || rejectDuplicateJSONFields(raw) != nil {
-		return nil, ErrScoringFailed
+	observation, err := decodeReferenceObservation(raw, request, profile)
+	if err != nil {
+		return nil, err
+	}
+	return observation.Scores, nil
+}
+
+func decodeReferenceObservation(raw []byte, request ScoreRequest, profile profileDescriptor) (ReferenceObservation, error) {
+	if len(raw) == 0 || len(raw) > MaxVLLMResponseBytes || !utf8.Valid(raw) || rejectDuplicateJSONFields(raw) != nil {
+		return ReferenceObservation{}, ErrScoringFailed
 	}
 	root, err := exactJSONObject(raw, "id", "model", "usage", "results")
 	if err != nil {
-		return nil, ErrScoringFailed
+		return ReferenceObservation{}, ErrScoringFailed
 	}
 	var responseID, model string
 	if isJSONNull(root["id"]) || isJSONNull(root["model"]) || isJSONNull(root["usage"]) || isJSONNull(root["results"]) ||
 		json.Unmarshal(root["id"], &responseID) != nil || len(responseID) > MaxVLLMResponseIDBytes || !utf8.ValidString(responseID) || containsControl(responseID) ||
 		json.Unmarshal(root["model"], &model) != nil || model != profile.servedModel {
-		return nil, ErrScoringFailed
+		return ReferenceObservation{}, ErrScoringFailed
 	}
 	usage, err := exactJSONObject(root["usage"], "prompt_tokens", "total_tokens")
 	if err != nil {
-		return nil, ErrScoringFailed
+		return ReferenceObservation{}, ErrScoringFailed
 	}
 	var promptTokens, totalTokens int64
 	if isJSONNull(usage["prompt_tokens"]) || isJSONNull(usage["total_tokens"]) ||
 		json.Unmarshal(usage["prompt_tokens"], &promptTokens) != nil || json.Unmarshal(usage["total_tokens"], &totalTokens) != nil ||
 		promptTokens < 0 || promptTokens > maxVLLMTokenCount || totalTokens < 0 || totalTokens > maxVLLMTokenCount || promptTokens != totalTokens {
-		return nil, ErrScoringFailed
+		return ReferenceObservation{}, ErrScoringFailed
 	}
 	if isJSONNull(root["results"]) {
-		return nil, ErrScoringFailed
+		return ReferenceObservation{}, ErrScoringFailed
 	}
 	var rawResults []json.RawMessage
 	if json.Unmarshal(root["results"], &rawResults) != nil || len(rawResults) != len(request.Candidates) {
-		return nil, ErrScoringFailed
+		return ReferenceObservation{}, ErrScoringFailed
 	}
 	results := make([]ScoreResult, len(request.Candidates))
 	seen := make([]bool, len(request.Candidates))
 	for _, rawResult := range rawResults {
 		result, err := exactJSONObject(rawResult, "index", "document", "relevance_score")
 		if err != nil {
-			return nil, ErrScoringFailed
+			return ReferenceObservation{}, ErrScoringFailed
 		}
 		var index int
 		var score float64
 		if isJSONNull(result["index"]) || isJSONNull(result["document"]) || isJSONNull(result["relevance_score"]) ||
 			json.Unmarshal(result["index"], &index) != nil || index < 0 || index >= len(request.Candidates) || seen[index] ||
 			json.Unmarshal(result["relevance_score"], &score) != nil || math.IsNaN(score) || math.IsInf(score, 0) || score < 0 || score > 1 {
-			return nil, ErrScoringFailed
+			return ReferenceObservation{}, ErrScoringFailed
 		}
 		document, err := exactJSONObject(result["document"], "text", "multi_modal")
 		if err != nil || !isJSONNull(document["multi_modal"]) {
-			return nil, ErrScoringFailed
+			return ReferenceObservation{}, ErrScoringFailed
 		}
 		var text string
 		if json.Unmarshal(document["text"], &text) != nil || text != request.Candidates[index].Text {
-			return nil, ErrScoringFailed
+			return ReferenceObservation{}, ErrScoringFailed
 		}
 		if score == 0 {
 			score = 0
@@ -308,10 +398,14 @@ func decodeVLLMResponse(raw []byte, request ScoreRequest, profile profileDescrip
 	}
 	for _, present := range seen {
 		if !present {
-			return nil, ErrScoringFailed
+			return ReferenceObservation{}, ErrScoringFailed
 		}
 	}
-	return results, nil
+	return ReferenceObservation{
+		ResponseID: strings.Clone(responseID),
+		Usage:      ReferenceUsage{PromptTokens: promptTokens, TotalTokens: totalTokens},
+		Scores:     results,
+	}, nil
 }
 
 func exactJSONObject(raw []byte, fields ...string) (map[string]json.RawMessage, error) {

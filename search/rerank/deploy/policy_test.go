@@ -2,6 +2,8 @@ package deploy
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"reflect"
 	"strings"
@@ -120,12 +122,21 @@ func TestReferenceDescriptorAndRegistryRemainUncertified(t *testing.T) {
 		"--chat-template", "/run/purify/qwen3_reranker.jinja",
 	}
 	if descriptor.ProfileID != parent.ReferenceProfileID || descriptor.ServedModel != parent.ReferenceServedModel ||
-		descriptor.Instruction != parent.ReferenceInstruction || descriptor.Platform != "linux/amd64" ||
+		descriptor.Instruction != parent.ReferenceInstruction || descriptor.InstructionVersion != parent.ReferenceInstructionVersion ||
+		descriptor.Platform != "linux/amd64" ||
 		descriptor.VLLMVersion != "v0.23.0" ||
 		descriptor.ImageDigest != "sha256:3a1e7f5904e1a1192a02aa0086ceaffc33985d7044c7bb25b3a43d61bdbe3ac0" ||
 		descriptor.ImageIndexDigest != "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f" ||
 		descriptor.ModelRevision != "e61197ed45024b0ed8a2d74b80b4d909f1255473" ||
+		descriptor.TokenizerRevision != "e61197ed45024b0ed8a2d74b80b4d909f1255473" ||
 		descriptor.TemplateSHA256 != "e1ee98e69aab7b2da366edf1c50efcef37e34b4a0c50fb816336213e68d9047a" ||
+		descriptor.TemplatePath != "/run/purify/qwen3_reranker.jinja" ||
+		descriptor.SnapshotManifestSHA256 != ReferenceSnapshotManifestSHA256 || descriptor.Runner != "pooling" ||
+		descriptor.MaxModelLen != 8192 ||
+		descriptor.HFOverrides != `{"architectures":["Qwen3ForSequenceClassification"],"classifier_from_token":["no","yes"],"is_original_qwen3_reranker":true}` ||
+		descriptor.ScoreMinimum != 0 || descriptor.ScoreMaximum != 1 || descriptor.PrefixCaching ||
+		descriptor.Route != "/v1/rerank" || descriptor.EnvironmentPolicyVersion != ReferenceEnvironmentPolicyVersion ||
+		descriptor.EnvironmentDigest != ReferenceEnvironmentDigest || descriptor.APIAuth != "VLLM_API_KEY" || !descriptor.APIKeyRequired ||
 		!reflect.DeepEqual(descriptor.Argv, wantArgv) ||
 		!descriptor.RequiresPrivateIngress || !descriptor.RequiresNoHostPublish || !descriptor.RequiresDefaultDenyEgress {
 		t.Fatalf("reference descriptor = %#v", descriptor)
@@ -138,5 +149,37 @@ func TestReferenceDescriptorAndRegistryRemainUncertified(t *testing.T) {
 	}
 	if err := RequireCertifiedDeployment(descriptor.ProfileID); !errors.Is(err, ErrProfileUnavailable) {
 		t.Fatalf("RequireCertifiedDeployment() = %v, want ErrProfileUnavailable", err)
+	}
+}
+
+func TestReferenceAssetsMatchDescriptorPins(t *testing.T) {
+	descriptor := ReferenceDescriptor()
+	for _, test := range []struct {
+		name string
+		raw  []byte
+		want string
+	}{
+		{name: "template", raw: ReferenceTemplate(), want: descriptor.TemplateSHA256},
+		{name: "snapshot manifest", raw: ReferenceSnapshotManifest(), want: descriptor.SnapshotManifestSHA256},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			digest := sha256.Sum256(test.raw)
+			if got := hex.EncodeToString(digest[:]); got != test.want {
+				t.Fatalf("asset digest = %s, want %s", got, test.want)
+			}
+			if len(test.raw) == 0 {
+				t.Fatal("reference asset is empty")
+			}
+		})
+	}
+	template := ReferenceTemplate()
+	template[0] ^= 0xff
+	if bytes.Equal(template, ReferenceTemplate()) {
+		t.Fatal("ReferenceTemplate shares mutable backing storage")
+	}
+	snapshot := ReferenceSnapshotManifest()
+	snapshot[0] ^= 0xff
+	if bytes.Equal(snapshot, ReferenceSnapshotManifest()) {
+		t.Fatal("ReferenceSnapshotManifest shares mutable backing storage")
 	}
 }

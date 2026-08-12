@@ -10,8 +10,9 @@ const (
 	// define an authenticated deployment handoff and R-6 must admit its manifest.
 	ReferenceProfileID = "qwen3-reranker-0.6b-v1"
 
-	ReferenceServedModel = "Qwen/Qwen3-Reranker-0.6B"
-	ReferenceInstruction = "Given a web search query, retrieve relevant passages that answer the query"
+	ReferenceServedModel        = "Qwen/Qwen3-Reranker-0.6B"
+	ReferenceInstruction        = "Given a web search query, retrieve relevant passages that answer the query"
+	ReferenceInstructionVersion = "qwen3-reranker-instruction-v1"
 )
 
 var ErrProfileUnavailable = errors.New("rerank: certified profile is unavailable")

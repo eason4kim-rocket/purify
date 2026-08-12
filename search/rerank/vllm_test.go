@@ -106,6 +106,58 @@ func TestReferenceVLLMScorerUsesExactWireAndIndexJoin(t *testing.T) {
 	}
 }
 
+func TestReferenceRecordingProjectionReusesProductionCodec(t *testing.T) {
+	request := validAdapterRequest(t)
+	encoded, digest, err := EncodeReferenceRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"model":"Qwen/Qwen3-Reranker-0.6B","query":"query","documents":["alpha\nfirst","beta\nsecond"],"top_n":2}`
+	if string(encoded) != want || digest != "14e834df3abec747e19e9939d9eaad3c2b094b2d5fd3bb587d6ddc4f796e65b1" {
+		t.Fatalf("EncodeReferenceRequest() = %s / %s", encoded, digest)
+	}
+	body := validVLLMResponse(request, []int{1, 0}, []float64{0.25, 1})
+	observation, err := DecodeReferenceResponse(body, request)
+	if err != nil {
+		t.Fatalf("DecodeReferenceResponse() error = %v", err)
+	}
+	if observation.ResponseID != "request-id" || observation.Usage != (ReferenceUsage{PromptTokens: 7, TotalTokens: 7}) ||
+		len(observation.Scores) != 2 || observation.Scores[0] != (ScoreResult{StableID: request.Candidates[0].StableID, RelevanceScore: 0.25}) ||
+		observation.Scores[1] != (ScoreResult{StableID: request.Candidates[1].StableID, RelevanceScore: 1}) {
+		t.Fatalf("observation = %#v", observation)
+	}
+	observation.Scores[0].StableID = "mutated"
+	again, err := DecodeReferenceResponse(body, request)
+	if err != nil || again.Scores[0].StableID != request.Candidates[0].StableID {
+		t.Fatalf("recording projection shares mutable state: %#v, %v", again, err)
+	}
+}
+
+func TestDecodeReferenceResponseRejectsRequestsOutsideProductionInputContract(t *testing.T) {
+	valid := validAdapterRequest(t)
+	body := validVLLMResponse(valid, []int{0, 1}, []float64{0.25, 1})
+	tests := []struct {
+		name    string
+		request ScoreRequest
+	}{
+		{name: "empty candidates", request: ScoreRequest{Query: valid.Query}},
+		{name: "empty query", request: ScoreRequest{Candidates: append([]ScoringCandidate(nil), valid.Candidates...)}},
+		{name: "invalid stable id", request: func() ScoreRequest {
+			request := cloneScoreRequest(valid)
+			request.Candidates[0].StableID = "not-a-stable-id"
+			return request
+		}()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			observation, err := DecodeReferenceResponse(body, test.request)
+			if !errors.Is(err, ErrInvalidInput) || observation.ResponseID != "" || observation.Usage != (ReferenceUsage{}) || observation.Scores != nil {
+				t.Fatalf("DecodeReferenceResponse() = %#v, %v; want empty ErrInvalidInput", observation, err)
+			}
+		})
+	}
+}
+
 func TestReferenceVLLMScorerRejectsMalformedResponses(t *testing.T) {
 	request := validAdapterRequest(t)
 	valid := string(validVLLMResponse(request, []int{0, 1}, []float64{0, 1}))
@@ -296,6 +348,34 @@ func TestCanonicalVLLMRequestDigestAndBudgets(t *testing.T) {
 	}
 	if digest != "8927507a25a5ce509ec0390fb58c152b7eb177b853c022e3f1e50930742f3b93" {
 		t.Fatalf("digest = %q, want locked vector", digest)
+	}
+	if publicDigest, err := ReferenceInputDigest(request); err != nil || publicDigest != digest {
+		t.Fatalf("ReferenceInputDigest() = %q, %v; want %q", publicDigest, err, digest)
+	}
+	candidateDigest, err := ReferenceCandidateDigest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidateDigest != "3c8088731a06afcf6d3b708d99ddb9edf1ed0703c8ad6efc7b6548b50691dfd8" {
+		t.Fatalf("ReferenceCandidateDigest() = %q, want locked vector", candidateDigest)
+	}
+	identityChanged := request
+	identityChanged.Candidates = append([]ScoringCandidate(nil), request.Candidates...)
+	identityChanged.Candidates[0].StableID = strings.Repeat("b", 64)
+	if changedWireDigest, err := ReferenceInputDigest(identityChanged); err != nil || changedWireDigest != digest {
+		t.Fatalf("identity mutation changed wire digest = %q, %v", changedWireDigest, err)
+	}
+	if changedCandidateDigest, err := ReferenceCandidateDigest(identityChanged); err != nil || changedCandidateDigest == candidateDigest {
+		t.Fatalf("identity mutation candidate digest = %q, %v", changedCandidateDigest, err)
+	}
+	rankChanged := request
+	rankChanged.Candidates = append([]ScoringCandidate(nil), request.Candidates...)
+	rankChanged.Candidates[0].ProviderRank = 2
+	if changedWireDigest, err := ReferenceInputDigest(rankChanged); err != nil || changedWireDigest != digest {
+		t.Fatalf("provider-rank mutation changed wire digest = %q, %v", changedWireDigest, err)
+	}
+	if changedCandidateDigest, err := ReferenceCandidateDigest(rankChanged); err != nil || changedCandidateDigest == candidateDigest {
+		t.Fatalf("provider-rank mutation candidate digest = %q, %v", changedCandidateDigest, err)
 	}
 
 	exact := exactSizedVLLMRequest(t, MaxVLLMRequestBytes)

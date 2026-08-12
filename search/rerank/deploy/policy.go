@@ -7,6 +7,7 @@ package deploy
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	_ "embed"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -17,6 +18,22 @@ import (
 )
 
 const maximumSecretBytes = 16 << 10
+
+const (
+	ReferenceEnvironmentPolicyVersion = "rerank-env-v1"
+	ReferenceEnvironmentDigest        = "7929a1e8af70048f2386bbd4de49690cda2cdfa0a398c242808a1a761fa7f931"
+	ReferenceSnapshotManifestSHA256   = "f4769df1fce7a8bff3d1e5f1f913e8e5e1ddedf9906db423b27be7be6a906c65"
+)
+
+// referenceTemplate is copied verbatim from vLLM v0.23.0
+// examples/pooling/score/template/qwen3_reranker.jinja (Apache-2.0); its
+// upstream digest is part of the recording tuple.
+//
+//go:embed assets/qwen3_reranker.jinja
+var referenceTemplate []byte
+
+//go:embed assets/qwen3-reranker-0.6b.snapshot.json
+var referenceSnapshotManifest []byte
 
 var (
 	ErrAdmissionRejected  = errors.New("rerank deploy: admission rejected")
@@ -50,9 +67,24 @@ type Descriptor struct {
 	ImageDigest               string
 	ImageIndexDigest          string
 	ModelRevision             string
+	TokenizerRevision         string
 	ServedModel               string
 	Instruction               string
+	InstructionVersion        string
 	TemplateSHA256            string
+	TemplatePath              string
+	SnapshotManifestSHA256    string
+	Runner                    string
+	MaxModelLen               int
+	HFOverrides               string
+	ScoreMinimum              float64
+	ScoreMaximum              float64
+	PrefixCaching             bool
+	Route                     string
+	EnvironmentPolicyVersion  string
+	EnvironmentDigest         string
+	APIAuth                   string
+	APIKeyRequired            bool
 	Argv                      []string
 	RequiresPrivateIngress    bool
 	RequiresNoHostPublish     bool
@@ -81,14 +113,40 @@ func ReferenceDescriptor() Descriptor {
 		ImageDigest:               "sha256:3a1e7f5904e1a1192a02aa0086ceaffc33985d7044c7bb25b3a43d61bdbe3ac0",
 		ImageIndexDigest:          "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
 		ModelRevision:             "e61197ed45024b0ed8a2d74b80b4d909f1255473",
+		TokenizerRevision:         "e61197ed45024b0ed8a2d74b80b4d909f1255473",
 		ServedModel:               "Qwen/Qwen3-Reranker-0.6B",
 		Instruction:               "Given a web search query, retrieve relevant passages that answer the query",
+		InstructionVersion:        "qwen3-reranker-instruction-v1",
 		TemplateSHA256:            "e1ee98e69aab7b2da366edf1c50efcef37e34b4a0c50fb816336213e68d9047a",
+		TemplatePath:              "/run/purify/qwen3_reranker.jinja",
+		SnapshotManifestSHA256:    ReferenceSnapshotManifestSHA256,
+		Runner:                    "pooling",
+		MaxModelLen:               8192,
+		HFOverrides:               `{"architectures":["Qwen3ForSequenceClassification"],"classifier_from_token":["no","yes"],"is_original_qwen3_reranker":true}`,
+		ScoreMinimum:              0,
+		ScoreMaximum:              1,
+		PrefixCaching:             false,
+		Route:                     "/v1/rerank",
+		EnvironmentPolicyVersion:  ReferenceEnvironmentPolicyVersion,
+		EnvironmentDigest:         ReferenceEnvironmentDigest,
+		APIAuth:                   "VLLM_API_KEY",
+		APIKeyRequired:            true,
 		Argv:                      append([]string(nil), referenceArgv...),
 		RequiresPrivateIngress:    true,
 		RequiresNoHostPublish:     true,
 		RequiresDefaultDenyEgress: true,
 	}
+}
+
+// ReferenceTemplate returns a detached copy of the exact vLLM template whose
+// digest is pinned by ReferenceDescriptor.
+func ReferenceTemplate() []byte { return append([]byte(nil), referenceTemplate...) }
+
+// ReferenceSnapshotManifest returns a detached, canonical inventory of every
+// file in the pinned Hugging Face snapshot. R-6a must verify the mounted tree
+// against this inventory; the inventory itself is not runtime attestation.
+func ReferenceSnapshotManifest() []byte {
+	return append([]byte(nil), referenceSnapshotManifest...)
 }
 
 // RequireCertifiedDeployment is deliberately fail-closed in R-3. R-6a and
@@ -159,7 +217,7 @@ func BuildReferenceEnvironment(values []EnvironmentValue, binding SecretBinding)
 		redacted[index] = name + "=" + value
 	}
 	digest := sha256.New()
-	_, _ = digest.Write([]byte("rerank-env-v1\x00"))
+	_, _ = digest.Write([]byte(ReferenceEnvironmentPolicyVersion + "\x00"))
 	var length [binary.MaxVarintLen64]byte
 	for _, entry := range redacted {
 		encoded := []byte(entry)
