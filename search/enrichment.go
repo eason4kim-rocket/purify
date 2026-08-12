@@ -24,9 +24,9 @@ const (
 	defaultSearchEnrichmentSlots   = 4
 	defaultSearchEncodingSlots     = 4
 	defaultSearchEnrichmentTimeout = 15 * time.Second
-	maximumSearchArtifactBytes     = 4 << 20
+	maximumSearchArtifactBytes     = models.MaxSearchResultContentBytes
 	maximumSearchSnippetClaimBytes = 8 << 10
-	maximumSearchSnippetReceipt    = 1 << 20
+	maximumSearchSnippetReceipt    = models.MaxSearchResultReceiptBytes
 )
 
 var errSearchDependencyPanic = errors.New("search: enrichment dependency panicked")
@@ -474,7 +474,7 @@ func copySearchExtraction(
 	}
 	if result == nil || artifact == nil || artifact.Public == nil || artifact.Source == nil || finalURL == "" ||
 		len(schema) == 0 || response == nil || !response.Success || response.Error != nil || len(response.Data) == 0 ||
-		len(response.Data) > consensus.MaxSourceDataBytes {
+		len(response.Data) > models.MaxSearchResultDataBytes {
 		return false, errors.New("invalid extraction response")
 	}
 	if _, err := consensus.Merge([]consensus.SourceResult{{URL: finalURL, Data: response.Data}}); err != nil {
@@ -899,6 +899,14 @@ func cloneSearchResult(source models.SearchResult) models.SearchResult {
 	if source.PublishedAt != nil {
 		value := *source.PublishedAt
 		cloned.PublishedAt = &value
+	}
+	if source.Ranking != nil {
+		ranking := *source.Ranking
+		if source.Ranking.RelevanceScore != nil {
+			value := *source.Ranking.RelevanceScore
+			ranking.RelevanceScore = &value
+		}
+		cloned.Ranking = &ranking
 	}
 	return cloned
 }

@@ -6,6 +6,8 @@ package search
 import (
 	"context"
 	"time"
+
+	"github.com/use-agent/purify/models"
 )
 
 const (
@@ -15,8 +17,8 @@ const (
 	// Provider result metadata is bounded independently of an adapter's wire
 	// body reader so in-process fakes and future providers obey the same limits.
 	MaxProviderNameBytes     = 64
-	MaxProviderTitleBytes    = 16 << 10
-	MaxProviderSnippetBytes  = 64 << 10
+	MaxProviderTitleBytes    = models.MaxSearchResultTitleBytes
+	MaxProviderSnippetBytes  = models.MaxSearchResultSnippetBytes
 	MaxProviderMetadataBytes = 2 << 20
 )
 

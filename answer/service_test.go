@@ -12,7 +12,22 @@ import (
 	"github.com/use-agent/purify/evidence"
 	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/search"
+	searchrerank "github.com/use-agent/purify/search/rerank"
 )
+
+type answerSearchProvider struct {
+	results []search.ProviderResult
+	calls   int
+	query   search.ProviderQuery
+}
+
+func (*answerSearchProvider) Name() string { return "answer-test" }
+
+func (provider *answerSearchProvider) Search(_ context.Context, query search.ProviderQuery) ([]search.ProviderResult, error) {
+	provider.calls++
+	provider.query = query
+	return append([]search.ProviderResult(nil), provider.results...), nil
+}
 
 type stubAnswerSearcher struct {
 	response *models.SearchResponse
@@ -114,7 +129,8 @@ func TestAnswerKnownComposesFreshSearchAndMultiConsensus(t *testing.T) {
 	}
 	if searcher.request.Query != "anthropic claude-fable-5 "+predicate || searcher.request.Freshness != models.DefaultAnswerFreshness ||
 		searcher.request.Limit != models.MaxExtractSources || searcher.request.Timeout != models.DefaultAnswerTimeoutSeconds ||
-		searcher.request.Deduplicate == nil || !*searcher.request.Deduplicate {
+		searcher.request.Deduplicate == nil || !*searcher.request.Deduplicate || searcher.request.Ranking != "" ||
+		searcher.request.ExpectedSubject != nil {
 		t.Fatalf("Search request = %#v", searcher.request)
 	}
 	if extractor.calls != 1 || extractor.request.Engine != "auto" || !extractor.request.Evidence ||
@@ -149,6 +165,53 @@ func TestAnswerKnownComposesFreshSearchAndMultiConsensus(t *testing.T) {
 	if string(response.Belief.Value) != `"$3.00"` || response.Belief.Evidence[0].Quote != "$3.00" ||
 		response.Belief.Receipts[response.Belief.Evidence[0].URL] == "changed" {
 		t.Fatalf("Answer retained dependency-owned buffers: %#v", response.Belief)
+	}
+}
+
+func TestAnswerKeepsProviderSearchWhenRerankerIsAbsentOrConfigured(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		name := "reranker absent"
+		if configured {
+			name = "reranker configured"
+		}
+		t.Run(name, func(t *testing.T) {
+			provider := &answerSearchProvider{results: []search.ProviderResult{
+				{Rank: 1, URL: "https://one.example.com/fact", Title: "one"},
+				{Rank: 2, URL: "https://two.example.net/fact", Title: "two"},
+			}}
+			scorerCalls := 0
+			var options []search.ServiceOption
+			if configured {
+				options = append(options, search.WithReranker(searchrerank.ScorerFunc(func(context.Context, searchrerank.ScoreRequest) ([]searchrerank.ScoreResult, error) {
+					scorerCalls++
+					return nil, errors.New("answer must not call the reranker")
+				})))
+			}
+			searchService, err := search.NewService(provider, options...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			field := knownField(`"$3.00"`, 2, 2, time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC))
+			extractor := &stubAnswerExtractor{response: successfulConsensus("price", field)}
+			service, err := NewService(searchService, extractor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := service.Answer(context.Background(), &models.AnswerRequest{Spec: models.FactSpec{
+				Subject: "anthropic claude", Predicate: "price", MinIndependentSources: 2,
+			}})
+			if err != nil || response.Status != models.AnswerStatusKnown {
+				t.Fatalf("Answer() = (%#v, %v)", response, err)
+			}
+			if scorerCalls != 0 || provider.calls != 1 || provider.query.Limit != models.MaxExtractSources {
+				t.Fatalf("scorer/provider calls/query = %d/%d/%#v", scorerCalls, provider.calls, provider.query)
+			}
+			if extractor.calls != 1 || len(extractor.request.Sources) != 2 ||
+				extractor.request.Sources[0] != "https://one.example.com/fact" ||
+				extractor.request.Sources[1] != "https://two.example.net/fact" {
+				t.Fatalf("ExtractMulti calls/sources = %d/%#v", extractor.calls, extractor.request.Sources)
+			}
+		})
 	}
 }
 

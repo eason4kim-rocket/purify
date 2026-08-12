@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 
+	"github.com/use-agent/purify/models"
 	searchrerank "github.com/use-agent/purify/search/rerank"
 )
 
@@ -16,18 +17,42 @@ type rankedBaselineCandidate struct {
 	result         baselineResult
 }
 
-// rankCandidatesOutcome keeps internal ranking diagnostics out of the public
-// wire until the later models/HTTP/MCP card defines their exact shape.
+// rankCandidatesOutcome keeps orchestration state package-private. Service
+// projects only the exact public relevance summary defined by the wire model.
 type rankCandidatesOutcome struct {
 	candidates     []rankedBaselineCandidate
 	candidateCount int
 	deduplicated   int
 }
 
+type preparedRankingPool struct {
+	candidates   []baselineResult
+	deduplicated int
+}
+
+// WithReranker installs the process-owned relevance scorer. The option is
+// inert until a request explicitly selects relevance; provider mode never
+// observes or invokes it.
+func WithReranker(scorer searchrerank.Scorer) ServiceOption {
+	return rerankerServiceOption{scorer: scorer}
+}
+
+type rerankerServiceOption struct {
+	scorer searchrerank.Scorer
+}
+
+func (option rerankerServiceOption) applySearchService(service *Service) error {
+	if service == nil || isNilSearchDependency(option.scorer) {
+		return searchrerank.ErrNotConfigured
+	}
+	service.reranker = option.scorer
+	return nil
+}
+
 // rankCandidates filters the bounded provider baseline, scores the complete
 // canonical candidate pool, selects metadata-component winners, and only then
-// applies outputLimit. It is intentionally not connected to Service.Search in
-// R-4; default provider fan-out and public responses remain unchanged.
+// applies outputLimit. Service.Search invokes it only for explicit relevance;
+// default provider fan-out and responses remain unchanged.
 func rankCandidates(
 	ctx context.Context,
 	scorer searchrerank.Scorer,
@@ -44,11 +69,34 @@ func rankCandidates(
 		return rankCandidatesOutcome{}, err
 	}
 
+	pool := prepareRankingPool(source, domains)
+	return rankPreparedCandidates(ctx, scorer, query, pool, deduplicate, outputLimit)
+}
+
+func prepareRankingPool(source []baselineResult, domains []string) preparedRankingPool {
 	filtered, exactDuplicates := filterBaselineCandidates(source, domains)
+	return preparedRankingPool{candidates: filtered, deduplicated: exactDuplicates}
+}
+
+func rankPreparedCandidates(
+	ctx context.Context,
+	scorer searchrerank.Scorer,
+	query string,
+	pool preparedRankingPool,
+	deduplicate bool,
+	outputLimit int,
+) (rankCandidatesOutcome, error) {
+	if ctx == nil || len(pool.candidates) > searchrerank.MaxCandidates || outputLimit < 1 || outputLimit > searchrerank.MaxCandidates {
+		return rankCandidatesOutcome{}, searchrerank.ErrInvalidInput
+	}
+	if err := ctx.Err(); err != nil {
+		return rankCandidatesOutcome{}, err
+	}
+	filtered := pool.candidates
 	outcome := rankCandidatesOutcome{
 		candidates:     make([]rankedBaselineCandidate, 0, min(len(filtered), outputLimit)),
 		candidateCount: len(filtered),
-		deduplicated:   exactDuplicates,
+		deduplicated:   pool.deduplicated,
 	}
 	requestCandidates := make([]searchrerank.Candidate, len(filtered))
 	byURL := make(map[string]baselineResult, len(filtered))
@@ -123,4 +171,18 @@ func relevanceRanksBefore(first, second baselineResult, rankingByURL map[string]
 		return first.providerRank < second.providerRank
 	}
 	return first.url < second.url
+}
+
+func projectRankedBaseline(source []rankedBaselineCandidate) []models.SearchResult {
+	results := make([]models.SearchResult, 0, len(source))
+	for _, candidate := range source {
+		result := projectBaselineResult(candidate.result, candidate.rank)
+		relevanceScore := candidate.relevanceScore
+		result.Ranking = &models.SearchResultRanking{
+			ProviderRank:   candidate.result.providerRank,
+			RelevanceScore: &relevanceScore,
+		}
+		results = append(results, result)
+	}
+	return results
 }

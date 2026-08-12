@@ -476,6 +476,325 @@ func TestR4LeavesDefaultServiceProviderOrdered(t *testing.T) {
 	}
 }
 
+func TestSearchRelevanceRequiresCapabilityBeforeProvider(t *testing.T) {
+	provider := &stubSearchProvider{name: "stub", results: []ProviderResult{{Rank: 1, URL: "https://example.com/"}}}
+	service, err := NewService(provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := service.Search(context.Background(), &models.SearchRequest{
+		Query:   "query",
+		Ranking: models.SearchRankingRelevance,
+	})
+	if response != nil || err == nil {
+		t.Fatalf("Search() = (%#v, %v)", response, err)
+	}
+	requireSearchErrorCode(t, err, models.ErrCodeSearchUnavailable)
+	if calls, _ := provider.snapshot(); calls != 0 {
+		t.Fatalf("provider calls = %d, want zero", calls)
+	}
+}
+
+func TestSearchRelevanceScoresTwentyCachesOnlyBaselineAndPreservesProviderScore(t *testing.T) {
+	providerScore := 0.31
+	provider := &stubSearchProvider{name: "stub", results: make([]ProviderResult, searchrerank.MaxCandidates)}
+	scores := make(map[string]float64, searchrerank.MaxCandidates)
+	for index := range provider.results {
+		rank := index + 1
+		rawURL := "https://result" + string(rune('a'+index)) + ".example/"
+		provider.results[index] = ProviderResult{Rank: rank, URL: rawURL, Title: "result", Score: &providerScore}
+		scores[rawURL] = float64(rank) / searchrerank.MaxCandidates
+	}
+	baseScorer := scorerForURLs(t, scores)
+	scorerCalls := 0
+	scorer := searchrerank.ScorerFunc(func(ctx context.Context, request searchrerank.ScoreRequest) ([]searchrerank.ScoreResult, error) {
+		scorerCalls++
+		if len(request.Candidates) != searchrerank.MaxCandidates {
+			t.Fatalf("scorer candidates = %d", len(request.Candidates))
+		}
+		return baseScorer.Score(ctx, request)
+	})
+	service, err := NewService(provider, WithReranker(scorer))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deduplicate := false
+	request := &models.SearchRequest{Query: "query", Limit: 2, Ranking: models.SearchRankingRelevance, Deduplicate: &deduplicate}
+	first, err := service.Search(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Limit != 2 || request.Ranking != models.SearchRankingRelevance {
+		t.Fatalf("request mutated: %#v", request)
+	}
+	if first.Ranking == nil || first.Ranking.Mode != models.SearchRankingRelevance || first.Ranking.Status != models.SearchRankingApplied ||
+		first.Ranking.CandidateCount != searchrerank.MaxCandidates || first.Ranking.DegradedReason != "" {
+		t.Fatalf("ranking summary = %#v", first.Ranking)
+	}
+	if first.Timing.RerankMs == nil || len(first.Results) != 2 {
+		t.Fatalf("timing/results = %#v / %#v", first.Timing, first.Results)
+	}
+	for index, result := range first.Results {
+		wantProviderRank := searchrerank.MaxCandidates - index
+		if result.Ranking == nil || result.Ranking.ProviderRank != wantProviderRank || result.Ranking.RelevanceScore == nil ||
+			*result.Ranking.RelevanceScore != float64(wantProviderRank)/searchrerank.MaxCandidates || result.Score == nil || *result.Score != providerScore {
+			t.Fatalf("result[%d] = %#v", index, result)
+		}
+	}
+	*first.Results[0].Ranking.RelevanceScore = 0
+	*first.Results[0].Score = 0
+
+	second, err := service.Search(context.Background(), &models.SearchRequest{Query: "query", Limit: 1, Ranking: models.SearchRankingRelevance, Deduplicate: &deduplicate})
+	if err != nil || len(second.Results) != 1 || second.Results[0].Ranking == nil || second.Results[0].Ranking.RelevanceScore == nil ||
+		*second.Results[0].Ranking.RelevanceScore != 1 || second.Results[0].Score == nil || *second.Results[0].Score != providerScore {
+		t.Fatalf("cached rerank = (%#v, %v)", second, err)
+	}
+	calls, queries := provider.snapshot()
+	if calls != 1 || len(queries) != 1 || queries[0].Limit != searchrerank.MaxCandidates || scorerCalls != 2 {
+		t.Fatalf("provider/scorer calls = %d/%d, queries=%#v", calls, scorerCalls, queries)
+	}
+}
+
+func TestSearchRelevanceFailureDegradesAtomicallyToProviderOrder(t *testing.T) {
+	const secret = "private-reranker-detail"
+	tests := []struct {
+		name   string
+		scorer searchrerank.Scorer
+	}{
+		{name: "error", scorer: searchrerank.ScorerFunc(func(context.Context, searchrerank.ScoreRequest) ([]searchrerank.ScoreResult, error) {
+			return nil, errors.New(secret)
+		})},
+		{name: "panic", scorer: searchrerank.ScorerFunc(func(context.Context, searchrerank.ScoreRequest) ([]searchrerank.ScoreResult, error) {
+			panic(secret)
+		})},
+		{name: "wrong result set", scorer: searchrerank.ScorerFunc(func(context.Context, searchrerank.ScoreRequest) ([]searchrerank.ScoreResult, error) {
+			return []searchrerank.ScoreResult{}, nil
+		})},
+		{name: "non-finite score", scorer: searchrerank.ScorerFunc(func(_ context.Context, request searchrerank.ScoreRequest) ([]searchrerank.ScoreResult, error) {
+			results := make([]searchrerank.ScoreResult, len(request.Candidates))
+			for index, candidate := range request.Candidates {
+				results[index] = searchrerank.ScoreResult{StableID: candidate.StableID, RelevanceScore: 0.5}
+			}
+			results[0].RelevanceScore = math.NaN()
+			return results, nil
+		})},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &stubSearchProvider{name: "stub", results: []ProviderResult{
+				{Rank: 1, URL: "https://first.example/", Title: "same", Snippet: "copy"},
+				{Rank: 2, URL: "https://second.example/", Title: "same", Snippet: "copy"},
+				{Rank: 3, URL: "https://third.example/", Title: "different"},
+			}}
+			scorerCalls := 0
+			scorer := searchrerank.ScorerFunc(func(ctx context.Context, request searchrerank.ScoreRequest) ([]searchrerank.ScoreResult, error) {
+				scorerCalls++
+				return test.scorer.Score(ctx, request)
+			})
+			service, err := NewService(provider, WithReranker(scorer))
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := service.Search(context.Background(), &models.SearchRequest{Query: "query", Limit: 3, Ranking: models.SearchRankingRelevance})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.Ranking == nil || response.Ranking.Mode != models.SearchRankingRelevance || response.Ranking.Status != models.SearchRankingDegraded ||
+				response.Ranking.DegradedReason != models.SearchRankingReasonRerankerFailed || response.Ranking.CandidateCount != 3 ||
+				response.Timing.RerankMs == nil || scorerCalls != 1 {
+				t.Fatalf("degraded response = %#v", response)
+			}
+			if len(response.Results) != 2 || response.Results[0].URL != "https://first.example/" || response.Results[1].URL != "https://third.example/" {
+				t.Fatalf("provider fallback results = %#v", response.Results)
+			}
+			for _, result := range response.Results {
+				if result.Ranking != nil {
+					t.Fatalf("degraded result fabricated ranking: %#v", result)
+				}
+			}
+			encoded, err := json.Marshal(response)
+			if err != nil || strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), "relevance_score") {
+				t.Fatalf("degraded JSON = %s, %v", encoded, err)
+			}
+		})
+	}
+}
+
+func TestSearchTrustIsValidatedThenUnavailableBeforeProvider(t *testing.T) {
+	provider := &stubSearchProvider{name: "stub"}
+	service, err := NewService(provider, WithReranker(searchrerank.ScorerFunc(func(context.Context, searchrerank.ScoreRequest) ([]searchrerank.ScoreResult, error) {
+		t.Fatal("trust must not invoke relevance before its capability exists")
+		return nil, nil
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		request *models.SearchRequest
+		code    string
+	}{
+		{request: &models.SearchRequest{Query: "query", Ranking: models.SearchRankingTrust}, code: models.ErrCodeInvalidInput},
+		{request: &models.SearchRequest{Query: "query", Ranking: models.SearchRankingTrust, ExpectedSubject: &models.SubjectSpec{Name: "subject"}}, code: models.ErrCodeSearchUnavailable},
+	} {
+		response, searchErr := service.Search(context.Background(), test.request)
+		if response != nil || searchErr == nil {
+			t.Fatalf("trust Search() = (%#v, %v)", response, searchErr)
+		}
+		requireSearchErrorCode(t, searchErr, test.code)
+	}
+	if calls, _ := provider.snapshot(); calls != 0 {
+		t.Fatalf("trust provider calls = %d", calls)
+	}
+}
+
+func TestSearchRankingModeValidationAndProviderCompatibility(t *testing.T) {
+	scorerCalls := 0
+	provider := &stubSearchProvider{name: "stub", results: []ProviderResult{{Rank: 1, URL: "https://example.com/"}}}
+	service, err := NewService(provider, WithReranker(searchrerank.ScorerFunc(func(context.Context, searchrerank.ScoreRequest) ([]searchrerank.ScoreResult, error) {
+		scorerCalls++
+		return nil, nil
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ranking := range []models.SearchRankingMode{"", models.SearchRankingProvider} {
+		response, searchErr := service.Search(context.Background(), &models.SearchRequest{Query: "query", Ranking: ranking})
+		if searchErr != nil || len(response.Results) != 1 || response.Ranking != nil || response.Timing.RerankMs != nil {
+			t.Fatalf("provider ranking %q = (%#v, %v)", ranking, response, searchErr)
+		}
+	}
+	if scorerCalls != 0 {
+		t.Fatalf("provider mode invoked scorer %d times", scorerCalls)
+	}
+
+	invalid := []*models.SearchRequest{
+		{Query: "query", Ranking: "RELEVANCE"},
+		{Query: "query", Ranking: "unknown"},
+		{Query: "query", ExpectedSubject: &models.SubjectSpec{Name: "subject"}},
+		{Query: "query", Ranking: models.SearchRankingRelevance, ExpectedSubject: &models.SubjectSpec{Name: "subject"}},
+	}
+	for _, request := range invalid {
+		response, searchErr := service.Search(context.Background(), request)
+		if response != nil || searchErr == nil {
+			t.Fatalf("invalid ranking request = (%#v, %v)", response, searchErr)
+		}
+		requireSearchErrorCode(t, searchErr, models.ErrCodeInvalidInput)
+	}
+	if calls, _ := provider.snapshot(); calls != 1 {
+		t.Fatalf("invalid requests reached provider: calls=%d", calls)
+	}
+}
+
+func TestSearchTrustSubjectAndModeDefaultsAreBoundedBeforeCapability(t *testing.T) {
+	provider := &stubSearchProvider{name: "stub"}
+	service, err := NewService(provider, WithReranker(searchrerank.ScorerFunc(func(context.Context, searchrerank.ScoreRequest) ([]searchrerank.ScoreResult, error) {
+		t.Fatal("trust unavailable must not score")
+		return nil, nil
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid := []*models.SearchRequest{
+		{Query: "query", Ranking: models.SearchRankingTrust, ExpectedSubject: &models.SubjectSpec{Name: strings.Repeat("a", 1201)}},
+		{Query: "query", Ranking: models.SearchRankingTrust, ExpectedSubject: &models.SubjectSpec{Name: "subject", Hint: strings.Repeat("h", 513)}},
+		{Query: "query", Ranking: models.SearchRankingTrust, ExpectedSubject: &models.SubjectSpec{Name: " \t "}},
+		{Query: "query", Ranking: models.SearchRankingTrust, ExpectedSubject: &models.SubjectSpec{Name: `..."''`}},
+		{Query: "query", Ranking: models.SearchRankingTrust, ExpectedSubject: &models.SubjectSpec{Name: "bad\x00subject"}},
+		{Query: "query", Ranking: models.SearchRankingTrust, Limit: 6, ExpectedSubject: &models.SubjectSpec{Name: "subject"}},
+	}
+	for _, request := range invalid {
+		response, searchErr := service.Search(context.Background(), request)
+		if response != nil || searchErr == nil {
+			t.Fatalf("invalid trust request = (%#v, %v)", response, searchErr)
+		}
+		requireSearchErrorCode(t, searchErr, models.ErrCodeInvalidInput)
+	}
+
+	valid := &models.SearchRequest{Query: "query", Ranking: models.SearchRankingTrust, ExpectedSubject: &models.SubjectSpec{Name: " subject ", Hint: " hint "}}
+	response, searchErr := service.Search(context.Background(), valid)
+	if response != nil || searchErr == nil {
+		t.Fatalf("valid unavailable trust = (%#v, %v)", response, searchErr)
+	}
+	requireSearchErrorCode(t, searchErr, models.ErrCodeSearchUnavailable)
+	if valid.Limit != 0 || valid.Timeout != 0 || valid.ExpectedSubject.Name != " subject " {
+		t.Fatalf("trust request mutated: %#v", valid)
+	}
+	if calls, _ := provider.snapshot(); calls != 0 {
+		t.Fatalf("trust validation reached provider %d times", calls)
+	}
+}
+
+func TestSearchRelevanceEmptyPoolIsAppliedWithoutBackendCall(t *testing.T) {
+	provider := &stubSearchProvider{name: "stub", results: []ProviderResult{{Rank: 1, URL: "https://outside.example/"}}}
+	scorerCalls := 0
+	service, err := NewService(provider, WithReranker(searchrerank.ScorerFunc(func(context.Context, searchrerank.ScoreRequest) ([]searchrerank.ScoreResult, error) {
+		scorerCalls++
+		return nil, nil
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tick := time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC)
+	service.now = func() time.Time {
+		tick = tick.Add(time.Second)
+		return tick
+	}
+	response, err := service.Search(context.Background(), &models.SearchRequest{
+		Query: "query", Ranking: models.SearchRankingRelevance, Domains: []string{"inside.example"},
+	})
+	if err != nil || response.Ranking == nil || response.Ranking.Status != models.SearchRankingApplied || response.Ranking.CandidateCount != 0 ||
+		response.Results == nil || len(response.Results) != 0 || response.Timing.RerankMs == nil || *response.Timing.RerankMs != 0 || scorerCalls != 0 {
+		t.Fatalf("empty relevance = (%#v, %v), scorer calls=%d", response, err, scorerCalls)
+	}
+}
+
+func TestSearchRelevanceOuterCancellationNeverFallsBack(t *testing.T) {
+	provider := &stubSearchProvider{name: "stub", results: []ProviderResult{{Rank: 1, URL: "https://example.com/"}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	service, err := NewService(provider, WithReranker(searchrerank.ScorerFunc(func(_ context.Context, request searchrerank.ScoreRequest) ([]searchrerank.ScoreResult, error) {
+		cancel()
+		return []searchrerank.ScoreResult{{StableID: request.Candidates[0].StableID, RelevanceScore: 1}}, nil
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, searchErr := service.Search(ctx, &models.SearchRequest{Query: "query", Ranking: models.SearchRankingRelevance})
+	if response != nil || searchErr == nil {
+		t.Fatalf("canceled relevance = (%#v, %v)", response, searchErr)
+	}
+	requireSearchErrorCode(t, searchErr, models.ErrCodeTimeout)
+}
+
+func TestWithRerankerRejectsNilAndTypedNil(t *testing.T) {
+	provider := &stubSearchProvider{name: "stub"}
+	var typedNil *testNilSearchScorer
+	for _, scorer := range []searchrerank.Scorer{nil, typedNil} {
+		if service, err := NewService(provider, WithReranker(scorer)); service != nil || !errors.Is(err, searchrerank.ErrNotConfigured) {
+			t.Fatalf("NewService(nil reranker) = (%#v, %v)", service, err)
+		}
+	}
+}
+
+func TestCloneSearchResultDeepCopiesRankingDiagnostics(t *testing.T) {
+	relevance := 0.5
+	source := models.SearchResult{Ranking: &models.SearchResultRanking{
+		ProviderRank:   2,
+		RelevanceScore: &relevance,
+	}}
+	cloned := cloneSearchResult(source)
+	*cloned.Ranking.RelevanceScore = 1
+	if *source.Ranking.RelevanceScore != 0.5 {
+		t.Fatalf("ranking clone retained source buffers: %#v", source.Ranking)
+	}
+}
+
+type testNilSearchScorer struct{}
+
+func (*testNilSearchScorer) Score(context.Context, searchrerank.ScoreRequest) ([]searchrerank.ScoreResult, error) {
+	return nil, nil
+}
+
 func scorerForURLs(t *testing.T, scoreByURL map[string]float64) searchrerank.Scorer {
 	t.Helper()
 	scoreByID := make(map[string]float64, len(scoreByURL))

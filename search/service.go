@@ -20,7 +20,9 @@ import (
 	"github.com/use-agent/purify/llm"
 	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/publicnet"
+	searchrerank "github.com/use-agent/purify/search/rerank"
 	"github.com/use-agent/purify/simhash"
+	"github.com/use-agent/purify/verify/eav"
 	"golang.org/x/net/idna"
 	"golang.org/x/net/publicsuffix"
 )
@@ -61,6 +63,7 @@ type Service struct {
 	enrichmentTimeout time.Duration
 	encodingSlots     chan struct{}
 	encodeSearch      func(any) ([]byte, error)
+	reranker          searchrerank.Scorer
 }
 
 // NewService constructs a Search service with the fixed one-minute,
@@ -133,6 +136,12 @@ func (service *Service) SearchWithOptions(ctx context.Context, request *models.S
 	if err != nil {
 		return nil, err
 	}
+	if prepared.ranking == models.SearchRankingRelevance && isNilSearchDependency(service.reranker) {
+		return nil, searchUnavailable("requested search capability is unavailable", nil)
+	}
+	if prepared.ranking == models.SearchRankingTrust {
+		return nil, searchUnavailable("requested search capability is unavailable", nil)
+	}
 	if prepared.requiresEnrichment && !service.enrichmentAvailable() {
 		return nil, searchUnavailable("requested search capability is unavailable", nil)
 	}
@@ -143,7 +152,7 @@ func (service *Service) SearchWithOptions(ctx context.Context, request *models.S
 		return nil, searchTimeout(err)
 	}
 
-	providerQuery := ProviderQuery{Text: prepared.query, Limit: prepared.limit, Freshness: prepared.freshness}
+	providerQuery := ProviderQuery{Text: prepared.query, Limit: prepared.candidateLimit, Freshness: prepared.freshness}
 	cacheKey := baselineKey(service.providerName, providerQuery)
 	providerMilliseconds := int64(0)
 	var baseline []baselineResult
@@ -174,7 +183,45 @@ func (service *Service) SearchWithOptions(ctx context.Context, request *models.S
 		service.cache.set(cacheKey, baseline)
 	}
 
-	results, deduplicated := projectBaseline(baseline, prepared.domains, prepared.deduplicate, prepared.limit)
+	var results []models.SearchResult
+	var rankingSummary *models.SearchResponseRanking
+	var rerankMilliseconds *int64
+	deduplicated := 0
+	if prepared.ranking == models.SearchRankingRelevance {
+		pool := prepareRankingPool(baseline, prepared.domains)
+		var rankingStartedAt time.Time
+		if len(pool.candidates) > 0 {
+			rankingStartedAt = service.now()
+		}
+		ranked, rankingErr := rankPreparedCandidates(runCtx, service.reranker, prepared.query, pool, prepared.deduplicate, prepared.limit)
+		measured := int64(0)
+		if !rankingStartedAt.IsZero() {
+			measured = elapsedMilliseconds(rankingStartedAt, service.now())
+		}
+		rerankMilliseconds = &measured
+		if contextErr := runCtx.Err(); contextErr != nil {
+			return nil, searchTimeout(contextErr)
+		}
+		if rankingErr != nil {
+			results, deduplicated = projectBaseline(baseline, prepared.domains, prepared.deduplicate, prepared.limit)
+			rankingSummary = &models.SearchResponseRanking{
+				Mode:           models.SearchRankingRelevance,
+				Status:         models.SearchRankingDegraded,
+				DegradedReason: models.SearchRankingReasonRerankerFailed,
+				CandidateCount: len(pool.candidates),
+			}
+		} else {
+			results = projectRankedBaseline(ranked.candidates)
+			deduplicated = ranked.deduplicated
+			rankingSummary = &models.SearchResponseRanking{
+				Mode:           models.SearchRankingRelevance,
+				Status:         models.SearchRankingApplied,
+				CandidateCount: ranked.candidateCount,
+			}
+		}
+	} else {
+		results, deduplicated = projectBaseline(baseline, prepared.domains, prepared.deduplicate, prepared.limit)
+	}
 	if err := runCtx.Err(); err != nil {
 		return nil, searchTimeout(err)
 	}
@@ -202,13 +249,17 @@ func (service *Service) SearchWithOptions(ctx context.Context, request *models.S
 			TotalMs:      elapsedMilliseconds(startedAt, service.now()),
 			ProviderMs:   providerMilliseconds,
 			EnrichmentMs: enrichmentMilliseconds,
+			RerankMs:     rerankMilliseconds,
 		},
+		Ranking: rankingSummary,
 	}, nil
 }
 
 type preparedSearchRequest struct {
 	query              string
 	limit              int
+	candidateLimit     int
+	ranking            models.SearchRankingMode
 	domains            []string
 	freshness          Freshness
 	deduplicate        bool
@@ -235,8 +286,12 @@ func prepareSearchRequest(source *models.SearchRequest) (preparedSearchRequest, 
 	if len(source.Schema) > models.MaxSearchSchemaBytes {
 		return preparedSearchRequest{}, invalidSearchInput("search schema exceeds 524288 bytes")
 	}
+	if err := validateRawSearchSubject(source.ExpectedSubject); err != nil {
+		return preparedSearchRequest{}, err
+	}
 	request := cloneSearchRequest(source)
 	request.Defaults()
+	resolved := models.ResolveSearchDefaults(request.Ranking, request.Limit, request.Timeout)
 
 	query, err := normalizeSearchQuery(request.Query)
 	if err != nil {
@@ -244,6 +299,24 @@ func prepareSearchRequest(source *models.SearchRequest) (preparedSearchRequest, 
 	}
 	if request.Limit < 1 || request.Limit > models.MaxSearchLimit {
 		return preparedSearchRequest{}, invalidSearchInput("search limit must be between 1 and 20")
+	}
+	switch resolved.Ranking {
+	case models.SearchRankingProvider, models.SearchRankingRelevance:
+		if request.ExpectedSubject != nil {
+			return preparedSearchRequest{}, invalidSearchInput("search expected subject requires trust ranking")
+		}
+	case models.SearchRankingTrust:
+		if request.ExpectedSubject == nil {
+			return preparedSearchRequest{}, invalidSearchInput("trust ranking requires an expected subject")
+		}
+		if request.Limit > models.MaxSearchTrustLimit {
+			return preparedSearchRequest{}, invalidSearchInput("trust search limit must be between 1 and 5")
+		}
+		if err := validateSearchSubject(request.ExpectedSubject); err != nil {
+			return preparedSearchRequest{}, err
+		}
+	default:
+		return preparedSearchRequest{}, invalidSearchInput("search ranking is invalid")
 	}
 	domains, err := normalizeSearchDomains(request.Domains)
 	if err != nil {
@@ -264,9 +337,15 @@ func prepareSearchRequest(source *models.SearchRequest) (preparedSearchRequest, 
 	if err != nil {
 		return preparedSearchRequest{}, err
 	}
+	candidateLimit := request.Limit
+	if resolved.Ranking == models.SearchRankingRelevance || resolved.Ranking == models.SearchRankingTrust {
+		candidateLimit = searchrerank.MaxCandidates
+	}
 	return preparedSearchRequest{
 		query:              query,
 		limit:              request.Limit,
+		candidateLimit:     candidateLimit,
+		ranking:            resolved.Ranking,
 		domains:            domains,
 		freshness:          freshness,
 		deduplicate:        *request.Deduplicate,
@@ -292,7 +371,40 @@ func cloneSearchRequest(source *models.SearchRequest) models.SearchRequest {
 		value := *source.Deduplicate
 		cloned.Deduplicate = &value
 	}
+	if source.ExpectedSubject != nil {
+		cloned.ExpectedSubject = &models.SubjectSpec{
+			Name: strings.Clone(source.ExpectedSubject.Name),
+			Hint: strings.Clone(source.ExpectedSubject.Hint),
+		}
+	}
 	return cloned
+}
+
+func validateRawSearchSubject(subject *models.SubjectSpec) error {
+	if subject == nil {
+		return nil
+	}
+	if len(subject.Name) > eav.MaxSubjectBytes || len(subject.Hint) > eav.MaxHintBytes ||
+		!utf8.ValidString(subject.Name) || !utf8.ValidString(subject.Hint) || containsControl(subject.Name) || containsControl(subject.Hint) ||
+		strings.TrimSpace(subject.Name) == "" || eav.Normalize(subject.Name) == "" {
+		return invalidSearchInput("search expected subject is invalid")
+	}
+	return nil
+}
+
+func validateSearchSubject(subject *models.SubjectSpec) error {
+	if err := validateRawSearchSubject(subject); err != nil {
+		return err
+	}
+	if subject == nil {
+		return invalidSearchInput("search expected subject is invalid")
+	}
+	subject.Name = strings.TrimSpace(subject.Name)
+	subject.Hint = strings.TrimSpace(subject.Hint)
+	if subject.Name == "" {
+		return invalidSearchInput("search expected subject is invalid")
+	}
+	return nil
 }
 
 func normalizeSearchQuery(raw string) (string, error) {
@@ -555,24 +667,28 @@ func projectBaseline(source []baselineResult, domains []string, deduplicate bool
 		if len(results) >= limit {
 			break
 		}
-		result := models.SearchResult{
-			Rank:               len(results) + 1,
-			Title:              candidate.title,
-			URL:                candidate.url,
-			Snippet:            candidate.snippet,
-			VerificationStatus: models.SearchVerificationNotChecked,
-		}
-		if candidate.score != nil {
-			value := *candidate.score
-			result.Score = &value
-		}
-		if candidate.publishedAt != nil {
-			value := *candidate.publishedAt
-			result.PublishedAt = &value
-		}
-		results = append(results, result)
+		results = append(results, projectBaselineResult(candidate, len(results)+1))
 	}
 	return results, deduplicated
+}
+
+func projectBaselineResult(candidate baselineResult, rank int) models.SearchResult {
+	result := models.SearchResult{
+		Rank:               rank,
+		Title:              candidate.title,
+		URL:                candidate.url,
+		Snippet:            candidate.snippet,
+		VerificationStatus: models.SearchVerificationNotChecked,
+	}
+	if candidate.score != nil {
+		value := *candidate.score
+		result.Score = &value
+	}
+	if candidate.publishedAt != nil {
+		value := *candidate.publishedAt
+		result.PublishedAt = &value
+	}
+	return result
 }
 
 func filterBaselineCandidates(source []baselineResult, domains []string) ([]baselineResult, int) {
