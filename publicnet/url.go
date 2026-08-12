@@ -117,6 +117,34 @@ func IsPublicAddress(address netip.Addr) bool {
 		address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() || address.IsUnspecified() {
 		return false
 	}
+	if address.Is6() {
+		// RFC 6052's well-known NAT64 prefix is globally reachable only when
+		// its embedded IPv4 destination is itself public. This prevents a DNS
+		// answer from smuggling a private IPv4 target through NAT64.
+		if nat64WellKnownPrefix.Contains(address) {
+			bytes := address.As16()
+			return IsPublicAddress(netip.AddrFrom4([4]byte{bytes[12], bytes[13], bytes[14], bytes[15]}))
+		}
+		// A few special-purpose allocations are explicitly globally reachable,
+		// including the AS112-v6 service prefix.
+		for _, prefix := range globallyReachableSpecialAddressPrefixes {
+			if prefix.Contains(address) {
+				return true
+			}
+		}
+		// Go's IsGlobalUnicast deliberately includes deprecated site-local and
+		// unallocated IPv6 space. Fail closed to IANA's current allocated set.
+		allocated := false
+		for _, prefix := range globallyAllocatedIPv6Prefixes {
+			if prefix.Contains(address) {
+				allocated = true
+				break
+			}
+		}
+		if !allocated {
+			return false
+		}
+	}
 	for _, prefix := range reservedAddressPrefixes {
 		if prefix.Contains(address) {
 			return false
@@ -125,15 +153,83 @@ func IsPublicAddress(address netip.Addr) bool {
 	return true
 }
 
+var nat64WellKnownPrefix = netip.MustParsePrefix("64:ff9b::/96")
+
+// Synchronized with the IANA IPv6 Special-Purpose Address Registry updated
+// 2025-10-09. These are the globally reachable allocations nested inside the
+// otherwise non-global 2001::/23 protocol-assignment block, plus AS112-v6.
+var globallyReachableSpecialAddressPrefixes = [...]netip.Prefix{
+	netip.MustParsePrefix("2001:1::1/128"),
+	netip.MustParsePrefix("2001:1::2/128"),
+	netip.MustParsePrefix("2001:1::3/128"),
+	netip.MustParsePrefix("2001:3::/32"),
+	netip.MustParsePrefix("2001:4:112::/48"),
+	netip.MustParsePrefix("2001:20::/28"),
+	netip.MustParsePrefix("2001:30::/28"),
+	netip.MustParsePrefix("2620:4f:8000::/48"),
+}
+
+// Synchronized with the IANA IPv6 Global Unicast Address Space registry
+// updated 2025-10-10. Unlisted IPv6 space fails closed even though Go's
+// IsGlobalUnicast reports most non-multicast addresses as global unicast.
+var globallyAllocatedIPv6Prefixes = [...]netip.Prefix{
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:200::/23"),
+	netip.MustParsePrefix("2001:400::/23"),
+	netip.MustParsePrefix("2001:600::/23"),
+	netip.MustParsePrefix("2001:800::/22"),
+	netip.MustParsePrefix("2001:c00::/23"),
+	netip.MustParsePrefix("2001:e00::/23"),
+	netip.MustParsePrefix("2001:1200::/23"),
+	netip.MustParsePrefix("2001:1400::/22"),
+	netip.MustParsePrefix("2001:1800::/23"),
+	netip.MustParsePrefix("2001:1a00::/23"),
+	netip.MustParsePrefix("2001:1c00::/22"),
+	netip.MustParsePrefix("2001:2000::/19"),
+	netip.MustParsePrefix("2001:4000::/23"),
+	netip.MustParsePrefix("2001:4200::/23"),
+	netip.MustParsePrefix("2001:4400::/23"),
+	netip.MustParsePrefix("2001:4600::/23"),
+	netip.MustParsePrefix("2001:4800::/23"),
+	netip.MustParsePrefix("2001:4a00::/23"),
+	netip.MustParsePrefix("2001:4c00::/23"),
+	netip.MustParsePrefix("2001:5000::/20"),
+	netip.MustParsePrefix("2001:8000::/19"),
+	netip.MustParsePrefix("2001:a000::/20"),
+	netip.MustParsePrefix("2001:b000::/20"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("2003::/18"),
+	netip.MustParsePrefix("2400::/12"),
+	netip.MustParsePrefix("2410::/12"),
+	netip.MustParsePrefix("2600::/12"),
+	netip.MustParsePrefix("2610::/23"),
+	netip.MustParsePrefix("2620::/23"),
+	netip.MustParsePrefix("2630::/12"),
+	netip.MustParsePrefix("2800::/12"),
+	netip.MustParsePrefix("2a00::/12"),
+	netip.MustParsePrefix("2a10::/12"),
+	netip.MustParsePrefix("2c00::/12"),
+}
+
+// Synchronized with the IANA IPv4 and IPv6 Special-Purpose Address
+// Registries updated 2025-10-09. Broad protocol-assignment ranges are denied
+// conservatively; the explicit globally reachable IPv6 exceptions are above.
 var reservedAddressPrefixes = [...]netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
 	netip.MustParsePrefix("100.64.0.0/10"),
 	netip.MustParsePrefix("192.0.0.0/24"),
 	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
 	netip.MustParsePrefix("198.18.0.0/15"),
 	netip.MustParsePrefix("198.51.100.0/24"),
 	netip.MustParsePrefix("203.0.113.0/24"),
 	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
 	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("100:0:0:1::/64"),
+	netip.MustParsePrefix("2001::/23"),
 	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("3fff::/20"),
+	netip.MustParsePrefix("5f00::/16"),
 }

@@ -181,6 +181,35 @@ func TestHTTPPolicyDestinationMatrixRejectsBeforeDial(t *testing.T) {
 			wantReject:   true,
 		},
 	}
+	for _, address := range []string{
+		"192.88.99.1",
+		"64:ff9b:1::1",
+		"64:ff9b::a00:1",
+		"100:0:0:1::1",
+		"2001:2::1",
+		"2002::1",
+		"3ffe::1",
+		"3fff::1",
+		"4000::1",
+		"5f00::1",
+		"fec0::1",
+	} {
+		tests = append(tests, struct {
+			name         string
+			endpoint     string
+			allowPrivate bool
+			host         string
+			answers      []netip.Addr
+			wantTarget   string
+			wantReject   bool
+		}{
+			name:       "HTTPS rejects IANA special-purpose " + address,
+			endpoint:   "https://special.test/v1/rerank",
+			host:       "special.test",
+			answers:    rerankAddresses(address),
+			wantReject: true,
+		})
+	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var dialed atomic.Int32
@@ -260,6 +289,48 @@ func TestHTTPPolicyClassifiesLiteralTargetsWithoutDNS(t *testing.T) {
 	}
 	if got := dialed.Load(); got != 1 {
 		t.Fatalf("underlying dials = %d, want 1", got)
+	}
+
+	for _, address := range []string{
+		"192.88.99.1",
+		"64:ff9b:1::1",
+		"64:ff9b::a00:1",
+		"100:0:0:1::1",
+		"2001:2::1",
+		"2002::1",
+		"3ffe::1",
+		"3fff::1",
+		"4000::1",
+		"5f00::1",
+		"fec0::1",
+	} {
+		t.Run("special-purpose "+address, func(t *testing.T) {
+			host := address
+			if strings.ContainsRune(host, ':') {
+				host = "[" + host + "]"
+			}
+			var specialDials atomic.Int32
+			specialClient, err := newRerankHTTPClient(rerankHTTPClientConfig{
+				endpoint: rerankTestURL("https://" + host + "/v1/rerank"),
+				timeout:  time.Second,
+				resolver: resolver,
+				dialContext: func(context.Context, string, string) (net.Conn, error) {
+					specialDials.Add(1)
+					return rerankClosedPipe(), nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("newRerankHTTPClient() error = %v", err)
+			}
+			t.Cleanup(specialClient.CloseIdleConnections)
+			specialTransport := specialClient.client.Transport.(*http.Transport)
+			if _, err := specialTransport.DialContext(context.Background(), "tcp", net.JoinHostPort(address, "443")); !errors.Is(err, errRerankDestinationRejected) {
+				t.Fatalf("DialContext() error = %v, want errRerankDestinationRejected", err)
+			}
+			if got := specialDials.Load(); got != 0 {
+				t.Fatalf("underlying dials = %d, want zero", got)
+			}
+		})
 	}
 }
 

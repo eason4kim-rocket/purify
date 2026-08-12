@@ -23,13 +23,24 @@ func TestPolicyRejectsNonPublicDNSAnswersBeforeDial(t *testing.T) {
 		"169.254.169.254",
 		"192.0.0.1",
 		"192.0.2.1",
+		"192.88.99.1",
 		"198.18.0.1",
 		"198.51.100.1",
 		"203.0.113.1",
 		"240.0.0.1",
 		"::1",
+		"64:ff9b:1::1",
+		"64:ff9b::a00:1",
 		"100::1",
+		"100:0:0:1::1",
+		"2001:2::1",
 		"2001:db8::1",
+		"2002::1",
+		"3ffe::1",
+		"3fff::1",
+		"4000::1",
+		"5f00::1",
+		"fec0::1",
 		"fc00::1",
 		"fe80::1",
 	} {
@@ -278,12 +289,20 @@ func TestNormalizeHTTPURLCanonicalizesAndChecksLiteralIP(t *testing.T) {
 }
 
 func TestIsPublicAddressCoversIPv4AndIPv6(t *testing.T) {
-	for _, raw := range []string{"1.1.1.1", "8.8.8.8", "2606:4700:4700::1111", "2001:4860:4860::8888"} {
+	for _, raw := range []string{
+		"1.1.1.1", "8.8.8.8", "2606:4700:4700::1111", "2001:4860:4860::8888",
+		"2001:1::1", "2001:1::2", "2001:1::3", "2001:3::1", "2001:4:112::1", "2001:20::1", "2001:30::1",
+		"2620:4f:8000::1", "64:ff9b::808:808",
+	} {
 		if !IsPublicAddress(netip.MustParseAddr(raw)) {
 			t.Errorf("IsPublicAddress(%s) = false", raw)
 		}
 	}
-	for _, raw := range []string{"10.0.0.1", "100.64.0.1", "192.0.2.1", "127.0.0.1", "::1", "100::1", "2001:db8::1", "fe80::1"} {
+	for _, raw := range []string{
+		"10.0.0.1", "100.64.0.1", "192.0.2.1", "192.88.99.1", "127.0.0.1",
+		"::1", "64:ff9b:1::1", "64:ff9b::a00:1", "100::1", "100:0:0:1::1", "2001:2::1",
+		"2001:db8::1", "2002::1", "3ffe::1", "3fff::1", "4000::1", "5f00::1", "fec0::1", "fe80::1",
+	} {
 		if IsPublicAddress(netip.MustParseAddr(raw)) {
 			t.Errorf("IsPublicAddress(%s) = true", raw)
 		}
