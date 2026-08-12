@@ -103,6 +103,8 @@ func TestReferenceImagePreinspectionRejectsEveryPinnedFieldDrift(t *testing.T) {
 		{name: "working directory", mutate: func(i *ImageInspection) { i.Config.WorkingDir = "/tmp" }},
 		{name: "exposed port", mutate: func(i *ImageInspection) { i.Config.ExposedPorts = []string{"8000/tcp"} }},
 		{name: "volume", mutate: func(i *ImageInspection) { i.Config.Volumes = []string{"/data"} }},
+		{name: "image label missing", mutate: func(i *ImageInspection) { delete(i.Config.Labels, "ai.vllm.build.commit") }},
+		{name: "image label extra", mutate: func(i *ImageInspection) { i.Config.Labels["operator"] = "true" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -144,7 +146,7 @@ func TestReferencePlanBuildsFixedCreateSpecWithoutAttestingSecret(t *testing.T) 
 	if strings.Contains(strings.Join(wantArgv, "\x00"), testAPIKey) {
 		t.Fatal("argv contains API key")
 	}
-	if spec.ImageID != ReferenceImageConfigID || spec.Hostname != "purify-r6a-"+testGenerated.RunID ||
+	if spec.ImageID != ReferenceImageReference || spec.Hostname != "purify-r6a-"+testGenerated.RunID ||
 		spec.NetworkMode != NetworkModeNone || !spec.ReadOnlyRootFS || spec.RestartPolicy != RestartPolicyNo ||
 		spec.Privileged || spec.TTY || spec.IPCMode != IPCModePrivate || spec.ShmSizeBytes != 1<<30 ||
 		len(spec.ExposedPorts) != 0 || len(spec.PortBindings) != 0 || len(spec.CapAdd) != 0 || len(spec.Links) != 0 {
@@ -163,6 +165,9 @@ func TestReferencePlanBuildsFixedCreateSpecWithoutAttestingSecret(t *testing.T) 
 	if spec.Labels[LabelManaged] != "true" || spec.Labels[LabelComponent] != ReferenceComponent ||
 		spec.Labels[LabelRunID] != testGenerated.RunID || spec.Labels[LabelSpecDigest] != plan.specDigest {
 		t.Fatalf("labels = %#v", spec.Labels)
+	}
+	if len(spec.Labels) != len(referenceImageLabels())+4 {
+		t.Fatalf("complete image/controller label set = %#v", spec.Labels)
 	}
 	if countEnvironment(spec.Environment, "VLLM_API_KEY", testAPIKey) != 1 ||
 		countEnvironment(spec.Environment, "HF_HUB_OFFLINE", "1") != 1 ||
@@ -252,7 +257,7 @@ func TestCreatedInspectionRejectsCreateAndOwnershipDrift(t *testing.T) {
 		{name: "managed label", ownership: true, mutate: func(i *ContainerInspection) { i.Labels[LabelManaged] = "false" }},
 		{name: "run label", ownership: true, mutate: func(i *ContainerInspection) { i.Labels[LabelRunID] = strings.Repeat("d", 32) }},
 		{name: "spec label", ownership: true, mutate: func(i *ContainerInspection) { i.Labels[LabelSpecDigest] = strings.Repeat("e", 64) }},
-		{name: "extra label", ownership: true, mutate: func(i *ContainerInspection) { i.Labels["operator"] = "true" }},
+		{name: "extra label", mutate: func(i *ContainerInspection) { i.Labels["operator"] = "true" }},
 		{name: "image id", mutate: func(i *ContainerInspection) { i.ImageID = "sha256:" + strings.Repeat("0", 64) }},
 		{name: "manifest missing", mutate: func(i *ContainerInspection) { i.ImageManifestDescriptor = nil }},
 		{name: "manifest digest", mutate: func(i *ContainerInspection) { i.ImageManifestDescriptor.Digest = "sha256:" + strings.Repeat("0", 64) }},
@@ -265,6 +270,7 @@ func TestCreatedInspectionRejectsCreateAndOwnershipDrift(t *testing.T) {
 		{name: "mount readwrite", mutate: func(i *ContainerInspection) { i.Mounts[0].ReadOnly = false }},
 		{name: "mount target", mutate: func(i *ContainerInspection) { i.Mounts[1].Destination = "/tmp/template" }},
 		{name: "network", mutate: func(i *ContainerInspection) { i.NetworkMode = "bridge" }},
+		{name: "network enabled", mutate: func(i *ContainerInspection) { i.NetworkDisabled = false }},
 		{name: "exposed port", mutate: func(i *ContainerInspection) { i.ExposedPorts = []string{"8000/tcp"} }},
 		{name: "published port", mutate: func(i *ContainerInspection) {
 			i.PortBindings = []PortBinding{{ContainerPort: "8000/tcp", HostPort: "8000"}}
@@ -330,6 +336,15 @@ func TestRunningInspectionRequiresStablePIDProcessEnvironmentAndFreshSocket(t *t
 		}},
 		{name: "extra process env", mutate: func(i *RunningInspection) { i.Process.Environment = append(i.Process.Environment, "HOME=/root") }},
 		{name: "wrong process key", mutate: func(i *RunningInspection) { replaceEnvironment(i.Process.Environment, "VLLM_API_KEY", "wrong") }},
+		{name: "wrong selected gpu", mutate: func(i *RunningInspection) {
+			replaceExactEnvironment(i.Process.Environment, "NVIDIA_VISIBLE_DEVICES=0", "NVIDIA_VISIBLE_DEVICES=1")
+		}},
+		{name: "wrong gpu capabilities", mutate: func(i *RunningInspection) {
+			replaceExactEnvironment(i.Process.Environment, "NVIDIA_DRIVER_CAPABILITIES=compute", "NVIDIA_DRIVER_CAPABILITIES=utility")
+		}},
+		{name: "process env order", mutate: func(i *RunningInspection) {
+			i.Process.Environment[0], i.Process.Environment[1] = i.Process.Environment[1], i.Process.Environment[0]
+		}},
 		{name: "socket path", mutate: func(i *RunningInspection) { i.Socket.Path += ".other" }},
 		{name: "not socket", mutate: func(i *RunningInspection) { i.Socket.IsSocket = false }},
 		{name: "socket symlink", mutate: func(i *RunningInspection) { i.Socket.IsSymlink = true }},
@@ -480,7 +495,7 @@ func mustPlan(t *testing.T) *referencePlan {
 func validImageInspection() ImageInspection {
 	return ImageInspection{
 		RequestedReference: ReferenceImageReference,
-		ID:                 ReferenceImageConfigID,
+		ID:                 ReferenceImageManifestDigest,
 		OS:                 "linux",
 		Architecture:       "amd64",
 		ManifestDescriptor: &ManifestDescriptor{Digest: deploy.ReferenceDescriptor().ImageDigest, MediaType: ReferenceManifestMediaType},
@@ -488,6 +503,7 @@ func validImageInspection() ImageInspection {
 			Entrypoint:  []string{"vllm", "serve"},
 			Environment: referenceImageEnvironment(),
 			WorkingDir:  "/vllm-workspace",
+			Labels:      referenceImageLabels(),
 		},
 	}
 }
@@ -496,8 +512,8 @@ func validCreatedInspection(plan *referencePlan, owner ownership) ContainerInspe
 	spec := plan.cloneCreateSpec()
 	return ContainerInspection{
 		ID:                      owner.containerID,
-		ImageID:                 spec.ImageID,
-		ConfiguredImage:         spec.ImageID,
+		ImageID:                 ReferenceImageManifestDigest,
+		ConfiguredImage:         ReferenceImageReference,
 		ImageManifestDescriptor: &ManifestDescriptor{Digest: plan.descriptor.ImageDigest, MediaType: ReferenceManifestMediaType},
 		Platform:                plan.descriptor.Platform,
 		Path:                    spec.Entrypoint[0],
@@ -513,8 +529,10 @@ func validCreatedInspection(plan *referencePlan, owner ownership) ContainerInspe
 		Tmpfs:                   append([]TmpfsMount(nil), spec.Tmpfs...),
 		DeviceRequests:          cloneDeviceRequests(spec.DeviceRequests),
 		NetworkMode:             spec.NetworkMode,
+		NetworkDisabled:         true,
 		ReadOnlyRootFS:          spec.ReadOnlyRootFS,
 		RestartPolicy:           spec.RestartPolicy,
+		LogDriver:               spec.LogDriver,
 		Privileged:              spec.Privileged,
 		TTY:                     spec.TTY,
 		IPCMode:                 spec.IPCMode,
@@ -527,9 +545,22 @@ func validRunningInspection(plan *referencePlan, owner ownership) RunningInspect
 	before := validCreatedInspection(plan, owner)
 	before.State = ContainerState{Status: ContainerStatusRunning, Running: true, PID: 4242}
 	after := cloneContainerInspection(before)
-	processEnvironment := append([]string(nil), plan.create.Environment...)
+	processEnvironment := make([]string, 0, len(plan.create.Environment)+3)
+	for _, entry := range plan.create.Environment {
+		if strings.HasPrefix(entry, "PATH=") {
+			processEnvironment = append(processEnvironment, entry)
+		}
+	}
 	processEnvironment = append(processEnvironment, "HOSTNAME="+plan.create.Hostname)
-	sortStrings(processEnvironment)
+	for _, entry := range plan.create.Environment {
+		if !strings.HasPrefix(entry, "PATH=") {
+			processEnvironment = append(processEnvironment, entry)
+		}
+	}
+	processEnvironment = append(processEnvironment,
+		"NVIDIA_VISIBLE_DEVICES=0",
+		"NVIDIA_DRIVER_CAPABILITIES=compute",
+	)
 	return RunningInspection{
 		Before:  before,
 		Process: ProcessInspection{PID: 4242, Environment: processEnvironment},
@@ -549,6 +580,7 @@ func cloneImageInspection(value ImageInspection) ImageInspection {
 	clone.Config.Environment = append([]string(nil), value.Config.Environment...)
 	clone.Config.ExposedPorts = append([]string(nil), value.Config.ExposedPorts...)
 	clone.Config.Volumes = append([]string(nil), value.Config.Volumes...)
+	clone.Config.Labels = cloneMap(value.Config.Labels)
 	return clone
 }
 
@@ -599,6 +631,15 @@ func replaceEnvironment(environment []string, name, value string) {
 	for index, entry := range environment {
 		if strings.HasPrefix(entry, name+"=") {
 			environment[index] = name + "=" + value
+			return
+		}
+	}
+}
+
+func replaceExactEnvironment(environment []string, old, value string) {
+	for index := range environment {
+		if environment[index] == old {
+			environment[index] = value
 			return
 		}
 	}

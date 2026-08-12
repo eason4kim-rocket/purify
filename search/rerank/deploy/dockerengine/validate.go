@@ -4,7 +4,6 @@ import (
 	"crypto/subtle"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -20,14 +19,15 @@ func ValidateAdmission(controller ControllerInspection, daemon DaemonInspection)
 }
 
 func ValidateReferenceImage(inspection ImageInspection) error {
-	if inspection.RequestedReference != ReferenceImageReference || inspection.ID != ReferenceImageConfigID ||
+	if inspection.RequestedReference != ReferenceImageReference || inspection.ID != ReferenceImageManifestDigest ||
 		inspection.OS != "linux" || inspection.Architecture != "amd64" ||
 		!validManifestDescriptor(inspection.ManifestDescriptor) ||
 		!reflect.DeepEqual(inspection.Config.Entrypoint, []string{"vllm", "serve"}) ||
 		inspection.Config.CmdPresent || len(inspection.Config.Cmd) != 0 ||
 		!reflect.DeepEqual(inspection.Config.Environment, deployReferenceImageEnvironment()) ||
 		inspection.Config.User != "" || inspection.Config.WorkingDir != "/vllm-workspace" ||
-		len(inspection.Config.ExposedPorts) != 0 || len(inspection.Config.Volumes) != 0 {
+		len(inspection.Config.ExposedPorts) != 0 || len(inspection.Config.Volumes) != 0 ||
+		!reflect.DeepEqual(inspection.Config.Labels, referenceImageLabels()) {
 		return ErrImageRejected
 	}
 	return nil
@@ -51,7 +51,7 @@ func (plan *referencePlan) establishOwnership(result CreateResult) (ownership, e
 	}
 	return ownership{
 		containerID: result.ContainerID,
-		labels:      cloneMap(plan.create.Labels),
+		labels:      ownershipLabels(plan.create.Labels),
 	}, nil
 }
 
@@ -97,7 +97,7 @@ func validateFinal(plan *referencePlan, owner ownership, inspection ContainerIns
 func validateContainerStatic(plan *referencePlan, inspection ContainerInspection) bool {
 	spec := plan.create
 	argv := append(append([]string(nil), spec.Entrypoint...), spec.Command...)
-	return inspection.ImageID == ReferenceImageConfigID && inspection.ConfiguredImage == ReferenceImageConfigID &&
+	return inspection.ImageID == ReferenceImageManifestDigest && inspection.ConfiguredImage == ReferenceImageReference &&
 		validManifestDescriptor(inspection.ImageManifestDescriptor) && inspection.Platform == plan.descriptor.Platform &&
 		inspection.Path == argv[0] && reflect.DeepEqual(inspection.Args, argv[1:]) &&
 		inspection.Hostname == spec.Hostname && reflect.DeepEqual(inspection.Entrypoint, spec.Entrypoint) &&
@@ -105,18 +105,28 @@ func validateContainerStatic(plan *referencePlan, inspection ContainerInspection
 		inspection.User == spec.User && inspection.WorkingDir == spec.WorkingDir &&
 		reflect.DeepEqual(inspection.Labels, spec.Labels) && reflect.DeepEqual(inspection.Mounts, spec.Mounts) &&
 		reflect.DeepEqual(inspection.Tmpfs, spec.Tmpfs) && reflect.DeepEqual(inspection.DeviceRequests, spec.DeviceRequests) &&
-		inspection.NetworkMode == NetworkModeNone && inspection.IPCMode == IPCModePrivate &&
+		inspection.NetworkMode == NetworkModeNone && inspection.NetworkDisabled && inspection.IPCMode == IPCModePrivate &&
 		inspection.ShmSizeBytes == spec.ShmSizeBytes && inspection.ReadOnlyRootFS &&
-		inspection.RestartPolicy == RestartPolicyNo && !inspection.Privileged && !inspection.TTY &&
+		inspection.RestartPolicy == RestartPolicyNo && inspection.LogDriver == LogDriverNone && !inspection.Privileged && !inspection.TTY &&
 		len(inspection.ExposedPorts) == 0 && len(inspection.PortBindings) == 0 &&
 		len(inspection.CapAdd) == 0 && len(inspection.Links) == 0
 }
 
 func validateOwnership(owner ownership, containerID string, labels map[string]string) error {
-	if owner.containerID == "" || containerID != owner.containerID || !reflect.DeepEqual(labels, owner.labels) {
+	if owner.containerID == "" || containerID != owner.containerID || !reflect.DeepEqual(ownershipLabels(labels), owner.labels) {
 		return ErrOwnershipLost
 	}
 	return nil
+}
+
+func ownershipLabels(labels map[string]string) map[string]string {
+	projected := make(map[string]string, 4)
+	for _, name := range []string{LabelManaged, LabelComponent, LabelRunID, LabelSpecDigest} {
+		if value, present := labels[name]; present {
+			projected[name] = value
+		}
+	}
+	return projected
 }
 
 func advanceLifecycle(state LifecycleState, owner ownership, event LifecycleEvent) (LifecycleState, error) {
@@ -231,10 +241,37 @@ func equalConfigEnvironment(expected, actual []string) bool {
 }
 
 func equalProcessEnvironment(plan *referencePlan, actual []string) bool {
-	expected := append([]string(nil), plan.create.Environment...)
+	// Moby starts with PATH and HOSTNAME, then applies Config.Env with
+	// ReplaceOrAppendEnvValues. The pinned Config.Env PATH therefore replaces the
+	// first slot in place, HOSTNAME remains second, and all other Config.Env entries
+	// retain their order after it. The legacy NVIDIA driver then appends two entries.
+	// They intentionally duplicate names present in the image baseline. Their
+	// envp position is security-relevant because getenv consumers resolve
+	// duplicate names by order, so the complete sequence is compared exactly.
+	expected := make([]string, 0, len(plan.create.Environment)+3)
+	pathIndex := -1
+	for index, entry := range plan.create.Environment {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok && name == "PATH" {
+			if pathIndex >= 0 {
+				return false
+			}
+			pathIndex = index
+			expected = append(expected, entry)
+		}
+	}
+	if pathIndex < 0 {
+		return false
+	}
 	expected = append(expected, "HOSTNAME="+plan.create.Hostname)
-	sort.Strings(expected)
-	actual = append([]string(nil), actual...)
-	sort.Strings(actual)
+	for index, entry := range plan.create.Environment {
+		if index != pathIndex {
+			expected = append(expected, entry)
+		}
+	}
+	expected = append(expected,
+		"NVIDIA_VISIBLE_DEVICES=0",
+		"NVIDIA_DRIVER_CAPABILITIES=compute",
+	)
 	return equalConfigEnvironment(expected, actual)
 }

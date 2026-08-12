@@ -29,6 +29,7 @@ const (
 	NetworkModeNone = "none"
 	IPCModePrivate  = "private"
 	RestartPolicyNo = "no"
+	LogDriverNone   = "none"
 	MountTypeBind   = "bind"
 
 	LabelManaged    = "purify.managed"
@@ -45,6 +46,7 @@ const (
 	LifecycleActionKill    = "kill"
 	LifecycleActionDie     = "die"
 	LifecycleActionDestroy = "destroy"
+	LifecycleActionArchive = "archive-path"
 )
 
 var (
@@ -53,6 +55,8 @@ var (
 	ErrContainerRejected = errors.New("rerank docker engine: container rejected")
 	ErrOwnershipLost     = errors.New("rerank docker engine: ownership lost")
 	ErrLifecycleDrift    = errors.New("rerank docker engine: lifecycle drift")
+	ErrEngineOperation   = errors.New("rerank docker engine: operation failed")
+	errContainerNotFound = errors.New("rerank docker engine: container not found")
 )
 
 // Engine is intentionally narrower than a general Docker client. In
@@ -60,15 +64,25 @@ var (
 // files into containers. A concrete adapter is added separately from this
 // pure state package.
 type Engine interface {
+	io.Closer
 	InspectDaemon(context.Context) (DaemonInspection, error)
 	InspectImage(context.Context, string) (ImageInspection, error)
 	Create(context.Context, CreateSpec) (CreateResult, error)
 	Start(context.Context, string) error
 	Inspect(context.Context, string) (ContainerInspection, error)
+	InspectOwnership(context.Context, string) (OwnershipInspection, error)
 	// ReadReferenceArchive is restricted by the concrete adapter to the exact
 	// pinned snapshot or template path. It is not a generic container-copy API.
 	ReadReferenceArchive(context.Context, string, string) (io.ReadCloser, error)
-	Events(context.Context, string) (<-chan LifecycleEvent, <-chan error)
+	// ExpectReferenceArchiveEvents registers the exact number of controller-
+	// initiated, owner-bound archive-path events that may be consumed next. The
+	// returned channel closes only after all registered events were observed.
+	ExpectReferenceArchiveEvents(context.Context, string, map[string]string, int) (<-chan struct{}, error)
+	// Events replays owner-bound events at or after sinceUnixNano before
+	// continuing with the live stream. A positive archive acknowledgement is
+	// used as the subscription barrier; event absence is never treated as proof
+	// that a running child has not drifted.
+	Events(context.Context, string, int64) (<-chan LifecycleEvent, <-chan error)
 	Kill(context.Context, string) error
 	Wait(context.Context, string) (WaitResult, error)
 	Remove(context.Context, string) error
@@ -104,6 +118,7 @@ type ImageConfigInspection struct {
 	WorkingDir   string
 	ExposedPorts []string
 	Volumes      []string
+	Labels       map[string]string
 }
 
 type ImageInspection struct {
@@ -168,6 +183,7 @@ type CreateSpec struct {
 	ShmSizeBytes   int64
 	ReadOnlyRootFS bool
 	RestartPolicy  string
+	LogDriver      string
 	Privileged     bool
 	TTY            bool
 	ExposedPorts   []string
@@ -219,10 +235,12 @@ type ContainerInspection struct {
 	Tmpfs                   []TmpfsMount
 	DeviceRequests          []DeviceRequest
 	NetworkMode             string
+	NetworkDisabled         bool
 	IPCMode                 string
 	ShmSizeBytes            int64
 	ReadOnlyRootFS          bool
 	RestartPolicy           string
+	LogDriver               string
 	Privileged              bool
 	TTY                     bool
 	ExposedPorts            []string
@@ -231,6 +249,15 @@ type ContainerInspection struct {
 	Links                   []string
 	RestartCount            int
 	State                   ContainerState
+}
+
+// OwnershipInspection is the only raw Docker projection used to authorize
+// destructive cleanup after a full static inspection has failed. It contains
+// no environment, argv, mount, or other operator-controlled detail.
+type OwnershipInspection struct {
+	ID     string
+	Labels map[string]string
+	State  ContainerState
 }
 
 type ProcessInspection struct {

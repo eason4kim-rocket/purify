@@ -37,7 +37,7 @@ func newRunningEvidence(plan *referencePlan, owner ownership, image ImageInspect
 		runID:               plan.create.Labels[LabelRunID],
 		specDigest:          plan.specDigest,
 		imageDigest:         plan.descriptor.ImageDigest,
-		imageConfigID:       image.ID,
+		imageConfigID:       plan.descriptor.ImageConfigID,
 		platform:            plan.descriptor.Platform,
 		environmentDigest:   digest,
 		redactedEnvironment: redacted,

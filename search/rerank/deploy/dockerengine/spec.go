@@ -20,8 +20,9 @@ const (
 	maximumSecretBytes          = 16 << 10
 )
 
-// ReferenceImageReference is the only reference accepted for pre-inspection.
-// Create itself uses the independently pinned image config ID.
+// ReferenceImageReference is the only reference accepted for pre-inspection
+// and create. The containerd image store resolves this named child-manifest
+// digest; the manifest itself binds the independently pinned config digest.
 const ReferenceImageReference = ReferenceImageRepository + "@" + ReferenceImageManifestDigest
 
 type generatedInputs struct {
@@ -52,17 +53,13 @@ func buildReferencePlan(descriptor deploy.Descriptor, paths HostPaths, generated
 		return nil, ErrAdmissionRejected
 	}
 	create := CreateSpec{
-		ImageID:     ReferenceImageConfigID,
+		ImageID:     ReferenceImageReference,
 		Hostname:    "purify-r6a-" + generated.RunID,
 		Entrypoint:  append([]string(nil), argv[:2]...),
 		Command:     append([]string(nil), argv[2:]...),
 		Environment: environment,
 		WorkingDir:  "/vllm-workspace",
-		Labels: map[string]string{
-			LabelManaged:   "true",
-			LabelComponent: ReferenceComponent,
-			LabelRunID:     generated.RunID,
-		},
+		Labels:      referenceImageLabels(),
 		Mounts: []Mount{
 			{Type: MountTypeBind, Source: paths.SnapshotDir, Destination: ReferenceSnapshotPath, ReadOnly: true},
 			{Type: MountTypeBind, Source: paths.TemplateFile, Destination: ReferenceTemplatePath, ReadOnly: true},
@@ -75,7 +72,11 @@ func buildReferencePlan(descriptor deploy.Descriptor, paths HostPaths, generated
 		ShmSizeBytes:   1 << 30,
 		ReadOnlyRootFS: true,
 		RestartPolicy:  RestartPolicyNo,
+		LogDriver:      LogDriverNone,
 	}
+	create.Labels[LabelManaged] = "true"
+	create.Labels[LabelComponent] = ReferenceComponent
+	create.Labels[LabelRunID] = generated.RunID
 	digest, err := digestCreateSpec(create)
 	if err != nil {
 		return nil, ErrAdmissionRejected
@@ -87,6 +88,21 @@ func buildReferencePlan(descriptor deploy.Descriptor, paths HostPaths, generated
 		specDigest: digest,
 		apiKey:     generated.APIKey,
 	}, nil
+}
+
+func referenceImageLabels() map[string]string {
+	return map[string]string{
+		"ai.vllm.build.commit":              "91df0fad4dc98a67c7659d9dbd915245d5c43d96",
+		"ai.vllm.build.pipeline":            "019d130e-464e-4ff7-b84b-492992c0c06b",
+		"ai.vllm.build.url":                 "https://buildkite.com/vllm/release-v2/builds/2657",
+		"ai.vllm.image.tag":                 "vllm/vllm-openai:v0.23.0",
+		"maintainer":                        "NVIDIA CORPORATION <cudatools@nvidia.com>",
+		"org.opencontainers.image.ref.name": "ubuntu",
+		"org.opencontainers.image.revision": "91df0fad4dc98a67c7659d9dbd915245d5c43d96",
+		"org.opencontainers.image.source":   "https://github.com/vllm-project/vllm",
+		"org.opencontainers.image.url":      "https://buildkite.com/vllm/release-v2/builds/2657",
+		"org.opencontainers.image.version":  "vllm/vllm-openai:v0.23.0",
+	}
 }
 
 func (plan *referencePlan) cloneCreateSpec() CreateSpec {
