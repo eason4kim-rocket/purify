@@ -280,6 +280,40 @@ func (journal *recoveryJournal) remove(current recoveryRecord) error {
 	return nil
 }
 
+// removeCreating is the only path that may delete a creating record. It is
+// reserved for an explicit operator abandon. Automatic recovery must keep
+// using remove, which still rejects creating.
+func (journal *recoveryJournal) removeCreating(current recoveryRecord) error {
+	if journal == nil || !validRecoveryRecord(current) || current.State != recoveryStateCreating || current.ContainerID != "" {
+		return errRecoveryJournal
+	}
+	journal.mu.Lock()
+	defer journal.mu.Unlock()
+	root, err := journal.openLeasedRoot()
+	if err != nil {
+		return errRecoveryJournal
+	}
+	defer root.Close()
+	records, err := readRecoveryRecords(root, journal.expectedUID)
+	if err != nil {
+		return errRecoveryJournal
+	}
+	stored, present := findRecoveryRecord(records, current.RunID)
+	if !present || stored != current || root.Remove(recoveryFilename(current.RunID)) != nil ||
+		syncRecoveryDirectory(root) != nil {
+		return errRecoveryJournal
+	}
+	if _, err := root.Lstat(recoveryFilename(current.RunID)); !errors.Is(err, os.ErrNotExist) {
+		return errRecoveryJournal
+	}
+	if _, err := readRecoveryRecords(root, journal.expectedUID); err != nil ||
+		!validRecoveryRootHandle(root, journal.root, journal.expectedUID) ||
+		!validRecoveryAncestors(filepath.Dir(journal.root), journal.expectedUID) {
+		return errRecoveryJournal
+	}
+	return nil
+}
+
 func (journal *recoveryJournal) replace(current *recoveryRecord, next recoveryRecord) error {
 	if journal == nil || !validRecoveryRecord(next) || current != nil && (!validRecoveryRecord(*current) || current.RunID != next.RunID) {
 		return errRecoveryJournal
