@@ -17,10 +17,10 @@ services:
       PURIFY_AUTH_ENABLED: "true"
       PURIFY_API_KEYS: "${PURIFY_API_KEYS}"
       # ── Rate limit ──
-      # Burst must cover the most expensive weighted request or its
-      # capability gate stays closed: search 22, answer 17, watch 1.
+      # Search is registered at burst >=1, while individual weighted requests
+      # still require enough tokens (maximum trust Search 59; legacy max 22).
       PURIFY_RATE_RPS: "5"
-      PURIFY_RATE_BURST: "30"
+      PURIFY_RATE_BURST: "59"
       # ── Search provider (empty leaves search/answer/watch disabled) ──
       PURIFY_SEARCH_BRAVE_KEY: "${PURIFY_SEARCH_BRAVE_KEY:-}"
       # ── Process-owned metadata reranker (default-off; no sidecar here) ──

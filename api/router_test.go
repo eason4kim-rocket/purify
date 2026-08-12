@@ -129,6 +129,23 @@ func (service *routerAnswerService) Answer(_ context.Context, _ *models.AnswerRe
 
 func (service *routerSearchService) Search(_ context.Context, request *models.SearchRequest) (*models.SearchResponse, error) {
 	service.calls++
+	resolved := models.ResolveSearchDefaults(request.Ranking, request.Limit, request.Timeout)
+	if resolved.Ranking == models.SearchRankingTrust {
+		return nil, models.NewScrapeError(models.ErrCodeSearchUnavailable, "search is unavailable", nil)
+	}
+	if resolved.Ranking == models.SearchRankingRelevance {
+		zero := int64(0)
+		return &models.SearchResponse{
+			Success: true,
+			Query:   request.Query,
+			Results: []models.SearchResult{},
+			Timing:  models.SearchTimingInfo{RerankMs: &zero},
+			Ranking: &models.SearchResponseRanking{
+				Mode:   models.SearchRankingRelevance,
+				Status: models.SearchRankingApplied,
+			},
+		}, nil
+	}
 	return &models.SearchResponse{
 		Success: true,
 		Query:   request.Query,
@@ -315,46 +332,80 @@ func TestSearchRouteIsAlwaysProtectedAndFailsClosedWithoutOption(t *testing.T) {
 	}
 }
 
-func TestSearchCapabilityRequiresAuthUsableKeyAndMaximumCostBurst(t *testing.T) {
+func TestSearchCapabilityRequiresAuthUsableKeyAndMinimumCostBurst(t *testing.T) {
 	tests := []struct {
 		name       string
 		auth       config.AuthConfig
 		burst      int
 		header     string
+		body       string
 		wantStatus int
 		wantCalls  int
+		cheapAfter bool
 	}{
 		{
 			name:       "auth disabled",
 			auth:       config.AuthConfig{Enabled: false, APIKeys: []string{"required-secret"}},
 			burst:      handler.MaxSearchRequestCost,
+			body:       `{"query":"purify"}`,
 			wantStatus: http.StatusServiceUnavailable,
 		},
 		{
 			name:       "no keys",
 			auth:       config.AuthConfig{Enabled: true},
 			burst:      handler.MaxSearchRequestCost,
+			body:       `{"query":"purify"}`,
 			wantStatus: http.StatusServiceUnavailable,
 		},
 		{
 			name:       "blank keys",
 			auth:       config.AuthConfig{Enabled: true, APIKeys: []string{"", " \t"}},
 			burst:      handler.MaxSearchRequestCost,
+			body:       `{"query":"purify"}`,
 			wantStatus: http.StatusServiceUnavailable,
 		},
 		{
-			name:       "burst N minus one",
+			name:       "burst zero",
 			auth:       config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
-			burst:      handler.MaxSearchRequestCost - 1,
+			burst:      0,
 			header:     "required-secret",
+			body:       `{"query":"purify"}`,
 			wantStatus: http.StatusServiceUnavailable,
 		},
 		{
-			name:       "safe exact boundary",
+			name:       "minimum burst",
+			auth:       config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+			burst:      1,
+			header:     "required-secret",
+			body:       `{"query":"purify"}`,
+			wantStatus: http.StatusOK,
+			wantCalls:  1,
+		},
+		{
+			name:       "legacy maximum burst",
+			auth:       config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+			burst:      22,
+			header:     "required-secret",
+			body:       `{"query":"purify","limit":20,"include_content":true,"verify":true,"schema":{"type":"object"}}`,
+			wantStatus: http.StatusOK,
+			wantCalls:  1,
+		},
+		{
+			name:       "below maximum rejects request not capability",
+			auth:       config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+			burst:      58,
+			header:     "required-secret",
+			body:       `{"query":"purify","ranking":"trust","expected_subject":{"name":"purify"},"include_content":true,"verify":true,"schema":{"type":"object"}}`,
+			wantStatus: http.StatusTooManyRequests,
+			cheapAfter: true,
+		},
+		{
+			name:       "maximum request boundary",
 			auth:       config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
 			burst:      handler.MaxSearchRequestCost,
 			header:     "required-secret",
-			wantStatus: http.StatusOK,
+			body:       `{"query":"purify","ranking":"trust","expected_subject":{"name":"purify"},"include_content":true,"verify":true,"schema":{"type":"object"}}`,
+			wantStatus: http.StatusServiceUnavailable,
 			wantCalls:  1,
 		},
 	}
@@ -368,9 +419,7 @@ func TestSearchCapabilityRequiresAuthUsableKeyAndMaximumCostBurst(t *testing.T) 
 			service := &routerSearchService{}
 			router := NewRouterWithOptions(nil, nil, nil, cfg, cache.New(1), time.Now(), nil, nil, nil, nil, nil,
 				WithSearchService(service))
-			request := httptest.NewRequest(http.MethodPost, "/api/v1/search", bytes.NewBufferString(
-				`{"query":"purify","limit":20,"include_content":true,"verify":true,"schema":{"type":"object"}}`,
-			))
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/search", bytes.NewBufferString(test.body))
 			request.Header.Set("Content-Type", "application/json")
 			if test.header != "" {
 				request.Header.Set("X-API-Key", test.header)
@@ -391,7 +440,53 @@ func TestSearchCapabilityRequiresAuthUsableKeyAndMaximumCostBurst(t *testing.T) 
 				(response.Error == nil || response.Error.Code != models.ErrCodeSearchUnavailable) {
 				t.Fatalf("fail-closed response = %#v", response)
 			}
+			if test.wantStatus == http.StatusTooManyRequests &&
+				(response.Error == nil || response.Error.Code != models.ErrCodeRateLimited) {
+				t.Fatalf("rate-limited response = %#v", response)
+			}
+			if test.cheapAfter {
+				cheap := httptest.NewRequest(http.MethodPost, "/api/v1/search", bytes.NewBufferString(`{"query":"purify"}`))
+				cheap.Header.Set("Content-Type", "application/json")
+				cheap.Header.Set("X-API-Key", test.header)
+				cheapResponse := httptest.NewRecorder()
+				router.ServeHTTP(cheapResponse, cheap)
+				if cheapResponse.Code != http.StatusOK || service.calls != 1 {
+					t.Fatalf("cheap request after rejected precharge = %d calls=%d body=%s", cheapResponse.Code, service.calls, cheapResponse.Body)
+				}
+			}
 		})
+	}
+}
+
+func TestMinimumSearchBurstDoesNotEnableAnswerCapability(t *testing.T) {
+	cfg := &config.Config{
+		Server:    config.ServerConfig{Mode: "test"},
+		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+		RateLimit: config.RateLimitConfig{RequestsPerSecond: 0, Burst: handler.MinSearchRequestCost},
+	}
+	searchService := &routerSearchService{}
+	answerService := &routerAnswerService{}
+	router := NewRouterWithOptions(nil, nil, nil, cfg, cache.New(1), time.Now(), nil, nil, nil, nil, nil,
+		WithSearchService(searchService), WithAnswerService(answerService))
+
+	searchRequest := httptest.NewRequest(http.MethodPost, "/api/v1/search", bytes.NewBufferString(`{"query":"purify"}`))
+	searchRequest.Header.Set("Content-Type", "application/json")
+	searchRequest.Header.Set("X-API-Key", "required-secret")
+	searchResponse := httptest.NewRecorder()
+	router.ServeHTTP(searchResponse, searchRequest)
+	if searchResponse.Code != http.StatusOK || searchService.calls != 1 {
+		t.Fatalf("minimum-burst Search status/calls = %d/%d; body=%s", searchResponse.Code, searchService.calls, searchResponse.Body)
+	}
+
+	answerRequest := httptest.NewRequest(http.MethodPost, "/api/v1/answer", bytes.NewBufferString(
+		`{"spec":{"subject":"purify","predicate":"price"}}`,
+	))
+	answerRequest.Header.Set("Content-Type", "application/json")
+	answerRequest.Header.Set("X-API-Key", "required-secret")
+	answerResponse := httptest.NewRecorder()
+	router.ServeHTTP(answerResponse, answerRequest)
+	if answerResponse.Code != http.StatusServiceUnavailable || answerService.calls != 0 {
+		t.Fatalf("minimum-burst Answer status/calls = %d/%d; body=%s", answerResponse.Code, answerService.calls, answerResponse.Body)
 	}
 }
 
@@ -405,16 +500,17 @@ func TestSearchRouterOptionUsesSharedBucketWithoutDoubleCharge(t *testing.T) {
 	router := NewRouterWithOptions(nil, nil, nil, cfg, cache.New(1), time.Now(), nil, nil, nil, nil, nil,
 		WithSearchService(service))
 
-	// The maximum Search request costs exactly 22. It succeeds with a burst of
-	// 22; any preceding fixed Search charge would make this request fail.
+	// The maximum Search request costs exactly 59. It is admitted and charged
+	// with that burst, then reaches the still-unavailable trust capability;
+	// any preceding fixed Search charge would make admission fail instead.
 	searchRequest := httptest.NewRequest(http.MethodPost, "/api/v1/search", bytes.NewBufferString(
-		`{"query":"purify","limit":20,"include_content":true,"verify":true,"schema":{"type":"object"}}`,
+		`{"query":"purify","ranking":"trust","expected_subject":{"name":"purify"},"include_content":true,"verify":true,"schema":{"type":"object"}}`,
 	))
 	searchRequest.Header.Set("Content-Type", "application/json")
 	searchRequest.Header.Set("X-API-Key", "required-secret")
 	searchResponse := httptest.NewRecorder()
 	router.ServeHTTP(searchResponse, searchRequest)
-	if searchResponse.Code != http.StatusOK || service.calls != 1 {
+	if searchResponse.Code != http.StatusServiceUnavailable || service.calls != 1 {
 		t.Fatalf("search status/calls = %d/%d, body=%s", searchResponse.Code, service.calls, searchResponse.Body)
 	}
 

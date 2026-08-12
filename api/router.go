@@ -176,7 +176,7 @@ func NewRouterWithOptions(sc *scraper.Scraper, extractService handler.ExtractSer
 }
 
 func searchCapabilityEnabled(cfg *config.Config) bool {
-	if cfg == nil || !cfg.Auth.Enabled || cfg.RateLimit.Burst < handler.MaxSearchRequestCost {
+	if cfg == nil || !cfg.Auth.Enabled || cfg.RateLimit.Burst < handler.MinSearchRequestCost {
 		return false
 	}
 	for _, key := range cfg.Auth.APIKeys {

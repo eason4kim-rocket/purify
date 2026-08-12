@@ -121,14 +121,9 @@ func TestNewManagedSearchRuntimeUnsafeCapabilityGateIsInert(t *testing.T) {
 			burst: handler.MaxSearchRequestCost,
 		},
 		{
-			name:  "burst N minus one",
+			name:  "burst zero",
 			auth:  config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
-			burst: handler.MaxSearchRequestCost - 1,
-		},
-		{
-			name:  "historical default burst",
-			auth:  config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
-			burst: 10,
+			burst: 0,
 		},
 	}
 	for _, test := range tests {
@@ -149,6 +144,58 @@ func TestNewManagedSearchRuntimeUnsafeCapabilityGateIsInert(t *testing.T) {
 	}
 }
 
+func TestManagedSearchCapabilityUsesMinimumPositiveBurst(t *testing.T) {
+	for _, test := range []struct {
+		burst int
+		want  bool
+	}{
+		{burst: 0, want: false},
+		{burst: 1, want: true},
+		{burst: 22, want: true},
+		{burst: 58, want: true},
+		{burst: 59, want: true},
+	} {
+		cfg := &config.Config{
+			Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+			RateLimit: config.RateLimitConfig{Burst: test.burst},
+		}
+		if got := managedSearchCapabilityEnabled(cfg); got != test.want {
+			t.Fatalf("managedSearchCapabilityEnabled(burst=%d) = %t, want %t", test.burst, got, test.want)
+		}
+	}
+}
+
+func TestManagedAnswerCapabilityKeepsItsIndependentBurstBoundary(t *testing.T) {
+	for _, test := range []struct {
+		burst int
+		want  bool
+	}{
+		{burst: 0, want: false},
+		{burst: 1, want: false},
+		{burst: handler.MaxAnswerRequestCost - 1, want: false},
+		{burst: handler.MaxAnswerRequestCost, want: true},
+		{burst: 22, want: true},
+		{burst: 59, want: true},
+	} {
+		cfg := &config.Config{
+			Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+			RateLimit: config.RateLimitConfig{Burst: test.burst},
+		}
+		if got := managedAnswerCapabilityEnabled(cfg); got != test.want {
+			t.Fatalf("managedAnswerCapabilityEnabled(burst=%d) = %t, want %t", test.burst, got, test.want)
+		}
+	}
+	for _, cfg := range []*config.Config{
+		nil,
+		{Auth: config.AuthConfig{Enabled: false, APIKeys: []string{"required-secret"}}, RateLimit: config.RateLimitConfig{Burst: 59}},
+		{Auth: config.AuthConfig{Enabled: true, APIKeys: []string{"", " \t"}}, RateLimit: config.RateLimitConfig{Burst: 59}},
+	} {
+		if managedAnswerCapabilityEnabled(cfg) {
+			t.Fatalf("unsafe Answer capability enabled for %#v", cfg)
+		}
+	}
+}
+
 func TestManagedSearchRuntimeConstructsWithoutNetworkAndClosesConcurrently(t *testing.T) {
 	resolver := &recordingSearchResolver{}
 	var dialCalls atomic.Int64
@@ -162,7 +209,7 @@ func TestManagedSearchRuntimeConstructsWithoutNetworkAndClosesConcurrently(t *te
 	cfg := &config.Config{
 		Search:    config.SearchConfig{BraveKey: "process-key"},
 		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
-		RateLimit: config.RateLimitConfig{Burst: handler.MaxSearchRequestCost},
+		RateLimit: config.RateLimitConfig{Burst: handler.MinSearchRequestCost},
 	}
 	runtime, err := newManagedSearchRuntime(cfg, policy, nil, nil)
 	if err != nil {

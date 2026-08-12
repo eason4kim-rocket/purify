@@ -39,10 +39,27 @@ func validateManagedSearchConfig(cfg config.SearchConfig) error {
 
 // managedSearchCapabilityEnabled mirrors the router's fail-closed Search
 // capability gate. Keeping the production runtime behind the same auth,
-// effective-key, and maximum-cost burst boundary ensures an unavailable route
-// never retains provider state or its process-owned credential.
+// effective-key, and minimum positive burst boundary ensures an unavailable
+// route never retains provider state or its process-owned credential. Costlier
+// requests remain gated independently by the shared limiter.
 func managedSearchCapabilityEnabled(cfg *config.Config) bool {
-	if cfg == nil || !cfg.Auth.Enabled || cfg.RateLimit.Burst < handler.MaxSearchRequestCost {
+	if cfg == nil || !cfg.Auth.Enabled || cfg.RateLimit.Burst < handler.MinSearchRequestCost {
+		return false
+	}
+	for _, key := range cfg.Auth.APIKeys {
+		if strings.TrimSpace(key) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// managedAnswerCapabilityEnabled keeps the in-process Answer/Watch dependency
+// graph behind Answer's own fixed admission boundary. Lowering Search's route
+// gate to one token must not implicitly enable an internal Answer core that
+// the public router would reject.
+func managedAnswerCapabilityEnabled(cfg *config.Config) bool {
+	if cfg == nil || !cfg.Auth.Enabled || cfg.RateLimit.Burst < handler.MaxAnswerRequestCost {
 		return false
 	}
 	for _, key := range cfg.Auth.APIKeys {

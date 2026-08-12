@@ -877,7 +877,7 @@ All configuration via environment variables:
 | `PURIFY_PROXY` | — | Explicit outbound proxy; ambient `HTTP_PROXY`/`HTTPS_PROXY` variables are ignored |
 | `PURIFY_DEFAULT_TIMEOUT` | `30s` | Default scrape timeout |
 | `PURIFY_RATE_RPS` | `5` | Rate limit (requests/sec/key) |
-| `PURIFY_RATE_BURST` | `10` | Rate limit burst |
+| `PURIFY_RATE_BURST` | `10` | Per-identity token burst; `>=1` exposes baseline Search, while each request still needs its full weighted cost (22 legacy maximum, 59 maximum opt-in trust request). The Compose example uses `59`. |
 | `PURIFY_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `PURIFY_DATA_DIR` | `./data` | Durable snapshots, signing key, SQLite verification ledger, and webhook outbox |
 | `PURIFY_SNAPSHOT_ENABLED` | `true` | Persist content-addressed HTML snapshots |

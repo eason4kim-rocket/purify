@@ -341,10 +341,11 @@ func run() error {
 
 	// ── 4g. Initialise the belief-mode Answer service ────────────────
 	// Answer composes fresh Search baselines with multi-source consensus
-	// extraction, so it requires both capabilities and fails closed otherwise.
+	// extraction, so it requires both capabilities and its own admission burst;
+	// lowering Search's baseline gate must not implicitly enable Answer/Watch.
 	var answerService handler.AnswerService
 	var answerCore *answerdomain.Service
-	if managedSearch != nil && safeProxyURL != "" {
+	if managedSearch != nil && safeProxyURL != "" && managedAnswerCapabilityEnabled(cfg) {
 		composedAnswer, answerErr := answerdomain.NewService(managedSearch.service, extractService)
 		if answerErr != nil {
 			return fmt.Errorf("initialise answer service: %w", answerErr)
