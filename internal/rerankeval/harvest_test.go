@@ -109,6 +109,44 @@ func TestEmitHarvestHonorsCancelBeforeFetch(t *testing.T) {
 	}
 }
 
+func TestCommittedHarvestSeedsEmitTheFrozenConstructionCorpus(t *testing.T) {
+	seeds, err := LoadHarvestSeeds(filepath.Join("..", "..", "scripts", "rerankharvest", "seeds.json"))
+	if err != nil {
+		t.Fatalf("LoadHarvestSeeds() error = %v", err)
+	}
+	if seeds.Baseline != HarvestBaselineSeedOrder || len(seeds.Cases) < MinimumCases {
+		t.Fatalf("seeds baseline=%q cases=%d", seeds.Baseline, len(seeds.Cases))
+	}
+	casesOutput, docsOutput, err := EmitHarvest(context.Background(), seeds, nil)
+	if err != nil {
+		t.Fatalf("EmitHarvest() error = %v", err)
+	}
+	wantCases, err := os.ReadFile(filepath.Join("testdata", "construction", "cases.jsonl"))
+	if err != nil {
+		t.Fatalf("read cases.jsonl: %v", err)
+	}
+	wantDocs, err := os.ReadFile(filepath.Join("testdata", "construction", "docs.jsonl"))
+	if err != nil {
+		t.Fatalf("read docs.jsonl: %v", err)
+	}
+	if string(casesOutput) != string(wantCases) || string(docsOutput) != string(wantDocs) {
+		t.Fatal("committed construction corpus does not match a fresh seed-order emit")
+	}
+	casesPath := writeTempFile(t, "cases.jsonl", casesOutput)
+	docsPath := writeTempFile(t, "docs.jsonl", docsOutput)
+	_, documents, caseIDs, err := loadLabelingInputs(casesPath, docsPath)
+	if err != nil {
+		t.Fatalf("loadLabelingInputs() error = %v", err)
+	}
+	candidates := 0
+	for _, caseID := range caseIDs {
+		candidates += len(documents[caseID].candidates)
+	}
+	if len(caseIDs) < MinimumCases || candidates < MinimumCandidates {
+		t.Fatalf("construction size cases=%d candidates=%d", len(caseIDs), candidates)
+	}
+}
+
 func TestLoadHarvestSeedsReadsFileAndRejectsDuplicates(t *testing.T) {
 	t.Parallel()
 	path := writeTempFile(t, "seeds.json", marshalHarvestSeeds(t, validHarvestSeedFile(t)))
