@@ -1514,27 +1514,44 @@ func TestHandleSearchWebEnforcesRelevanceResultOrder(t *testing.T) {
 	}
 }
 
-func TestHandleSearchWebRejectsEverySuccessfulTrustResponse(t *testing.T) {
-	responses := []models.SearchResponse{validSearchResponse(), validRelevanceSearchResponse()}
-	for index, response := range responses {
-		t.Run(fmt.Sprintf("shape %d", index), func(t *testing.T) {
-			body, err := json.Marshal(response)
-			if err != nil {
-				t.Fatal(err)
-			}
-			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-				return httpResponse(http.StatusOK, body), nil
-			})}
-			result, protocolErr := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")(
-				context.Background(), searchRequest(map[string]any{
-					"query": "purify search", "ranking": "trust",
-					"expected_subject": map[string]any{"name": "Purify"},
-				}),
-			)
-			if protocolErr != nil || !result.IsError || !strings.Contains(toolResultText(t, result), "trust ranking is unavailable") {
-				t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
-			}
-		})
+func TestHandleSearchWebAcceptsTrustEnvelopeAndRejectsWrongMode(t *testing.T) {
+	valid := validRelevanceSearchResponse()
+	valid.Ranking.Mode = models.SearchRankingTrust
+	zero := int64(0)
+	valid.Timing.TrustMs = &zero
+	body, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return httpResponse(http.StatusOK, body), nil
+	})}
+	result, protocolErr := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")(
+		context.Background(), searchRequest(map[string]any{
+			"query": "purify search", "ranking": "trust",
+			"expected_subject": map[string]any{"name": "Purify"},
+		}),
+	)
+	if protocolErr != nil || result.IsError {
+		t.Fatalf("valid trust rejected: %#v, %v", result, protocolErr)
+	}
+
+	wrong := validSearchResponse()
+	wrongBody, err := json.Marshal(wrong)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return httpResponse(http.StatusOK, wrongBody), nil
+	})}
+	result, protocolErr = handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")(
+		context.Background(), searchRequest(map[string]any{
+			"query": "purify search", "ranking": "trust",
+			"expected_subject": map[string]any{"name": "Purify"},
+		}),
+	)
+	if protocolErr != nil || !result.IsError {
+		t.Fatalf("provider envelope accepted as trust: %#v", result)
 	}
 }
 

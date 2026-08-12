@@ -1956,7 +1956,60 @@ func validateSearchRankingForRequest(response models.SearchResponse, ranking mod
 		}
 		return nil
 	case models.SearchRankingTrust:
-		return fmt.Errorf("trust ranking is unavailable")
+		if response.Ranking == nil || response.Ranking.Mode != models.SearchRankingTrust ||
+			response.Timing.RerankMs == nil || response.Timing.TrustMs == nil {
+			return fmt.Errorf("trust response has an invalid ranking envelope")
+		}
+		switch response.Ranking.Status {
+		case models.SearchRankingApplied, models.SearchRankingPartial:
+			if response.Ranking.DegradedReason != "" {
+				return fmt.Errorf("trust applied response contains a degraded reason")
+			}
+			if response.Ranking.Status == models.SearchRankingPartial && response.Ranking.FailedPages < 1 {
+				return fmt.Errorf("trust partial response has no failed pages")
+			}
+			seenProviderRanks := make(map[int]struct{}, len(response.Results))
+			seenLeaders := make(map[string]struct{}, len(response.Results))
+			for index, result := range response.Results {
+				if result.Ranking == nil || result.Ranking.RelevanceScore == nil {
+					return fmt.Errorf("trust applied response has an invalid result ranking")
+				}
+				if _, duplicate := seenProviderRanks[result.Ranking.ProviderRank]; duplicate {
+					return fmt.Errorf("trust applied response contains a duplicate provider rank")
+				}
+				seenProviderRanks[result.Ranking.ProviderRank] = struct{}{}
+				if result.Ranking.Independence != nil && result.Ranking.Independence.ComponentLeader {
+					if _, duplicate := seenLeaders[result.Ranking.Independence.ComponentID]; duplicate {
+						return fmt.Errorf("trust applied response has two leaders for one component")
+					}
+					seenLeaders[result.Ranking.Independence.ComponentID] = struct{}{}
+				}
+				if index > 0 && !searchRelevanceResultBefore(response.Results[index-1], result) {
+					// Trust bucket order is allowed to break global relevance order.
+					continue
+				}
+			}
+		case models.SearchRankingDegraded:
+			switch response.Ranking.DegradedReason {
+			case models.SearchRankingReasonRerankerFailed:
+				for _, result := range response.Results {
+					if result.Ranking != nil {
+						return fmt.Errorf("trust reranker-failed response contains result ranking")
+					}
+				}
+			case models.SearchRankingReasonTrustUnavailable:
+				for _, result := range response.Results {
+					if result.Ranking == nil || result.Ranking.RelevanceScore == nil {
+						return fmt.Errorf("trust-unavailable response is missing relevance diagnostics")
+					}
+				}
+			default:
+				return fmt.Errorf("trust degraded response has an invalid reason")
+			}
+		default:
+			return fmt.Errorf("trust response has an invalid status")
+		}
+		return nil
 	default:
 		return fmt.Errorf("response request ranking is invalid")
 	}
@@ -1979,7 +2032,7 @@ func validateSearchResponseRanking(ranking models.SearchResponseRanking, raw jso
 	if err != nil {
 		return err
 	}
-	if err := rejectUnsupportedJSONFields(fields, "response ranking", "mode", "status", "degraded_reason", "candidate_count"); err != nil {
+	if err := rejectUnsupportedJSONFields(fields, "response ranking", "mode", "status", "degraded_reason", "candidate_count", "attempted_pages", "evaluated_pages", "effective_sources", "failed_pages"); err != nil {
 		return err
 	}
 	if err := requirePresentJSONFields(fields, "response ranking", "mode", "status", "candidate_count"); err != nil {
@@ -1995,14 +2048,25 @@ func validateSearchResponseRanking(ranking models.SearchResponseRanking, raw jso
 	} else if _, present := fields["degraded_reason"]; present || ranking.DegradedReason != "" {
 		return fmt.Errorf("non-degraded response ranking contains degraded_reason")
 	}
-	if ranking.Mode != models.SearchRankingRelevance {
+	switch ranking.Mode {
+	case models.SearchRankingRelevance:
+		if ranking.Status != models.SearchRankingApplied && ranking.Status != models.SearchRankingDegraded {
+			return fmt.Errorf("relevance response ranking has an invalid status")
+		}
+		if ranking.Status == models.SearchRankingDegraded && ranking.DegradedReason != models.SearchRankingReasonRerankerFailed {
+			return fmt.Errorf("relevance response ranking has an invalid degraded reason")
+		}
+	case models.SearchRankingTrust:
+		if ranking.Status != models.SearchRankingApplied && ranking.Status != models.SearchRankingPartial && ranking.Status != models.SearchRankingDegraded {
+			return fmt.Errorf("trust response ranking has an invalid status")
+		}
+		if ranking.Status == models.SearchRankingDegraded &&
+			ranking.DegradedReason != models.SearchRankingReasonRerankerFailed &&
+			ranking.DegradedReason != models.SearchRankingReasonTrustUnavailable {
+			return fmt.Errorf("trust response ranking has an invalid degraded reason")
+		}
+	default:
 		return fmt.Errorf("response ranking has an invalid mode")
-	}
-	if ranking.Status != models.SearchRankingApplied && ranking.Status != models.SearchRankingDegraded {
-		return fmt.Errorf("relevance response ranking has an invalid status")
-	}
-	if ranking.Status == models.SearchRankingDegraded && ranking.DegradedReason != models.SearchRankingReasonRerankerFailed {
-		return fmt.Errorf("relevance response ranking has an invalid degraded reason")
 	}
 	return nil
 }
@@ -2036,7 +2100,7 @@ func validateSearchTiming(timing models.SearchTimingInfo, raw json.RawMessage) e
 	if err != nil {
 		return err
 	}
-	if err := rejectUnsupportedJSONFields(fields, "response timing", "total_ms", "provider_ms", "enrichment_ms", "rerank_ms"); err != nil {
+	if err := rejectUnsupportedJSONFields(fields, "response timing", "total_ms", "provider_ms", "enrichment_ms", "rerank_ms", "trust_ms"); err != nil {
 		return err
 	}
 	if err := requirePresentJSONFields(fields, "response timing", "total_ms", "provider_ms", "enrichment_ms"); err != nil {
@@ -2053,6 +2117,20 @@ func validateSearchTiming(timing models.SearchTimingInfo, raw json.RawMessage) e
 			return fmt.Errorf("response timing rerank_ms is invalid")
 		}
 		additional = *timing.RerankMs
+	}
+	rawTrust, trustPresent := fields["trust_ms"]
+	if timing.TrustMs == nil {
+		if trustPresent {
+			return fmt.Errorf("response timing trust_ms must not be null")
+		}
+	} else {
+		if !trustPresent || bytes.Equal(bytes.TrimSpace(rawTrust), []byte("null")) || *timing.TrustMs < 0 {
+			return fmt.Errorf("response timing trust_ms is invalid")
+		}
+		if additional > math.MaxInt64-*timing.TrustMs {
+			return fmt.Errorf("response timing must be non-negative")
+		}
+		additional += *timing.TrustMs
 	}
 	if timing.TotalMs < 0 || timing.ProviderMs < 0 || timing.EnrichmentMs < 0 ||
 		timing.ProviderMs > math.MaxInt64-timing.EnrichmentMs || timing.ProviderMs+timing.EnrichmentMs > math.MaxInt64-additional ||
@@ -2183,7 +2261,7 @@ func validateSearchResultRanking(ranking *models.SearchResultRanking, raw json.R
 	if err != nil {
 		return err
 	}
-	if err := rejectUnsupportedJSONFields(fields, name, "provider_rank", "relevance_score"); err != nil {
+	if err := rejectUnsupportedJSONFields(fields, name, "provider_rank", "relevance_score", "entity", "independence"); err != nil {
 		return err
 	}
 	if err := requirePresentJSONFields(fields, name, "provider_rank"); err != nil {
