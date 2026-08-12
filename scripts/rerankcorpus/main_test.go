@@ -253,11 +253,12 @@ func writeRecordingCommandCorpus(t *testing.T) (string, string) {
 		Grade int    `json:"grade"`
 	}
 	type label struct {
-		CaseID   string  `json:"case_id"`
-		Language string  `json:"language"`
-		Bucket   string  `json:"bucket"`
-		Hard     bool    `json:"hard"`
-		Grades   []grade `json:"grades"`
+		CaseID        string  `json:"case_id"`
+		Language      string  `json:"language"`
+		Bucket        string  `json:"bucket"`
+		Hard          bool    `json:"hard"`
+		RubricVersion string  `json:"rubric_version"`
+		Grades        []grade `json:"grades"`
 	}
 	buckets := rerankeval.Buckets()
 	languages := rerankeval.Languages()
@@ -267,7 +268,8 @@ func writeRecordingCommandCorpus(t *testing.T) (string, string) {
 		caseID := fmt.Sprintf("case-%02d", caseIndex)
 		documents[caseIndex] = document{CaseID: caseID, Query: fmt.Sprintf("query %02d", caseIndex)}
 		labels[caseIndex] = label{
-			CaseID: caseID, Language: languages[(caseIndex/len(buckets))%len(languages)], Bucket: buckets[caseIndex%len(buckets)], Hard: true,
+			CaseID: caseID, Language: languages[(caseIndex/len(buckets))%len(languages)], Bucket: buckets[caseIndex%len(buckets)],
+			Hard: true, RubricVersion: rerankeval.JudgmentRubricVersion,
 		}
 		for rank, value := range recordingTestGrades {
 			url := fmt.Sprintf("https://example-%02d.test/page-%02d", caseIndex, rank+1)

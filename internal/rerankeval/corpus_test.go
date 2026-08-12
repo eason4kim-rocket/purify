@@ -29,12 +29,13 @@ type testDocumentCandidate struct {
 }
 
 type testLabelCase struct {
-	CaseID   string      `json:"case_id"`
-	Language string      `json:"language"`
-	Bucket   string      `json:"bucket"`
-	Hard     bool        `json:"hard"`
-	Grades   []testGrade `json:"grades"`
-	Note     string      `json:"note,omitempty"`
+	CaseID        string      `json:"case_id"`
+	Language      string      `json:"language"`
+	Bucket        string      `json:"bucket"`
+	Hard          bool        `json:"hard"`
+	RubricVersion string      `json:"rubric_version"`
+	Grades        []testGrade `json:"grades"`
+	Note          string      `json:"note,omitempty"`
 }
 
 type testGrade struct {
@@ -479,7 +480,10 @@ func testCorpusWithCases(t *testing.T, caseCount int) testCorpusFiles {
 	for index := 0; index < caseCount; index++ {
 		caseID := fmt.Sprintf("case-%02d", index)
 		document := testDocumentCase{CaseID: caseID, Query: fmt.Sprintf("query %02d", index)}
-		label := testLabelCase{CaseID: caseID, Language: languages[(index/len(buckets))%len(languages)], Bucket: buckets[index%len(buckets)], Hard: true, Note: "independently judged"}
+		label := testLabelCase{
+			CaseID: caseID, Language: languages[(index/len(buckets))%len(languages)], Bucket: buckets[index%len(buckets)],
+			Hard: true, RubricVersion: JudgmentRubricVersion, Note: "independently judged",
+		}
 		recording := testRecordingCase{CaseID: caseID, ManifestID: testManifestID, Usage: testUsage{PromptTokens: 10, TotalTokens: 10}, LatencyUS: 1_000}
 		for rank, grade := range grades {
 			candidateURL := fmt.Sprintf("https://example-%02d.test/page-%02d", index, rank+1)

@@ -508,7 +508,7 @@ func parseDocumentCase(raw []byte) (documentCase, error) {
 }
 
 func parseLabelCase(raw []byte) (labelCase, error) {
-	root, err := exactObject(raw, []string{"case_id", "language", "bucket", "hard", "grades"}, []string{"note"})
+	root, err := exactObject(raw, []string{"case_id", "language", "bucket", "hard", "rubric_version", "grades"}, []string{"note"})
 	if err != nil {
 		return labelCase{}, err
 	}
@@ -516,7 +516,9 @@ func parseLabelCase(raw []byte) (labelCase, error) {
 	language, languageErr := jsonString(root["language"])
 	bucket, bucketErr := jsonString(root["bucket"])
 	hard, hardErr := jsonBool(root["hard"])
-	if idErr != nil || languageErr != nil || bucketErr != nil || hardErr != nil || !validLanguage(language) || !validBucket(bucket) {
+	rubric, rubricErr := jsonString(root["rubric_version"])
+	if idErr != nil || languageErr != nil || bucketErr != nil || hardErr != nil || rubricErr != nil ||
+		rubric != JudgmentRubricVersion || !validLanguage(language) || !validBucket(bucket) {
 		return labelCase{}, fmt.Errorf("%w: invalid label header", ErrInvalidCorpus)
 	}
 	note := ""
