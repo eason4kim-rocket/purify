@@ -109,6 +109,19 @@ func TestEmitHarvestHonorsCancelBeforeFetch(t *testing.T) {
 	}
 }
 
+func TestValidateCommittedJudgedInputs(t *testing.T) {
+	summary, err := ValidateJudgedInputs(
+		filepath.Join("testdata", "construction", "docs.jsonl"),
+		filepath.Join("testdata", "construction", "labels.jsonl"),
+	)
+	if err != nil {
+		t.Fatalf("ValidateJudgedInputs() error = %v", err)
+	}
+	if summary.Cases < MinimumCases || summary.Candidates < MinimumCandidates {
+		t.Fatalf("committed judged inputs too small: %#v", summary)
+	}
+}
+
 func TestCommittedHarvestSeedsEmitTheFrozenConstructionCorpus(t *testing.T) {
 	seeds, err := LoadHarvestSeeds(filepath.Join("..", "..", "scripts", "rerankharvest", "seeds.json"))
 	if err != nil {
