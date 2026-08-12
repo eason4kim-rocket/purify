@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"reflect"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -131,7 +132,9 @@ func ValidateManifest(manifest Manifest) error {
 		return ErrInvalidManifest
 	}
 	reference, err := ReferenceManifest()
-	if err != nil || !reflect.DeepEqual(manifest, reference) {
+	if err != nil || math.Float64bits(manifest.ScoreMinimum) != math.Float64bits(reference.ScoreMinimum) ||
+		math.Float64bits(manifest.ScoreMaximum) != math.Float64bits(reference.ScoreMaximum) ||
+		!reflect.DeepEqual(manifest, reference) {
 		return ErrInvalidManifest
 	}
 	return nil

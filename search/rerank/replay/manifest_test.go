@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -135,6 +136,28 @@ func TestManifestIdentityIsDomainSeparatedAndDoesNotMutateInput(t *testing.T) {
 	}
 	if first == rerankManifestWithoutDomainForTest(original) {
 		t.Fatal("manifest identity is not domain separated")
+	}
+}
+
+func TestManifestRejectsSelfConsistentNegativeZeroIdentity(t *testing.T) {
+	manifest, err := ReferenceManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.ScoreMinimum = math.Copysign(0, -1)
+	manifest.ManifestID = ManifestID(manifest)
+	if manifest.ManifestID == "" {
+		t.Fatal("negative-zero manifest did not produce the expected distinct JSON identity")
+	}
+	if err := ValidateManifest(manifest); !errors.Is(err, ErrInvalidManifest) {
+		t.Fatalf("ValidateManifest(negative zero) = %v", err)
+	}
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded, err := DecodeManifest(raw); !errors.Is(err, ErrInvalidManifest) || !reflect.DeepEqual(decoded, Manifest{}) {
+		t.Fatalf("DecodeManifest(negative zero) = %#v, %v", decoded, err)
 	}
 }
 
