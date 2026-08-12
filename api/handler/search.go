@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
+	"github.com/use-agent/purify/consensus"
 	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/publicnet"
 	"github.com/use-agent/purify/verify/eav"
@@ -143,8 +144,7 @@ func SearchWithRateLimiter(service SearchService, limiter SearchRateLimiter) gin
 // validateSearchResponseForRequest treats the Search service as a typed trust
 // boundary. Additive ranking diagnostics are accepted only when the request
 // explicitly selected the matching mode and their presence/status matrix is
-// internally self-consistent. Trust execution remains unavailable until R-8,
-// so a successful trust envelope is never a valid R-5 service response.
+// internally self-consistent.
 func validateSearchResponseForRequest(request *models.SearchRequest, response *models.SearchResponse) error {
 	if request == nil || response == nil || response.Results == nil {
 		return errors.New("search response is invalid")
@@ -205,7 +205,7 @@ func validateSearchResponseForRequest(request *models.SearchRequest, response *m
 	case models.SearchRankingRelevance:
 		return validateRelevanceSearchResponse(response)
 	case models.SearchRankingTrust:
-		return errors.New("trust response capability is unavailable")
+		return validateTrustSearchResponse(response)
 	default:
 		return errors.New("search response mode is invalid")
 	}
@@ -381,12 +381,123 @@ func validateAppliedRelevanceResults(results []models.SearchResult) error {
 	return nil
 }
 
+func validateTrustSearchResponse(response *models.SearchResponse) error {
+	if response == nil || response.Ranking == nil || response.Ranking.Mode != models.SearchRankingTrust ||
+		response.Timing.RerankMs == nil || response.Timing.TrustMs == nil {
+		return errors.New("trust response envelope is invalid")
+	}
+	ranking := response.Ranking
+	if ranking.CandidateCount < len(response.Results) || ranking.CandidateCount > models.MaxSearchLimit ||
+		ranking.AttemptedPages < 0 || ranking.EvaluatedPages < 0 || ranking.EffectiveSources < 0 || ranking.FailedPages < 0 {
+		return errors.New("trust response counters are invalid")
+	}
+	switch ranking.Status {
+	case models.SearchRankingApplied, models.SearchRankingPartial:
+		if ranking.DegradedReason != "" {
+			return errors.New("applied trust response contains a degraded reason")
+		}
+		if ranking.Status == models.SearchRankingPartial && ranking.FailedPages < 1 {
+			return errors.New("partial trust response has no failed pages")
+		}
+		if ranking.Status == models.SearchRankingApplied && ranking.FailedPages != 0 {
+			return errors.New("applied trust response reports failed pages")
+		}
+		return validateAppliedTrustResults(response.Results)
+	case models.SearchRankingDegraded:
+		switch ranking.DegradedReason {
+		case models.SearchRankingReasonRerankerFailed:
+			for _, result := range response.Results {
+				if result.Ranking != nil {
+					return errors.New("reranker-failed trust result contains ranking diagnostics")
+				}
+			}
+			return nil
+		case models.SearchRankingReasonTrustUnavailable:
+			return validateAppliedRelevanceResults(response.Results)
+		default:
+			return errors.New("degraded trust response reason is invalid")
+		}
+	default:
+		return errors.New("trust response status is invalid")
+	}
+}
+
+func validateAppliedTrustResults(results []models.SearchResult) error {
+	if err := validateAppliedRelevanceResults(results); err != nil {
+		return err
+	}
+	seenComponents := make(map[string]struct{}, len(results))
+	for _, result := range results {
+		if result.Ranking.Entity != nil {
+			switch result.Ranking.Entity.Verdict {
+			case string(eav.VerdictMatch), string(eav.VerdictMismatch), string(eav.VerdictUncertain):
+			default:
+				return errors.New("trust result entity verdict is invalid")
+			}
+		}
+		independence := result.Ranking.Independence
+		if independence == nil {
+			continue
+		}
+		if independence.ComponentID == "" || independence.ComponentSize < 1 ||
+			!validTrustComponentID(independence.ComponentID) {
+			return errors.New("trust result independence is invalid")
+		}
+		if !validTrustFoldReasons(independence.FoldReasons) {
+			return errors.New("trust result fold reasons are invalid")
+		}
+		if independence.ComponentLeader {
+			if _, duplicate := seenComponents[independence.ComponentID]; duplicate {
+				return errors.New("trust result has two leaders for one component")
+			}
+			seenComponents[independence.ComponentID] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func validTrustComponentID(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validTrustFoldReasons(reasons []string) bool {
+	order := []string{string(consensus.FoldReasonSameRoot), string(consensus.FoldReasonQuoteLineage), string(consensus.FoldReasonNearDuplicate)}
+	previous := -1
+	seen := map[string]struct{}{}
+	for _, reason := range reasons {
+		index := -1
+		for position, allowed := range order {
+			if reason == allowed {
+				index = position
+				break
+			}
+		}
+		if index < 0 {
+			return false
+		}
+		if _, duplicate := seen[reason]; duplicate || index < previous {
+			return false
+		}
+		seen[reason] = struct{}{}
+		previous = index
+	}
+	return true
+}
+
 func validateSearchResponseTiming(timing models.SearchTimingInfo) error {
 	if timing.TotalMs < 0 || timing.ProviderMs < 0 || timing.EnrichmentMs < 0 {
 		return errors.New("search response timing is invalid")
 	}
 	additional := int64(0)
-	for _, value := range []*int64{timing.RerankMs} {
+	for _, value := range []*int64{timing.RerankMs, timing.TrustMs} {
 		if value == nil {
 			continue
 		}
