@@ -1779,8 +1779,8 @@ R-4  ✅ dfc89c7：内部 rankCandidates；candidate-20 → relevance → metada
 R-5  ✅ ea7a87e + 9e83c40 + dae246d：relevance models / HTTP / MCP + Search service switch + strict duplicate guard + rate/capability 接线
 R-6  ⟳ 3c98118..60eff7b + seed_order corpus `5053cf3`/`f26ff3c`/`a6b1e07`：provisional scaffold + 许可 24/240 judged inputs（baseline=seed_order）；无 recordings、无 Brave 对比、无价格 artifact，未通过
 R-6a ⟳ c4580e9..ea6d5e1 + operator recover `2c081e1`：journal + 人工 adopt/abandon；无 NVIDIA evidence、无 daemon-completion barrier，未通过
-R-7  consensus independence analysis + shared artifact/EAV trust seam（不公开 trust wire）
-R-8  group-first trust fusion + public wire + independent oracle golden
+R-7  ✅ 2d1d8ac + 2a27704：AnalyzeIndependence 只读投影 + Search 诚实 analysis source（snippet fail-soft，无 entity 入图）
+R-8  ✅ c89f805 + 5295f8b + 53659c2 + 0775f0a：group-first fusion + HTTP/MCP trust envelope + 独立 oracle golden；默认请求仍是 provider，relevance 生产 factory 仍不存在
 R-9  optional sidecar/profile、SBOM/Apache attribution 与运维文档（未授权不 deploy）
 ```
 
