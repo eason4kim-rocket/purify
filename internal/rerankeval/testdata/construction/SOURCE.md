@@ -6,6 +6,8 @@ This directory holds a provider-free relevance construction set.
 - `provider_rank` is the seed file order (`baseline=seed_order`).
 - Pages are operator-curated public encyclopedia and standards snapshots, not Search Results.
 - This set must not be cited as a Brave (or any search-provider) comparison.
+- `judgments.jsonl` is a blind packet judgment (query/title/snippet only) bound to `packet_digest`.
+- `labels.jsonl` is compiled from those judgments. `hard` is derived, never asserted by the judge.
 - Recordings, scorecards, and production certification are intentionally absent.
 
 Regenerate only by writing a new output directory:
