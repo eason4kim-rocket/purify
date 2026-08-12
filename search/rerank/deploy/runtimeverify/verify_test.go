@@ -231,6 +231,103 @@ func TestVerifyContainerArchiveRejectsUnsafeRootAndTrailingPayload(t *testing.T)
 	requireVerificationRejected(t, VerifyContainerArchive(typedNil, inventory, "revision"))
 }
 
+func TestVerifyContainerFileArchiveAcceptsExactBasenameAndBytes(t *testing.T) {
+	expected := []byte("{% set answer = relevance %}\n")
+	archive := writeTar(t, []tarEntry{{
+		header: tar.Header{Name: "qwen3_reranker.jinja", Mode: 0o400, Size: int64(len(expected)), Typeflag: tar.TypeReg},
+		body:   expected,
+	}})
+	if err := VerifyContainerFileArchive(bytes.NewReader(archive), "/templates/qwen3_reranker.jinja", expected); err != nil {
+		t.Fatalf("VerifyContainerFileArchive(exact) error = %v", err)
+	}
+}
+
+func TestVerifyContainerFileArchiveRejectsHeaderAndContentDrift(t *testing.T) {
+	expected := []byte("locked template")
+	regular := func(name string, body []byte) tarEntry {
+		return tarEntry{header: tar.Header{Name: name, Mode: 0o400, Size: int64(len(body)), Typeflag: tar.TypeReg}, body: body}
+	}
+	tests := []struct {
+		name    string
+		entries []tarEntry
+	}{
+		{name: "empty archive"},
+		{name: "parent prefix", entries: []tarEntry{regular("templates/qwen3_reranker.jinja", expected)}},
+		{name: "path traversal", entries: []tarEntry{regular("../qwen3_reranker.jinja", expected)}},
+		{name: "absolute header", entries: []tarEntry{regular("/qwen3_reranker.jinja", expected)}},
+		{name: "different basename", entries: []tarEntry{regular("other.jinja", expected)}},
+		{name: "directory", entries: []tarEntry{{header: tar.Header{Name: "qwen3_reranker.jinja", Mode: 0o700, Typeflag: tar.TypeDir}}}},
+		{name: "symlink", entries: []tarEntry{{header: tar.Header{Name: "qwen3_reranker.jinja", Linkname: "target", Typeflag: tar.TypeSymlink}}}},
+		{name: "hardlink", entries: []tarEntry{{header: tar.Header{Name: "qwen3_reranker.jinja", Linkname: "target", Typeflag: tar.TypeLink}}}},
+		{name: "device", entries: []tarEntry{{header: tar.Header{Name: "qwen3_reranker.jinja", Typeflag: tar.TypeChar}}}},
+		{name: "fifo", entries: []tarEntry{{header: tar.Header{Name: "qwen3_reranker.jinja", Typeflag: tar.TypeFifo}}}},
+		{name: "same size different bytes", entries: []tarEntry{regular("qwen3_reranker.jinja", bytes.Repeat([]byte{'x'}, len(expected)))}},
+		{name: "size drift", entries: []tarEntry{regular("qwen3_reranker.jinja", append(append([]byte(nil), expected...), '!'))}},
+		{name: "duplicate", entries: []tarEntry{
+			regular("qwen3_reranker.jinja", expected),
+			regular("qwen3_reranker.jinja", expected),
+		}},
+		{name: "extra", entries: []tarEntry{
+			regular("qwen3_reranker.jinja", expected),
+			regular("extra", []byte("extra")),
+		}},
+		{name: "pax", entries: []tarEntry{{
+			header: tar.Header{
+				Name:       "qwen3_reranker.jinja",
+				Mode:       0o400,
+				Size:       int64(len(expected)),
+				Typeflag:   tar.TypeReg,
+				PAXRecords: map[string]string{"comment": "not admitted"},
+			},
+			body: expected,
+		}}},
+		{name: "xattr", entries: []tarEntry{{
+			header: tar.Header{
+				Name:     "qwen3_reranker.jinja",
+				Mode:     0o400,
+				Size:     int64(len(expected)),
+				Typeflag: tar.TypeReg,
+				Xattrs:   map[string]string{"user.test": "not admitted"},
+			},
+			body: expected,
+		}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			archive := writeTar(t, test.entries)
+			requireVerificationRejected(t, VerifyContainerFileArchive(bytes.NewReader(archive), "/templates/qwen3_reranker.jinja", expected))
+		})
+	}
+}
+
+func TestVerifyContainerFileArchiveRejectsInvalidInputsAndResourceOverflow(t *testing.T) {
+	expected := []byte("locked template")
+	archive := writeTar(t, []tarEntry{{
+		header: tar.Header{Name: "qwen3_reranker.jinja", Mode: 0o400, Size: int64(len(expected)), Typeflag: tar.TypeReg},
+		body:   expected,
+	}})
+	for _, expectedPath := range []string{"", ".", "..", "/", "templates/", "templates/../qwen3_reranker.jinja", `templates\qwen3_reranker.jinja`, "templates/\x00qwen3_reranker.jinja"} {
+		t.Run("path "+expectedPath, func(t *testing.T) {
+			requireVerificationRejected(t, VerifyContainerFileArchive(bytes.NewReader(archive), expectedPath, expected))
+		})
+	}
+
+	requireVerificationRejected(t, VerifyContainerFileArchive(nil, "/templates/qwen3_reranker.jinja", expected))
+	var typedNil *bytes.Reader
+	requireVerificationRejected(t, VerifyContainerFileArchive(typedNil, "/templates/qwen3_reranker.jinja", expected))
+	requireVerificationRejected(t, VerifyContainerFileArchive(bytes.NewReader(archive), "/templates/qwen3_reranker.jinja", bytes.Repeat([]byte{'x'}, maxContainerFileBytes+1)))
+
+	truncatedBody := archive[:512+len(expected)-1]
+	requireVerificationRejected(t, VerifyContainerFileArchive(bytes.NewReader(truncatedBody), "/templates/qwen3_reranker.jinja", expected))
+
+	overhead := append(append([]byte(nil), archive...), bytes.Repeat([]byte{0}, int(maxContainerFileArchiveOverhead)+1)...)
+	requireVerificationRejected(t, VerifyContainerFileArchive(bytes.NewReader(overhead), "/templates/qwen3_reranker.jinja", expected))
+
+	withPayloadAfterEnd := append(append([]byte(nil), archive...), byte(1))
+	requireVerificationRejected(t, VerifyContainerFileArchive(bytes.NewReader(withPayloadAfterEnd), "/templates/qwen3_reranker.jinja", expected))
+	requireVerificationRejected(t, VerifyContainerFileArchive(zeroProgressReader{}, "/templates/qwen3_reranker.jinja", expected))
+}
+
 func TestReferenceSnapshotInventoryFitsAdmissionLimits(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "assets", "qwen3-reranker-0.6b.snapshot.json"))
 	if err != nil {
@@ -386,6 +483,12 @@ func writeHostSnapshot(t *testing.T, files map[string][]byte) string {
 type tarEntry struct {
 	header tar.Header
 	body   []byte
+}
+
+type zeroProgressReader struct{}
+
+func (zeroProgressReader) Read([]byte) (int, error) {
+	return 0, nil
 }
 
 func tarSnapshot(t *testing.T, root string, files map[string][]byte, extra []tarEntry) []byte {

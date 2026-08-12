@@ -37,6 +37,9 @@ const (
 	maxSnapshotBytes     = int64(16) << 30
 	maxArchiveOverhead   = int64(64) << 20
 	directoryReadBatch   = 64
+
+	maxContainerFileBytes           = 256 << 10
+	maxContainerFileArchiveOverhead = int64(64) << 10
 )
 
 // ErrVerificationFailed is returned for every admission failure. Callers can
@@ -88,6 +91,23 @@ func VerifyContainerArchive(reader io.Reader, inventory []byte, expectedRootBase
 		return ErrVerificationFailed
 	}
 	if err := verifyArchive(reader, archiveRoot, spec); err != nil {
+		return ErrVerificationFailed
+	}
+	return nil
+}
+
+// VerifyContainerFileArchive verifies the bounded, single-file tar stream
+// returned by a container runtime. The sole regular-file header must use the
+// basename of expectedPath and its body must exactly match expected.
+func VerifyContainerFileArchive(reader io.Reader, expectedPath string, expected []byte) error {
+	if nilReader(reader) || len(expected) > maxContainerFileBytes {
+		return ErrVerificationFailed
+	}
+	expectedName, ok := archiveRootName(expectedPath)
+	if !ok {
+		return ErrVerificationFailed
+	}
+	if err := verifyContainerFileArchive(reader, expectedName, expected); err != nil {
 		return ErrVerificationFailed
 	}
 	return nil
@@ -595,6 +615,39 @@ func verifyArchive(reader io.Reader, archiveRoot string, spec *inventorySpec) er
 		}
 	}
 	if len(seenFiles) != len(spec.files) {
+		return ErrVerificationFailed
+	}
+	if err := verifyZeroTrailer(limited); err != nil || limited.N == 0 {
+		return ErrVerificationFailed
+	}
+	return nil
+}
+
+func verifyContainerFileArchive(reader io.Reader, expectedName string, expected []byte) error {
+	budget := int64(len(expected)) + maxContainerFileArchiveOverhead
+	source := &progressReader{reader: reader}
+	limited := &io.LimitedReader{R: source, N: budget + 1}
+	archive := tar.NewReader(limited)
+
+	header, err := archive.Next()
+	if err != nil || header == nil || limited.N == 0 || header.Name != expectedName || header.Linkname != "" || len(header.Xattrs) != 0 || len(header.PAXRecords) != 0 {
+		return ErrVerificationFailed
+	}
+	if (header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA) || header.Size != int64(len(expected)) {
+		return ErrVerificationFailed
+	}
+
+	body := make([]byte, len(expected))
+	if _, err := io.ReadFull(archive, body); err != nil {
+		return ErrVerificationFailed
+	}
+	expectedDigest := sha256.Sum256(expected)
+	bodyDigest := sha256.Sum256(body)
+	if bodyDigest != expectedDigest || !bytes.Equal(body, expected) {
+		return ErrVerificationFailed
+	}
+
+	if _, err := archive.Next(); !errors.Is(err, io.EOF) || limited.N == 0 {
 		return ErrVerificationFailed
 	}
 	if err := verifyZeroTrailer(limited); err != nil || limited.N == 0 {
