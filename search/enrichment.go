@@ -906,6 +906,15 @@ func cloneSearchResult(source models.SearchResult) models.SearchResult {
 			value := *source.Ranking.RelevanceScore
 			ranking.RelevanceScore = &value
 		}
+		if source.Ranking.Entity != nil {
+			entity := *source.Ranking.Entity
+			ranking.Entity = &entity
+		}
+		if source.Ranking.Independence != nil {
+			independence := *source.Ranking.Independence
+			independence.FoldReasons = append([]string(nil), source.Ranking.Independence.FoldReasons...)
+			ranking.Independence = &independence
+		}
 		cloned.Ranking = &ranking
 	}
 	return cloned

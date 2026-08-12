@@ -180,6 +180,7 @@ const (
 	SearchResultStageFetch   SearchResultErrorStage = "fetch"
 	SearchResultStageVerify  SearchResultErrorStage = "verify"
 	SearchResultStageExtract SearchResultErrorStage = "extract"
+	SearchResultStageTrust   SearchResultErrorStage = "trust"
 )
 
 // SearchResultError is a stable, sanitized per-result enrichment error.
@@ -268,6 +269,9 @@ func ValidSearchResultEnrichmentFlow(requirements SearchEnrichmentRequirements, 
 			slot = &verifyError
 		case SearchResultStageExtract:
 			slot = &extractError
+		case SearchResultStageTrust:
+			// Trust diagnostics are orthogonal to fetch/verify/extract flow.
+			continue
 		default:
 			return false
 		}
@@ -373,8 +377,23 @@ func validSearchVerificationFlow(result SearchResult, verifyError *SearchResultE
 
 // SearchResultRanking is per-result opt-in ranking diagnostics.
 type SearchResultRanking struct {
-	ProviderRank   int      `json:"provider_rank"`
-	RelevanceScore *float64 `json:"relevance_score,omitempty"`
+	ProviderRank   int                  `json:"provider_rank"`
+	RelevanceScore *float64             `json:"relevance_score,omitempty"`
+	Entity         *SearchEntityVerdict `json:"entity,omitempty"`
+	Independence   *SearchIndependence  `json:"independence,omitempty"`
+}
+
+// SearchEntityVerdict is the additive EAV diagnostic on an explicit trust result.
+type SearchEntityVerdict struct {
+	Verdict string `json:"verdict"`
+}
+
+// SearchIndependence is the additive independence projection for one analyzed page.
+type SearchIndependence struct {
+	ComponentID     string   `json:"component_id"`
+	ComponentSize   int      `json:"component_size"`
+	ComponentLeader bool     `json:"component_leader"`
+	FoldReasons     []string `json:"fold_reasons,omitempty"`
 }
 
 // SearchRankingStatus and SearchRankingDegradedReason are strict response
@@ -384,17 +403,23 @@ type SearchRankingDegradedReason string
 
 const (
 	SearchRankingApplied  SearchRankingStatus = "applied"
+	SearchRankingPartial  SearchRankingStatus = "partial"
 	SearchRankingDegraded SearchRankingStatus = "degraded"
 
-	SearchRankingReasonRerankerFailed SearchRankingDegradedReason = "reranker_failed"
+	SearchRankingReasonRerankerFailed   SearchRankingDegradedReason = "reranker_failed"
+	SearchRankingReasonTrustUnavailable SearchRankingDegradedReason = "trust_unavailable"
 )
 
 // SearchResponseRanking reports request-global relevance ranking status.
 type SearchResponseRanking struct {
-	Mode           SearchRankingMode           `json:"mode"`
-	Status         SearchRankingStatus         `json:"status"`
-	DegradedReason SearchRankingDegradedReason `json:"degraded_reason,omitempty"`
-	CandidateCount int                         `json:"candidate_count"`
+	Mode             SearchRankingMode           `json:"mode"`
+	Status           SearchRankingStatus         `json:"status"`
+	DegradedReason   SearchRankingDegradedReason `json:"degraded_reason,omitempty"`
+	CandidateCount   int                         `json:"candidate_count"`
+	AttemptedPages   int                         `json:"attempted_pages,omitempty"`
+	EvaluatedPages   int                         `json:"evaluated_pages,omitempty"`
+	EffectiveSources int                         `json:"effective_sources,omitempty"`
+	FailedPages      int                         `json:"failed_pages,omitempty"`
 }
 
 // SearchTimingInfo reports end-to-end, provider, and optional enrichment time.
@@ -403,6 +428,7 @@ type SearchTimingInfo struct {
 	ProviderMs   int64  `json:"provider_ms"`
 	EnrichmentMs int64  `json:"enrichment_ms"`
 	RerankMs     *int64 `json:"rerank_ms,omitempty"`
+	TrustMs      *int64 `json:"trust_ms,omitempty"`
 }
 
 // SearchResponse is the stable provider-neutral response envelope. Services

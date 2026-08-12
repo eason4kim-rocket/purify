@@ -64,6 +64,7 @@ type Service struct {
 	encodingSlots     chan struct{}
 	encodeSearch      func(any) ([]byte, error)
 	reranker          searchrerank.Scorer
+	entityJudge       entityDocumentJudge
 }
 
 // NewService constructs a Search service with the fixed one-minute,
@@ -136,10 +137,11 @@ func (service *Service) SearchWithOptions(ctx context.Context, request *models.S
 	if err != nil {
 		return nil, err
 	}
-	if prepared.ranking == models.SearchRankingRelevance && isNilSearchDependency(service.reranker) {
+	if (prepared.ranking == models.SearchRankingRelevance || prepared.ranking == models.SearchRankingTrust) &&
+		isNilSearchDependency(service.reranker) {
 		return nil, searchUnavailable("requested search capability is unavailable", nil)
 	}
-	if prepared.ranking == models.SearchRankingTrust {
+	if prepared.ranking == models.SearchRankingTrust && !service.enrichmentAvailable() {
 		return nil, searchUnavailable("requested search capability is unavailable", nil)
 	}
 	if prepared.requiresEnrichment && !service.enrichmentAvailable() {
@@ -186,14 +188,20 @@ func (service *Service) SearchWithOptions(ctx context.Context, request *models.S
 	var results []models.SearchResult
 	var rankingSummary *models.SearchResponseRanking
 	var rerankMilliseconds *int64
+	var trustMilliseconds *int64
+	var artifactMemo *memoArtifactService
 	deduplicated := 0
-	if prepared.ranking == models.SearchRankingRelevance {
+	if prepared.ranking == models.SearchRankingRelevance || prepared.ranking == models.SearchRankingTrust {
 		pool := prepareRankingPool(baseline, prepared.domains)
+		outputLimit := prepared.limit
+		if prepared.ranking == models.SearchRankingTrust {
+			outputLimit = searchrerank.MaxCandidates
+		}
 		var rankingStartedAt time.Time
 		if len(pool.candidates) > 0 {
 			rankingStartedAt = service.now()
 		}
-		ranked, rankingErr := rankPreparedCandidates(runCtx, service.reranker, prepared.query, pool, prepared.deduplicate, prepared.limit)
+		ranked, rankingErr := rankPreparedCandidates(runCtx, service.reranker, prepared.query, pool, prepared.deduplicate, outputLimit)
 		measured := int64(0)
 		if !rankingStartedAt.IsZero() {
 			measured = elapsedMilliseconds(rankingStartedAt, service.now())
@@ -205,7 +213,7 @@ func (service *Service) SearchWithOptions(ctx context.Context, request *models.S
 		if rankingErr != nil {
 			results, deduplicated = projectBaseline(baseline, prepared.domains, prepared.deduplicate, prepared.limit)
 			rankingSummary = &models.SearchResponseRanking{
-				Mode:           models.SearchRankingRelevance,
+				Mode:           prepared.ranking,
 				Status:         models.SearchRankingDegraded,
 				DegradedReason: models.SearchRankingReasonRerankerFailed,
 				CandidateCount: len(pool.candidates),
@@ -214,9 +222,31 @@ func (service *Service) SearchWithOptions(ctx context.Context, request *models.S
 			results = projectRankedBaseline(ranked.candidates)
 			deduplicated = ranked.deduplicated
 			rankingSummary = &models.SearchResponseRanking{
-				Mode:           models.SearchRankingRelevance,
+				Mode:           prepared.ranking,
 				Status:         models.SearchRankingApplied,
 				CandidateCount: ranked.candidateCount,
+			}
+			if prepared.ranking == models.SearchRankingTrust {
+				artifactMemo = newMemoArtifactService(service.artifacts)
+				trustStartedAt := service.now()
+				fusion, trustErr := service.evaluateTrust(runCtx, ranked.candidates, prepared.expectedSubject, artifactMemo)
+				trustMeasured := elapsedMilliseconds(trustStartedAt, service.now())
+				trustMilliseconds = &trustMeasured
+				if trustErr != nil {
+					if runCtx.Err() != nil {
+						return nil, searchTimeout(runCtx.Err())
+					}
+					rankingSummary.Status = models.SearchRankingDegraded
+					rankingSummary.DegradedReason = models.SearchRankingReasonTrustUnavailable
+				} else {
+					results = projectTrustPages(fusion, prepared.limit)
+					rankingSummary.Status = fusion.status
+					rankingSummary.DegradedReason = fusion.reason
+					rankingSummary.AttemptedPages = fusion.attemptedPages
+					rankingSummary.EvaluatedPages = fusion.evaluatedPages
+					rankingSummary.EffectiveSources = fusion.effectiveSources
+					rankingSummary.FailedPages = fusion.failedPages
+				}
 			}
 		}
 	} else {
@@ -229,9 +259,15 @@ func (service *Service) SearchWithOptions(ctx context.Context, request *models.S
 	partial := false
 	enrichmentMilliseconds := int64(0)
 	if prepared.requiresEnrichment && len(results) > 0 {
+		enricher := service
+		if artifactMemo != nil {
+			cloned := *service
+			cloned.artifacts = artifactMemo
+			enricher = &cloned
+		}
 		enrichmentStartedAt := service.now()
 		var additionalDeduplicated int
-		results, droppedStale, additionalDeduplicated, partial = service.enrichResults(runCtx, results, prepared)
+		results, droppedStale, additionalDeduplicated, partial = enricher.enrichResults(runCtx, results, prepared)
 		enrichmentMilliseconds = elapsedMilliseconds(enrichmentStartedAt, service.now())
 		deduplicated += additionalDeduplicated
 		if err := runCtx.Err(); err != nil {
@@ -250,6 +286,7 @@ func (service *Service) SearchWithOptions(ctx context.Context, request *models.S
 			ProviderMs:   providerMilliseconds,
 			EnrichmentMs: enrichmentMilliseconds,
 			RerankMs:     rerankMilliseconds,
+			TrustMs:      trustMilliseconds,
 		},
 		Ranking: rankingSummary,
 	}, nil
@@ -260,6 +297,7 @@ type preparedSearchRequest struct {
 	limit              int
 	candidateLimit     int
 	ranking            models.SearchRankingMode
+	expectedSubject    *models.SubjectSpec
 	domains            []string
 	freshness          Freshness
 	deduplicate        bool
@@ -346,6 +384,7 @@ func prepareSearchRequest(source *models.SearchRequest) (preparedSearchRequest, 
 		limit:              request.Limit,
 		candidateLimit:     candidateLimit,
 		ranking:            resolved.Ranking,
+		expectedSubject:    request.ExpectedSubject,
 		domains:            domains,
 		freshness:          freshness,
 		deduplicate:        *request.Deduplicate,

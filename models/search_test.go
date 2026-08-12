@@ -452,10 +452,10 @@ func TestSearchModelFieldClassificationStaysCurrent(t *testing.T) {
 	assertSearchFields(t, reflect.TypeOf(SearchResponse{}), []string{
 		"Success", "Query", "Results", "Deduplicated", "DroppedStale", "Partial", "Timing", "Ranking", "Error",
 	})
-	assertSearchFields(t, reflect.TypeOf(SearchTimingInfo{}), []string{"TotalMs", "ProviderMs", "EnrichmentMs", "RerankMs"})
-	assertSearchFields(t, reflect.TypeOf(SearchResultRanking{}), []string{"ProviderRank", "RelevanceScore"})
+	assertSearchFields(t, reflect.TypeOf(SearchTimingInfo{}), []string{"TotalMs", "ProviderMs", "EnrichmentMs", "RerankMs", "TrustMs"})
+	assertSearchFields(t, reflect.TypeOf(SearchResultRanking{}), []string{"ProviderRank", "RelevanceScore", "Entity", "Independence"})
 	assertSearchFields(t, reflect.TypeOf(SearchResponseRanking{}), []string{
-		"Mode", "Status", "DegradedReason", "CandidateCount",
+		"Mode", "Status", "DegradedReason", "CandidateCount", "AttemptedPages", "EvaluatedPages", "EffectiveSources", "FailedPages",
 	})
 }
 
