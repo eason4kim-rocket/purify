@@ -153,81 +153,28 @@ func TestRecoveryCoordinatorDrainsPreparedAndOwnedRecordsSeriallyWithoutStart(t 
 	}
 }
 
-func TestRecoveryCoordinatorCreatingResolveSuccessCleansWithoutCreateOrStart(t *testing.T) {
-	journal, _ := newTestRecoveryJournal(t)
-	record := createRecoveryCreating(t, journal, strings.Repeat("c", 32))
-	plan := recoveryPlanForRecord(t, record)
-	id := strings.Repeat("a", 64)
-	resolved := recoveryOwnership(plan, id, ContainerState{Status: ContainerStatusExited})
-	engine := &recoveryFakeEngine{resolveResults: []OwnershipInspection{resolved}, owned: resolved}
-	dependencies := validRecoveryDependencies(journal, engine)
-	if err := recoverReferenceSessions(context.Background(), dependencies); err != nil {
-		t.Fatalf("recoverReferenceSessions() = %v", err)
-	}
-	assertRecoveryDrained(t, journal)
-	if engine.resolveCalls != 1 || engine.createCalls != 0 || engine.removeCalls != 1 || engine.startCalls != 0 {
-		t.Fatalf("resolve=%d create=%d remove=%d start=%d", engine.resolveCalls, engine.createCalls, engine.removeCalls, engine.startCalls)
-	}
-	assertRecoveryEngineSpecs(t, engine, record)
-}
-
-func TestRecoveryCoordinatorCreatingAbsentOrTransientRetainsEverything(t *testing.T) {
+func TestRecoveryCoordinatorCreatingAlwaysRetainsWithoutDockerAuthority(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		resolveErr error
+		name   string
+		engine *recoveryFakeEngine
 	}{
-		{name: "not found is not completion proof", resolveErr: errContainerNotFound},
-		{name: "transient daemon failure", resolveErr: ErrEngineOperation},
+		{name: "name absent", engine: &recoveryFakeEngine{resolveErrs: []error{errContainerNotFound}}},
+		{name: "name visible", engine: &recoveryFakeEngine{resolveResults: []OwnershipInspection{{ID: strings.Repeat("a", 64)}}}},
+		{name: "daemon transient", engine: &recoveryFakeEngine{resolveErrs: []error{ErrEngineOperation}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			journal, _ := newTestRecoveryJournal(t)
 			record := createRecoveryCreating(t, journal, strings.Repeat("4", 32))
-			engine := &recoveryFakeEngine{resolveErrs: []error{test.resolveErr}}
 			cleaned := 0
-			dependencies := validRecoveryDependencies(journal, engine)
+			dependencies := validRecoveryDependencies(journal, test.engine)
 			dependencies.cleanupHost = func(HostPaths) error { cleaned++; return nil }
 			if err := recoverReferenceSessions(context.Background(), dependencies); !errors.Is(err, ErrSessionUnavailable) {
 				t.Fatalf("recoverReferenceSessions() = %v", err)
 			}
 			assertRecoveryRecord(t, journal, record)
-			if cleaned != 0 || engine.resolveCalls != 1 || engine.createCalls != 0 || engine.removeCalls != 0 || engine.startCalls != 0 {
-				t.Fatalf("clean=%d resolve=%d create=%d remove=%d start=%d", cleaned, engine.resolveCalls, engine.createCalls, engine.removeCalls, engine.startCalls)
+			if cleaned != 0 || test.engine.resolveCalls != 0 || test.engine.createCalls != 0 || test.engine.removeCalls != 0 || test.engine.startCalls != 0 {
+				t.Fatalf("clean=%d resolve=%d create=%d remove=%d start=%d", cleaned, test.engine.resolveCalls, test.engine.createCalls, test.engine.removeCalls, test.engine.startCalls)
 			}
-			assertRecoveryEngineSpecs(t, engine, record)
-		})
-	}
-}
-
-func TestRecoveryCoordinatorForeignResolutionRetainsJournalAndHost(t *testing.T) {
-	for _, test := range []struct {
-		name       string
-		inspection func(*OwnershipInspection)
-		resolveErr error
-	}{
-		{name: "adapter foreign", resolveErr: ErrOwnershipLost},
-		{name: "wrong name", inspection: func(value *OwnershipInspection) { value.Name += "-foreign" }},
-		{name: "wrong labels", inspection: func(value *OwnershipInspection) { value.Labels[LabelRunID] = strings.Repeat("f", 32) }},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			journal, _ := newTestRecoveryJournal(t)
-			record := createRecoveryCreating(t, journal, strings.Repeat("5", 32))
-			plan := recoveryPlanForRecord(t, record)
-			id := strings.Repeat("d", 64)
-			resolved := recoveryOwnership(plan, id, ContainerState{Status: ContainerStatusExited})
-			if test.inspection != nil {
-				test.inspection(&resolved)
-			}
-			engine := &recoveryFakeEngine{
-				resolveResults: []OwnershipInspection{resolved}, resolveErrs: []error{test.resolveErr}, owned: resolved,
-			}
-			cleaned := 0
-			dependencies := validRecoveryDependencies(journal, engine)
-			dependencies.cleanupHost = func(HostPaths) error { cleaned++; return nil }
-			err := recoverReferenceSessions(context.Background(), dependencies)
-			if !errors.Is(err, ErrOwnershipLost) || cleaned != 0 || engine.createCalls != 0 || engine.removeCalls != 0 || engine.startCalls != 0 {
-				t.Fatalf("recover = %v cleaned=%d create=%d remove=%d start=%d", err, cleaned, engine.createCalls, engine.removeCalls, engine.startCalls)
-			}
-			assertRecoveryRecord(t, journal, record)
 		})
 	}
 }
@@ -303,7 +250,7 @@ func TestRecoveryCoordinatorOwnedCleanupRetriesThenStopsActiveChild(t *testing.T
 }
 
 func TestRecoveryCoordinatorCancellationAndCorruptJournalFailClosed(t *testing.T) {
-	t.Run("cancellation preempts resolution and retains", func(t *testing.T) {
+	t.Run("cancellation preempts recovery and retains", func(t *testing.T) {
 		journal, _ := newTestRecoveryJournal(t)
 		record := createRecoveryCreating(t, journal, strings.Repeat("7", 32))
 		engine := &recoveryFakeEngine{}

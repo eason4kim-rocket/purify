@@ -9,8 +9,8 @@ import (
 )
 
 // recoveryPlanKey is non-secret placeholder material used only to rebuild the
-// secret-redacted create-spec digest accepted by ResolveCreate. Recovery never
-// sends this spec to Create or Start.
+// secret-redacted create-spec digest. Recovery never sends this spec to Create
+// or Start.
 const recoveryPlanKey = "0000000000000000000000000000000000000000000000000000000000000000"
 
 type recoveryDependencies struct {
@@ -20,9 +20,9 @@ type recoveryDependencies struct {
 }
 
 // recoverReferenceSessions serially drains every durable recovery record.
-// It never creates or starts a container. In particular, a missing
-// deterministic name is not treated as proof that an earlier daemon Create
-// handler cannot still reserve it later.
+// It never resolves, creates, or starts a container whose durable record is
+// still creating. Docker's public API supplies no completion boundary that can
+// safely promote an ambiguous Create response after controller restart.
 func recoverReferenceSessions(ctx context.Context, dependencies recoveryDependencies) error {
 	if ctx == nil || ctx.Err() != nil || dependencies.journal == nil || dependencies.engine == nil ||
 		dependencies.cleanupHost == nil {
@@ -61,10 +61,7 @@ func recoverReferenceRecord(ctx context.Context, dependencies recoveryDependenci
 	}
 	current := record
 	if current.State == recoveryStateCreating {
-		current, err = recoverCreatingRecord(ctx, dependencies, plan, current)
-		if err != nil {
-			return err
-		}
+		return ErrSessionUnavailable
 	}
 	if current.State != recoveryStateOwned {
 		return ErrSessionUnavailable
@@ -83,39 +80,6 @@ func recoverReferenceRecord(ctx context.Context, dependencies recoveryDependenci
 		return ErrSessionUnavailable
 	}
 	return nil
-}
-
-func recoverCreatingRecord(ctx context.Context, dependencies recoveryDependencies, plan *referencePlan, record recoveryRecord) (recoveryRecord, error) {
-	inspection, err := dependencies.engine.ResolveCreate(ctx, plan.cloneCreateSpec())
-	if err == nil {
-		// The pinned Moby inspect path locks the registered container; Create's
-		// register path holds that same lock through its durable checkpoint.
-		// Therefore a successful exact inspection has crossed the only available
-		// completion boundary. Absence has no symmetric meaning and stays pending.
-		return persistResolvedOwner(dependencies.journal, plan, record, inspection)
-	}
-	if errors.Is(err, ErrOwnershipLost) {
-		return recoveryRecord{}, ErrOwnershipLost
-	}
-	return recoveryRecord{}, recoveryCoordinatorError(ctx)
-}
-
-func persistResolvedOwner(journal *recoveryJournal, plan *referencePlan, current recoveryRecord, inspection OwnershipInspection) (recoveryRecord, error) {
-	if journal == nil || plan == nil || !validLowerHex(inspection.ID, 64) {
-		return recoveryRecord{}, ErrOwnershipLost
-	}
-	owner := ownership{
-		containerID: inspection.ID, containerName: plan.create.Name,
-		labels: ownershipLabels(plan.create.Labels),
-	}
-	if validateOwnershipInspection(owner, inspection) != nil {
-		return recoveryRecord{}, ErrOwnershipLost
-	}
-	owned, err := journal.markOwned(current, inspection.ID)
-	if err != nil {
-		return recoveryRecord{}, ErrSessionUnavailable
-	}
-	return owned, nil
 }
 
 func recoveryHostPaths(record recoveryRecord) HostPaths {
