@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/use-agent/purify/search/rerank/deploy"
 )
@@ -167,6 +169,233 @@ func TestStartLocalReferenceSessionCanceledIsInert(t *testing.T) {
 		t.Fatalf("StartLocalReferenceSession(canceled) = %#v, %v", session, err)
 	}
 }
+
+type orderedLocalReader struct {
+	order  *[]string
+	reader io.Reader
+}
+
+func (reader *orderedLocalReader) Read(value []byte) (int, error) {
+	*reader.order = append(*reader.order, "entropy")
+	return reader.reader.Read(value)
+}
+
+func TestStartLocalReferenceSessionAcquiresRecoversThenGeneratesRun(t *testing.T) {
+	root := filepath.Join(canonicalTempDir(t), "recovery")
+	engine := &sessionFakeEngine{}
+	var order []string
+	raw := append(bytes.Repeat([]byte{0x01}, 16), bytes.Repeat([]byte{0xa5}, 32)...)
+	local := localStartDependencies{
+		recoveryRoot: root, recoveryUID: os.Geteuid(), random: &orderedLocalReader{order: &order, reader: bytes.NewReader(raw)},
+		prepareJournal: func(path string, uid int) (*recoveryJournal, error) {
+			order = append(order, "journal")
+			return prepareRecoveryJournal(path, uid)
+		},
+		newEngine: func() (Engine, error) {
+			order = append(order, "engine")
+			return engine, nil
+		},
+		recover: func(ctx context.Context, dependencies recoveryDependencies) error {
+			order = append(order, "recover")
+			if _, ok := ctx.Deadline(); !ok || dependencies.journal == nil || dependencies.engine != engine {
+				t.Fatalf("recovery dependencies = %#v", dependencies)
+			}
+			if records, err := dependencies.journal.records(); err != nil || len(records) != 0 {
+				t.Fatalf("records before new run = %#v, %v", records, err)
+			}
+			return nil
+		},
+		start: func(_ context.Context, dependencies sessionDependencies) (*ReferenceSession, error) {
+			order = append(order, "start")
+			if dependencies.journal == nil || dependencies.runID != strings.Repeat("01", 16) || dependencies.apiKey != strings.Repeat("a5", 32) {
+				t.Fatalf("new session dependencies = %#v", dependencies)
+			}
+			_ = dependencies.engine.Close()
+			_ = dependencies.journal.close()
+			return nil, ErrSessionUnavailable
+		},
+		cleanupHost: func(HostPaths) error { return nil },
+	}
+	controller := ControllerInspection{GOOS: "linux", GOARCH: "amd64", EffectiveUIDKnown: true, EffectiveUID: 0}
+	session, err := startLocalReferenceSession(context.Background(), LocalReferenceSessionOptions{SnapshotDir: testPaths.SnapshotDir}, controller, local)
+	if session != nil || !errors.Is(err, ErrSessionUnavailable) {
+		t.Fatalf("startLocalReferenceSession() = %#v, %v", session, err)
+	}
+	want := []string{"journal", "engine", "recover", "entropy", "entropy", "start"}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("order = %v, want %v", order, want)
+	}
+	reopened, err := prepareRecoveryJournal(root, os.Geteuid())
+	if err != nil {
+		t.Fatalf("lease after delegated start = %v", err)
+	}
+	_ = reopened.close()
+}
+
+func TestStartLocalReferenceSessionDoesNotGenerateRunUntilRecoveryIsEmpty(t *testing.T) {
+	root := filepath.Join(canonicalTempDir(t), "recovery")
+	engine := &sessionFakeEngine{}
+	randomReads := 0
+	starts := 0
+	local := localStartDependencies{
+		recoveryRoot: root, recoveryUID: os.Geteuid(),
+		random:         readerFunc(func([]byte) (int, error) { randomReads++; return 0, io.EOF }),
+		prepareJournal: prepareRecoveryJournal,
+		newEngine:      func() (Engine, error) { return engine, nil },
+		recover: func(_ context.Context, dependencies recoveryDependencies) error {
+			_, err := dependencies.journal.createPrepared(strings.Repeat("1a", 16), testPaths.SnapshotDir, testRecoverySpecDigest)
+			return err
+		},
+		start: func(context.Context, sessionDependencies) (*ReferenceSession, error) {
+			starts++
+			return nil, ErrSessionUnavailable
+		},
+		cleanupHost: func(HostPaths) error { return nil },
+	}
+	controller := ControllerInspection{GOOS: "linux", GOARCH: "amd64", EffectiveUIDKnown: true, EffectiveUID: 0}
+	if session, err := startLocalReferenceSession(context.Background(), LocalReferenceSessionOptions{SnapshotDir: testPaths.SnapshotDir}, controller, local); session != nil || !errors.Is(err, ErrSessionUnavailable) {
+		t.Fatalf("startLocalReferenceSession() = %#v, %v", session, err)
+	}
+	if randomReads != 0 || starts != 0 || engine.closeCount() != 1 {
+		t.Fatalf("new-run effects = entropy:%d starts:%d closes:%d", randomReads, starts, engine.closeCount())
+	}
+	assertReopenedSessionJournal(t, root, recoveryStatePrepared)
+}
+
+func TestStartLocalReferenceSessionRecoveryFailureClosesEngineAndLease(t *testing.T) {
+	root := filepath.Join(canonicalTempDir(t), "recovery")
+	engine := &sessionFakeEngine{}
+	local := localStartDependencies{
+		recoveryRoot: root, recoveryUID: os.Geteuid(), random: bytes.NewReader(make([]byte, 48)),
+		prepareJournal: prepareRecoveryJournal, newEngine: func() (Engine, error) { return engine, nil },
+		recover: func(ctx context.Context, _ recoveryDependencies) error {
+			deadline, ok := ctx.Deadline()
+			if !ok || time.Until(deadline) > sessionCleanupTimeout {
+				t.Fatalf("unbounded recovery context: %v, %v", deadline, ok)
+			}
+			return ErrSessionUnavailable
+		},
+		start: func(context.Context, sessionDependencies) (*ReferenceSession, error) {
+			t.Fatal("new session started after recovery failure")
+			return nil, nil
+		},
+		cleanupHost: func(HostPaths) error { return nil },
+	}
+	controller := ControllerInspection{GOOS: "linux", GOARCH: "amd64", EffectiveUIDKnown: true, EffectiveUID: 0}
+	if session, err := startLocalReferenceSession(context.Background(), LocalReferenceSessionOptions{SnapshotDir: testPaths.SnapshotDir}, controller, local); session != nil || !errors.Is(err, ErrSessionUnavailable) {
+		t.Fatalf("startLocalReferenceSession() = %#v, %v", session, err)
+	}
+	if engine.closeCount() != 1 {
+		t.Fatalf("engine close count = %d", engine.closeCount())
+	}
+	reopened, err := prepareRecoveryJournal(root, os.Geteuid())
+	if err != nil {
+		t.Fatalf("lease after recovery failure = %v", err)
+	}
+	_ = reopened.close()
+}
+
+func TestStartLocalReferenceSessionRecoveryTimeoutClosesEngineAndLease(t *testing.T) {
+	root := filepath.Join(canonicalTempDir(t), "recovery")
+	engine := &sessionFakeEngine{}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	local := localStartDependencies{
+		recoveryRoot: root, recoveryUID: os.Geteuid(), random: bytes.NewReader(make([]byte, 48)),
+		prepareJournal: prepareRecoveryJournal, newEngine: func() (Engine, error) { return engine, nil },
+		recover: func(ctx context.Context, _ recoveryDependencies) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		start: func(context.Context, sessionDependencies) (*ReferenceSession, error) {
+			t.Fatal("new session started after recovery timeout")
+			return nil, nil
+		},
+		cleanupHost: func(HostPaths) error { return nil },
+	}
+	controller := ControllerInspection{GOOS: "linux", GOARCH: "amd64", EffectiveUIDKnown: true, EffectiveUID: 0}
+	if session, err := startLocalReferenceSession(ctx, LocalReferenceSessionOptions{SnapshotDir: testPaths.SnapshotDir}, controller, local); session != nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("startLocalReferenceSession() = %#v, %v", session, err)
+	}
+	if engine.closeCount() != 1 {
+		t.Fatalf("engine close count = %d", engine.closeCount())
+	}
+	if reopened, err := prepareRecoveryJournal(root, os.Geteuid()); err != nil {
+		t.Fatalf("lease after recovery timeout = %v", err)
+	} else {
+		_ = reopened.close()
+	}
+}
+
+func TestStartLocalReferenceSessionTransfersLeaseToSuccessfulStart(t *testing.T) {
+	root := filepath.Join(canonicalTempDir(t), "recovery")
+	engine := &sessionFakeEngine{}
+	local := localStartDependencies{
+		recoveryRoot: root, recoveryUID: os.Geteuid(), random: bytes.NewReader(make([]byte, 48)),
+		prepareJournal: prepareRecoveryJournal, newEngine: func() (Engine, error) { return engine, nil },
+		recover: func(context.Context, recoveryDependencies) error { return nil },
+		start: func(_ context.Context, dependencies sessionDependencies) (*ReferenceSession, error) {
+			return &ReferenceSession{engine: dependencies.engine, journal: dependencies.journal}, nil
+		},
+		cleanupHost: func(HostPaths) error { return nil },
+	}
+	controller := ControllerInspection{GOOS: "linux", GOARCH: "amd64", EffectiveUIDKnown: true, EffectiveUID: 0}
+	session, err := startLocalReferenceSession(context.Background(), LocalReferenceSessionOptions{SnapshotDir: testPaths.SnapshotDir}, controller, local)
+	if err != nil || session == nil || session.journal == nil {
+		t.Fatalf("startLocalReferenceSession() = %#v, %v", session, err)
+	}
+	if engine.closeCount() != 0 {
+		t.Fatalf("engine closed after successful transfer = %d", engine.closeCount())
+	}
+	if second, err := prepareRecoveryJournal(root, os.Geteuid()); second != nil || !errors.Is(err, errRecoveryJournal) {
+		t.Fatalf("transferred lease not held = %#v, %v", second, err)
+	}
+	if err := session.engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.journal.close(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, err := prepareRecoveryJournal(root, os.Geteuid()); err != nil {
+		t.Fatalf("transferred lease did not release = %v", err)
+	} else {
+		_ = reopened.close()
+	}
+}
+
+func TestStartLocalReferenceSessionRejectsPlatformAndPathBeforeJournal(t *testing.T) {
+	called := 0
+	base := localStartDependencies{
+		recoveryRoot: "/unused", recoveryUID: 0, random: bytes.NewReader(make([]byte, 48)),
+		prepareJournal: func(string, int) (*recoveryJournal, error) { called++; return nil, nil },
+		newEngine:      func() (Engine, error) { return &sessionFakeEngine{}, nil },
+		recover:        func(context.Context, recoveryDependencies) error { return nil },
+		start:          func(context.Context, sessionDependencies) (*ReferenceSession, error) { return nil, nil },
+		cleanupHost:    func(HostPaths) error { return nil },
+	}
+	for _, test := range []struct {
+		name       string
+		controller ControllerInspection
+		snapshot   string
+	}{
+		{name: "platform", controller: ControllerInspection{GOOS: "darwin", GOARCH: "amd64", EffectiveUIDKnown: true, EffectiveUID: 0}, snapshot: testPaths.SnapshotDir},
+		{name: "root", controller: ControllerInspection{GOOS: "linux", GOARCH: "amd64", EffectiveUIDKnown: true, EffectiveUID: 1}, snapshot: testPaths.SnapshotDir},
+		{name: "path", controller: ControllerInspection{GOOS: "linux", GOARCH: "amd64", EffectiveUIDKnown: true, EffectiveUID: 0}, snapshot: testPaths.SnapshotDir + "/../snapshot"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if session, err := startLocalReferenceSession(context.Background(), LocalReferenceSessionOptions{SnapshotDir: test.snapshot}, test.controller, base); session != nil || !errors.Is(err, ErrSessionUnavailable) {
+				t.Fatalf("startLocalReferenceSession() = %#v, %v", session, err)
+			}
+		})
+	}
+	if called != 0 {
+		t.Fatalf("journal calls before admission = %d", called)
+	}
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (function readerFunc) Read(value []byte) (int, error) { return function(value) }
 
 func TestValidSnapshotTrustBoundaryRequiresOwnedNonWritableTreeAndAncestors(t *testing.T) {
 	trustedRoot := t.TempDir()

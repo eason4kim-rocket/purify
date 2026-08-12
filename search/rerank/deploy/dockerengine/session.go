@@ -43,9 +43,13 @@ type ReferenceSession struct {
 	cleanupDone      bool
 	containerCleaned bool
 	hostCleaned      bool
+	recordRemoved    bool
 	engineClosed     bool
+	journalClosed    bool
 	cleanupErr       error
 	cleanupHost      func() error
+	journal          *recoveryJournal
+	recoveryRecord   recoveryRecord
 	cleanupOwned     atomic.Bool
 	cancelEvents     context.CancelFunc
 	eventGuard       *sessionEventGuard
@@ -87,6 +91,7 @@ type sessionDependencies struct {
 	newRecorder              func(string, string) (sessionRecorder, error)
 	probeAuthenticated       func(context.Context, sessionRecorder) error
 	cleanupHost              func() error
+	journal                  *recoveryJournal
 }
 
 // startReferenceSession is intentionally package-private. The only eventual
@@ -97,14 +102,20 @@ func startReferenceSession(ctx context.Context, dependencies sessionDependencies
 		if dependencies.engine != nil {
 			_ = dependencies.engine.Close()
 		}
+		if dependencies.journal != nil {
+			_ = dependencies.journal.close()
+		}
 		return nil, sessionStartError(ctx)
 	}
 
 	prepared := false
+	hostMayExist := false
 	var plan *referencePlan
 	var owner ownership
 	created := false
 	cleanupOwned := true
+	var record recoveryRecord
+	recordPresent := false
 	var cancelEvents context.CancelFunc
 	var eventGuard *sessionEventGuard
 	fail := func() (*ReferenceSession, error) {
@@ -124,10 +135,18 @@ func startReferenceSession(ctx context.Context, dependencies sessionDependencies
 			cleanedContainer = cleanupOwnedUntilSettled(cleanupContext, dependencies.engine, plan, owner) == nil
 			cancel()
 		}
-		if prepared && cleanedContainer {
-			_ = dependencies.cleanupHost()
+		journalAllowsHostCleanup := dependencies.journal == nil || recordPresent && record.State != recoveryStateCreating
+		if (prepared || dependencies.journal != nil && hostMayExist) && cleanedContainer && journalAllowsHostCleanup {
+			if dependencies.cleanupHost() == nil && dependencies.journal != nil && recordPresent {
+				if dependencies.journal.remove(record) == nil {
+					recordPresent = false
+				}
+			}
 		}
 		_ = dependencies.engine.Close()
+		if dependencies.journal != nil {
+			_ = dependencies.journal.close()
+		}
 		return nil, sessionStartError(ctx)
 	}
 	var err error
@@ -146,16 +165,40 @@ func startReferenceSession(ctx context.Context, dependencies sessionDependencies
 	if err != nil || ValidateReferenceImage(image) != nil || ctx.Err() != nil {
 		return fail()
 	}
+	if dependencies.journal != nil {
+		record, err = dependencies.journal.createPrepared(dependencies.runID, dependencies.paths.SnapshotDir, plan.specDigest)
+		if err != nil || ctx.Err() != nil {
+			return fail()
+		}
+		recordPresent = true
+		hostMayExist = true
+	}
 	if err := dependencies.prepareHost(ctx, dependencies.paths); err != nil || ctx.Err() != nil {
 		return fail()
 	}
 	prepared = true
+	if dependencies.journal != nil {
+		record, err = dependencies.journal.markCreating(record)
+		if err != nil || ctx.Err() != nil {
+			return fail()
+		}
+	}
 	result, err := dependencies.engine.Create(ctx, plan.cloneCreateSpec())
 	if validLowerHex(result.ContainerID, 64) {
 		owner = ownership{
 			containerID: result.ContainerID, containerName: plan.create.Name,
 			labels: ownershipLabels(plan.create.Labels),
 		}
+		if dependencies.journal != nil {
+			ownedRecord, ownedErr := dependencies.journal.markOwned(record, result.ContainerID)
+			if ownedErr != nil {
+				return fail()
+			}
+			record = ownedRecord
+		}
+		// A response ID is not destructive cleanup authority in journal mode.
+		// Until owned is durable, preserve both the exact-name child and the
+		// creating record for a separately authenticated recovery decision.
 		created = true
 	}
 	if err != nil {
@@ -269,7 +312,7 @@ func startReferenceSession(ctx context.Context, dependencies sessionDependencies
 		engine: dependencies.engine, plan: plan, owner: owner, recorder: recorder,
 		evidence: evidence, lifetime: lifetime, cancel: cancelLifetime, done: make(chan struct{}),
 		live: true, cleanupHost: dependencies.cleanupHost, cancelEvents: cancelEvents, eventGuard: eventGuard,
-		anchorPID: finalRunning.After.State.PID,
+		journal: dependencies.journal, recoveryRecord: record, anchorPID: finalRunning.After.State.PID,
 	}
 	session.verifyRunning = func(verifyContext context.Context) (RunningInspection, error) {
 		return inspectRunning(verifyContext, dependencies, plan, owner)
@@ -719,7 +762,16 @@ func (session *ReferenceSession) cleanupOnce(cleanupContext context.Context) err
 				session.hostCleaned = true
 			}
 		}
-		readyToCloseEngine := !cleanupOwned || session.containerCleaned && session.hostCleaned
+		if cleanupOwned && session.containerCleaned && session.hostCleaned && !session.recordRemoved && cleanupError == nil {
+			if session.journal == nil {
+				session.recordRemoved = true
+			} else if err := session.journal.remove(session.recoveryRecord); err != nil {
+				cleanupError = err
+			} else {
+				session.recordRemoved = true
+			}
+		}
+		readyToCloseEngine := !cleanupOwned || session.containerCleaned && session.hostCleaned && session.recordRemoved
 		if readyToCloseEngine && !session.engineClosed && session.engine != nil {
 			if err := session.engine.Close(); err != nil {
 				cleanupError = err
@@ -727,12 +779,25 @@ func (session *ReferenceSession) cleanupOnce(cleanupContext context.Context) err
 				session.engineClosed = true
 			}
 		}
+		readyToCloseJournal := readyToCloseEngine && (session.engine == nil || session.engineClosed)
+		if readyToCloseJournal && !session.journalClosed {
+			if session.journal == nil {
+				session.journalClosed = true
+			} else {
+				if err := session.journal.close(); err != nil {
+					cleanupError = err
+				}
+				// close consumes the lease even when the underlying unlock/close
+				// reports an error; never retry through a stale journal handle.
+				session.journalClosed = true
+			}
+		}
 		if cleanupError != nil {
 			session.cleanupErr = ErrSessionUnavailable
 		} else {
 			session.cleanupErr = nil
 		}
-		session.cleanupDone = readyToCloseEngine && (session.engine == nil || session.engineClosed)
+		session.cleanupDone = readyToCloseJournal && session.journalClosed
 	}
 	return session.cleanupErr
 }

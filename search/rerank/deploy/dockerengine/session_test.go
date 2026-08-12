@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -19,9 +21,12 @@ type sessionFakeEngine struct {
 	image            ImageInspection
 	create           CreateResult
 	createErr        error
+	createHook       func(CreateSpec)
 	inspections      []ContainerInspection
 	inspectErrs      []error
+	inspectHook      func()
 	ownershipErrs    []error
+	ownershipHook    func()
 	afterKill        ContainerInspection
 	killed           bool
 	killErr          error
@@ -38,6 +43,7 @@ type sessionFakeEngine struct {
 	removes          int
 	removeErr        error
 	closes           int
+	closeHook        func()
 	startEvent       LifecycleEvent
 	suppressStart    bool
 }
@@ -45,7 +51,11 @@ type sessionFakeEngine struct {
 func (engine *sessionFakeEngine) Close() error {
 	engine.mu.Lock()
 	engine.closes++
+	hook := engine.closeHook
 	engine.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return nil
 }
 
@@ -67,6 +77,9 @@ func (engine *sessionFakeEngine) InspectImage(_ context.Context, reference strin
 
 func (engine *sessionFakeEngine) Create(_ context.Context, spec CreateSpec) (CreateResult, error) {
 	engine.record("create:" + spec.ImageID)
+	if engine.createHook != nil {
+		engine.createHook(spec)
+	}
 	return engine.create, engine.createErr
 }
 
@@ -88,6 +101,9 @@ func (engine *sessionFakeEngine) Start(_ context.Context, id string) error {
 
 func (engine *sessionFakeEngine) Inspect(_ context.Context, id string) (ContainerInspection, error) {
 	engine.record("inspect:" + id)
+	if engine.inspectHook != nil {
+		engine.inspectHook()
+	}
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	if engine.killed {
@@ -110,6 +126,9 @@ func (engine *sessionFakeEngine) Inspect(_ context.Context, id string) (Containe
 
 func (engine *sessionFakeEngine) InspectOwnership(_ context.Context, id string) (OwnershipInspection, error) {
 	engine.record("ownership:" + id)
+	if engine.ownershipHook != nil {
+		engine.ownershipHook()
+	}
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	if len(engine.ownershipErrs) > 0 {
@@ -282,6 +301,215 @@ func TestReferenceSessionStartsRecordsEmitsEvidenceAndCleansOwnedChild(t *testin
 	if !closed || records != 2 { // authenticated readiness plus caller Record
 		t.Fatalf("recorder closed/records = %v/%d", closed, records)
 	}
+}
+
+func TestReferenceSessionPersistsRecoveryBoundariesBeforeSideEffects(t *testing.T) {
+	dependencies, engine, _ := validSessionDependenciesForTest(t)
+	journal, root := newTestRecoveryJournal(t)
+	dependencies.journal = journal
+	var order []string
+	dependencies.prepareHost = func(context.Context, HostPaths) error {
+		assertSessionJournalState(t, journal, recoveryStatePrepared)
+		order = append(order, "prepared", "prepare-host")
+		return nil
+	}
+	engine.createHook = func(CreateSpec) {
+		assertSessionJournalState(t, journal, recoveryStateCreating)
+		order = append(order, "creating", "create")
+	}
+	firstInspect := true
+	engine.inspectHook = func() {
+		if firstInspect {
+			firstInspect = false
+			assertSessionJournalState(t, journal, recoveryStateOwned)
+			order = append(order, "owned", "inspect")
+		}
+	}
+	engine.closeHook = func() {
+		records, err := journal.records()
+		if err != nil || len(records) != 0 {
+			t.Fatalf("records before engine close = %#v, %v", records, err)
+		}
+		order = append(order, "record-removed", "engine-close")
+	}
+	session, err := startReferenceSession(context.Background(), dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second, err := prepareRecoveryJournal(root, os.Geteuid()); second != nil || !errors.Is(err, errRecoveryJournal) {
+		t.Fatalf("lease during live session = %#v, %v", second, err)
+	}
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"prepared", "prepare-host", "creating", "create", "owned", "inspect", "record-removed", "engine-close"}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("order = %v, want %v", order, want)
+	}
+	reopened, err := prepareRecoveryJournal(root, os.Geteuid())
+	if err != nil {
+		t.Fatalf("lease after Close = %v", err)
+	}
+	defer reopened.close()
+	if records, err := reopened.records(); err != nil || len(records) != 0 {
+		t.Fatalf("records after Close = %#v, %v", records, err)
+	}
+}
+
+func TestReferenceSessionRecoveryRecordFailureDiscipline(t *testing.T) {
+	t.Run("partial host preparation removes prepared record", func(t *testing.T) {
+		dependencies, _, _ := validSessionDependenciesForTest(t)
+		journal, root := newTestRecoveryJournal(t)
+		dependencies.journal = journal
+		dependencies.prepareHost = func(context.Context, HostPaths) error {
+			assertSessionJournalState(t, journal, recoveryStatePrepared)
+			return io.ErrUnexpectedEOF
+		}
+		hostCleanups := 0
+		dependencies.cleanupHost = func() error { hostCleanups++; return nil }
+		if session, err := startReferenceSession(context.Background(), dependencies); session != nil || !errors.Is(err, ErrSessionUnavailable) {
+			t.Fatalf("startReferenceSession() = %#v, %v", session, err)
+		}
+		if hostCleanups != 1 {
+			t.Fatalf("host cleanups = %d", hostCleanups)
+		}
+		assertReopenedSessionJournal(t, root, "")
+	})
+
+	t.Run("id-less create retains creating record and host", func(t *testing.T) {
+		dependencies, engine, _ := validSessionDependenciesForTest(t)
+		journal, root := newTestRecoveryJournal(t)
+		dependencies.journal = journal
+		engine.create = CreateResult{}
+		engine.createErr = io.ErrUnexpectedEOF
+		hostCleanups := 0
+		dependencies.cleanupHost = func() error { hostCleanups++; return nil }
+		if session, err := startReferenceSession(context.Background(), dependencies); session != nil || !errors.Is(err, ErrSessionUnavailable) {
+			t.Fatalf("startReferenceSession() = %#v, %v", session, err)
+		}
+		if hostCleanups != 0 {
+			t.Fatalf("host cleanups = %d", hostCleanups)
+		}
+		if kills, waits, removes := engine.cleanupCounts(); kills != 0 || waits != 0 || removes != 0 {
+			t.Fatalf("container cleanup = %d/%d/%d", kills, waits, removes)
+		}
+		assertReopenedSessionJournal(t, root, recoveryStateCreating)
+	})
+
+	t.Run("partial id is owned before cleanup", func(t *testing.T) {
+		dependencies, engine, _ := validSessionDependenciesForTest(t)
+		journal, root := newTestRecoveryJournal(t)
+		dependencies.journal = journal
+		engine.createErr = io.ErrUnexpectedEOF
+		engine.ownershipHook = func() { assertSessionJournalState(t, journal, recoveryStateOwned) }
+		if session, err := startReferenceSession(context.Background(), dependencies); session != nil || !errors.Is(err, ErrSessionUnavailable) {
+			t.Fatalf("startReferenceSession() = %#v, %v", session, err)
+		}
+		if _, _, removes := engine.cleanupCounts(); removes != 1 {
+			t.Fatalf("remove count = %d", removes)
+		}
+		assertReopenedSessionJournal(t, root, "")
+	})
+
+	t.Run("owned transition failure preserves ambiguous child and blocks recovery", func(t *testing.T) {
+		dependencies, engine, _ := validSessionDependenciesForTest(t)
+		dependencies.paths = recoveryHostPaths(recoveryRecord{
+			RunID: dependencies.runID, SnapshotDir: dependencies.paths.SnapshotDir,
+		})
+		journal, root := newTestRecoveryJournal(t)
+		dependencies.journal = journal
+		hostCleanups := 0
+		dependencies.cleanupHost = func() error { hostCleanups++; return nil }
+		journalPath := filepath.Join(root, testGenerated.RunID+recoveryJournalSuffix)
+		engine.createHook = func(CreateSpec) {
+			// Make the already durable creating record temporarily inadmissible so
+			// markOwned fails before it can replace the record. The controller
+			// must preserve the child and the ambiguous durable state.
+			if err := os.Chmod(journalPath, 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if session, err := startReferenceSession(context.Background(), dependencies); session != nil || !errors.Is(err, ErrSessionUnavailable) {
+			t.Fatalf("startReferenceSession() = %#v, %v", session, err)
+		}
+		if kills, waits, removes := engine.cleanupCounts(); kills != 0 || waits != 0 || removes != 0 {
+			t.Fatalf("destructive cleanup after markOwned failure = %d/%d/%d", kills, waits, removes)
+		}
+		if hostCleanups != 0 {
+			t.Fatalf("host cleanups after markOwned failure = %d", hostCleanups)
+		}
+		if err := os.Chmod(journalPath, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		recoveryJournal, err := prepareRecoveryJournal(root, os.Geteuid())
+		if err != nil {
+			t.Fatalf("prepare recovery journal = %v", err)
+		}
+		defer recoveryJournal.close()
+		records, err := recoveryJournal.records()
+		if err != nil || len(records) != 1 || records[0].State != recoveryStateCreating {
+			t.Fatalf("retained records = %#v, %v", records, err)
+		}
+		retained := records[0]
+		recoveryEngine := &recoveryFakeEngine{}
+		recoveryHostCleanups := 0
+		recoveryDependencies := validRecoveryDependencies(recoveryJournal, recoveryEngine)
+		recoveryDependencies.cleanupHost = func(HostPaths) error { recoveryHostCleanups++; return nil }
+		if err := recoverReferenceSessions(context.Background(), recoveryDependencies); !errors.Is(err, ErrSessionUnavailable) {
+			t.Fatalf("recoverReferenceSessions() = %v", err)
+		}
+		assertRecoveryRecord(t, recoveryJournal, retained)
+		if recoveryHostCleanups != 0 || recoveryEngine.resolveCalls != 0 || recoveryEngine.removeCalls != 0 ||
+			recoveryEngine.killCalls != 0 || recoveryEngine.waitCalls != 0 || recoveryEngine.createCalls != 0 || recoveryEngine.startCalls != 0 {
+			t.Fatalf("recovery effects = host:%d engine:%#v", recoveryHostCleanups, recoveryEngine)
+		}
+	})
+
+	t.Run("foreign ownership retains owned record but releases lease", func(t *testing.T) {
+		dependencies, engine, _ := validSessionDependenciesForTest(t)
+		journal, root := newTestRecoveryJournal(t)
+		dependencies.journal = journal
+		engine.inspections[0].Labels[LabelRunID] = strings.Repeat("c", 32)
+		hostCleanups := 0
+		dependencies.cleanupHost = func() error { hostCleanups++; return nil }
+		if session, err := startReferenceSession(context.Background(), dependencies); session != nil || !errors.Is(err, ErrSessionUnavailable) {
+			t.Fatalf("startReferenceSession() = %#v, %v", session, err)
+		}
+		if hostCleanups != 0 {
+			t.Fatalf("host cleanups = %d", hostCleanups)
+		}
+		assertReopenedSessionJournal(t, root, recoveryStateOwned)
+	})
+}
+
+func TestReferenceSessionRecoveryLeaseWaitsForRetryableHostCleanup(t *testing.T) {
+	dependencies, _, _ := validSessionDependenciesForTest(t)
+	journal, root := newTestRecoveryJournal(t)
+	dependencies.journal = journal
+	hostCleanups := 0
+	dependencies.cleanupHost = func() error {
+		hostCleanups++
+		if hostCleanups == 1 {
+			return io.ErrUnexpectedEOF
+		}
+		return nil
+	}
+	session, err := startReferenceSession(context.Background(), dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(context.Background()); !errors.Is(err, ErrSessionUnavailable) {
+		t.Fatalf("Close(first) = %v", err)
+	}
+	if second, err := prepareRecoveryJournal(root, os.Geteuid()); second != nil || !errors.Is(err, errRecoveryJournal) {
+		t.Fatalf("lease released before retry = %#v, %v", second, err)
+	}
+	assertSessionJournalState(t, journal, recoveryStateOwned)
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("Close(second) = %v", err)
+	}
+	assertReopenedSessionJournal(t, root, "")
 }
 
 func TestReferenceSessionLifecycleDriftRevokesInflightRecordBeforeCleanup(t *testing.T) {
@@ -1020,6 +1248,36 @@ func validSessionDependenciesForTest(t *testing.T) (sessionDependencies, *sessio
 		cleanupHost: func() error { return nil },
 	}
 	return dependencies, engine, recorder
+}
+
+func assertSessionJournalState(t *testing.T, journal *recoveryJournal, want string) {
+	t.Helper()
+	records, err := journal.records()
+	if err != nil || len(records) != 1 || records[0].State != want {
+		t.Fatalf("journal records = %#v, %v; want state %q", records, err, want)
+	}
+}
+
+func assertReopenedSessionJournal(t *testing.T, root, want string) {
+	t.Helper()
+	reopened, err := prepareRecoveryJournal(root, os.Geteuid())
+	if err != nil {
+		t.Fatalf("reopen recovery journal = %v", err)
+	}
+	defer reopened.close()
+	records, err := reopened.records()
+	if err != nil {
+		t.Fatalf("reopened records = %v", err)
+	}
+	if want == "" {
+		if len(records) != 0 {
+			t.Fatalf("reopened records = %#v, want empty", records)
+		}
+		return
+	}
+	if len(records) != 1 || records[0].State != want {
+		t.Fatalf("reopened records = %#v, want state %q", records, want)
+	}
 }
 
 func validSessionScoreRequest(t *testing.T) rerank.ScoreRequest {

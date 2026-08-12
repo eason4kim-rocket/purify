@@ -44,6 +44,17 @@ type LocalReferenceSessionOptions struct {
 	SnapshotDir string
 }
 
+type localStartDependencies struct {
+	recoveryRoot   string
+	recoveryUID    int
+	random         io.Reader
+	prepareJournal func(string, int) (*recoveryJournal, error)
+	newEngine      func() (Engine, error)
+	recover        func(context.Context, recoveryDependencies) error
+	start          func(context.Context, sessionDependencies) (*ReferenceSession, error)
+	cleanupHost    func(HostPaths) error
+}
+
 // StartLocalReferenceSession launches the pinned local Docker child and
 // returns a recording-only live handle. It never creates a production Scorer
 // or changes either certified admission gate.
@@ -58,27 +69,82 @@ func StartLocalReferenceSession(ctx context.Context, options LocalReferenceSessi
 		Endpoint: DockerSocketPath, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH,
 		EffectiveUIDKnown: true, EffectiveUID: os.Geteuid(),
 	}
-	if controller.GOOS != "linux" || controller.GOARCH != "amd64" || controller.EffectiveUID != 0 {
+	return startLocalReferenceSession(ctx, options, controller, localStartDependencies{
+		recoveryRoot: localRecoveryRoot, recoveryUID: 0, random: rand.Reader,
+		prepareJournal: prepareRecoveryJournal, newEngine: func() (Engine, error) { return newMobyEngine() },
+		recover: recoverReferenceSessions, start: startReferenceSession, cleanupHost: cleanupLocalHost,
+	})
+}
+
+func startLocalReferenceSession(ctx context.Context, options LocalReferenceSessionOptions, controller ControllerInspection, local localStartDependencies) (*ReferenceSession, error) {
+	if ctx == nil || ctx.Err() != nil || controller.GOOS != "linux" || controller.GOARCH != "amd64" ||
+		!controller.EffectiveUIDKnown || controller.EffectiveUID != 0 || !validLocalSnapshotOption(options.SnapshotDir) ||
+		local.recoveryRoot == "" || local.recoveryUID < 0 || local.random == nil || local.prepareJournal == nil ||
+		local.newEngine == nil || local.recover == nil || local.start == nil || local.cleanupHost == nil {
+		return nil, sessionStartError(ctx)
+	}
+	journal, err := local.prepareJournal(local.recoveryRoot, local.recoveryUID)
+	if err != nil || journal == nil {
+		if journal != nil {
+			_ = journal.close()
+		}
 		return nil, ErrSessionUnavailable
 	}
-	runID, apiKey, ok := generateLocalSessionSecrets(rand.Reader)
-	if !ok {
+	closeJournal := func() { _ = journal.close() }
+	if ctx.Err() != nil {
+		closeJournal()
+		return nil, ctx.Err()
+	}
+	engine, err := local.newEngine()
+	if err != nil || engine == nil {
+		if engine != nil {
+			_ = engine.Close()
+		}
+		closeJournal()
 		return nil, ErrSessionUnavailable
 	}
-	paths := HostPaths{
-		SnapshotDir:  filepath.Clean(options.SnapshotDir),
-		TemplateFile: filepath.Join(localTemplateRoot, runID, localTemplateName),
-		RunDir:       filepath.Join(localRunRoot, runID),
-	}
-	if !validHostPaths(paths) || paths.SnapshotDir != options.SnapshotDir {
+	fail := func() (*ReferenceSession, error) {
+		_ = engine.Close()
+		closeJournal()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, ErrSessionUnavailable
 	}
-	engine, err := newMobyEngine()
+	recoveryContext, cancelRecovery := context.WithTimeout(ctx, sessionCleanupTimeout)
+	err = local.recover(recoveryContext, recoveryDependencies{
+		journal: journal, engine: engine, cleanupHost: local.cleanupHost,
+	})
+	cancelRecovery()
 	if err != nil {
-		return nil, ErrSessionUnavailable
+		return fail()
+	}
+	records, err := journal.records()
+	if err != nil || len(records) != 0 || ctx.Err() != nil {
+		return fail()
+	}
+	runID, apiKey, ok := generateLocalSessionSecrets(local.random)
+	if !ok {
+		return fail()
+	}
+	paths := localHostPaths(options.SnapshotDir, runID)
+	if !validHostPaths(paths) {
+		return fail()
 	}
 	dependencies := localSessionDependencies(controller, paths, runID, apiKey, engine)
-	return startReferenceSession(ctx, dependencies)
+	dependencies.journal = journal
+	return local.start(ctx, dependencies)
+}
+
+func validLocalSnapshotOption(snapshotDir string) bool {
+	return validHostPaths(localHostPaths(snapshotDir, strings.Repeat("0", 32)))
+}
+
+func localHostPaths(snapshotDir, runID string) HostPaths {
+	return HostPaths{
+		SnapshotDir: snapshotDir, TemplateFile: filepath.Join(localTemplateRoot, runID, localTemplateName),
+		RunDir: filepath.Join(localRunRoot, runID),
+	}
 }
 
 func localSessionDependencies(controller ControllerInspection, paths HostPaths, runID, apiKey string, engine Engine) sessionDependencies {
