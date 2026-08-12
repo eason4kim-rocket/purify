@@ -16,7 +16,9 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/use-agent/purify/evidence"
+	"github.com/use-agent/purify/llm"
 	"github.com/use-agent/purify/models"
+	"github.com/use-agent/purify/verify/eav"
 )
 
 const validClaimsJSON = `[
@@ -134,6 +136,7 @@ func TestSearchWebToolContract(t *testing.T) {
 	}
 	wantTypes := map[string]string{
 		"query": "string", "limit": "integer", "domains": "array", "freshness": "string",
+		"ranking": "string", "expected_subject": "object",
 		"include_content": "boolean", "verify": "boolean", "deduplicate": "boolean", "schema": "string",
 		"engine": "string", "llm_api_key": "string", "llm_model": "string", "llm_base_url": "string",
 		"timeout": "integer",
@@ -155,6 +158,25 @@ func TestSearchWebToolContract(t *testing.T) {
 	}
 	if got := tool.InputSchema.Properties["freshness"].(map[string]any)["enum"]; !reflect.DeepEqual(got, []string{"day", "1d", "week", "7d", "month", "year"}) {
 		t.Fatalf("freshness enum = %#v", got)
+	}
+	if got := tool.InputSchema.Properties["ranking"].(map[string]any)["enum"]; !reflect.DeepEqual(got, []string{"provider", "relevance", "trust"}) {
+		t.Fatalf("ranking enum = %#v", got)
+	}
+	subject := tool.InputSchema.Properties["expected_subject"].(map[string]any)
+	if got := subject["required"]; !reflect.DeepEqual(got, []string{"name"}) {
+		t.Fatalf("expected_subject required = %#v", got)
+	}
+	if got, ok := subject["additionalProperties"].(bool); !ok || got {
+		t.Fatalf("expected_subject additionalProperties = %#v", subject["additionalProperties"])
+	}
+	subjectProperties, ok := subject["properties"].(map[string]any)
+	if !ok || subjectProperties["name"].(map[string]any)["type"] != "string" ||
+		subjectProperties["hint"].(map[string]any)["type"] != "string" {
+		t.Fatalf("expected_subject properties = %#v", subject["properties"])
+	}
+	if subjectProperties["name"].(map[string]any)["maxLength"] != eav.MaxSubjectBytes ||
+		subjectProperties["hint"].(map[string]any)["maxLength"] != eav.MaxHintBytes {
+		t.Fatalf("expected_subject limits = %#v", subjectProperties)
 	}
 	if got := tool.InputSchema.Properties["schema"].(map[string]any)["maxLength"]; got != models.MaxSearchSchemaBytes {
 		t.Fatalf("schema maxLength = %#v", got)
@@ -646,13 +668,40 @@ func TestHandleSearchWebRequestShapeAndCredentialSeparation(t *testing.T) {
 			absentFields: []string{"schema", "engine", "llm_api_key", "llm_model", "llm_base_url"},
 		},
 		{
+			name:         "omitted provider defaults stay off the wire",
+			arguments:    map[string]any{"query": "purify search"},
+			wantFields:   []string{"query", "deduplicate"},
+			absentFields: []string{"ranking", "expected_subject", "limit", "timeout", "schema", "engine", "llm_api_key", "llm_model", "llm_base_url"},
+		},
+		{
+			name:         "explicit provider preserves mode but not defaults",
+			arguments:    map[string]any{"query": "purify search", "ranking": "provider"},
+			wantFields:   []string{"query", "ranking", "deduplicate"},
+			absentFields: []string{"expected_subject", "limit", "timeout", "schema", "engine", "llm_api_key", "llm_model", "llm_base_url"},
+		},
+		{
+			name:         "relevance opt in preserves raw omission",
+			arguments:    map[string]any{"query": "purify search", "ranking": "relevance"},
+			wantFields:   []string{"query", "ranking", "deduplicate"},
+			absentFields: []string{"expected_subject", "limit", "timeout", "schema", "engine", "llm_api_key", "llm_model", "llm_base_url"},
+		},
+		{
+			name: "trust sends only the explicit subject and mode",
+			arguments: map[string]any{
+				"query": "purify search", "ranking": "trust",
+				"expected_subject": map[string]any{"name": "  Purify Inc.  ", "hint": " company "},
+			},
+			wantFields:   []string{"query", "ranking", "expected_subject", "deduplicate"},
+			absentFields: []string{"limit", "timeout", "schema", "engine", "llm_api_key", "llm_model", "llm_base_url"},
+		},
+		{
 			name: "compiled physically strips LLM settings",
 			arguments: map[string]any{
 				"query": "purify search", "schema": validExtractSchemaJSON, "engine": "compiled",
 				"llm_api_key": "caller-llm-secret", "llm_model": "ignored-model", "llm_base_url": "https://ignored.example/v1",
 			},
-			wantFields:   []string{"query", "schema", "engine", "deduplicate", "limit", "timeout"},
-			absentFields: []string{"llm_api_key", "llm_model", "llm_base_url"},
+			wantFields:   []string{"query", "schema", "engine", "deduplicate"},
+			absentFields: []string{"limit", "timeout", "llm_api_key", "llm_model", "llm_base_url"},
 		},
 		{
 			name: "auto without key physically strips fallback options",
@@ -660,8 +709,8 @@ func TestHandleSearchWebRequestShapeAndCredentialSeparation(t *testing.T) {
 				"query": "purify search", "schema": validExtractSchemaJSON,
 				"llm_model": "ignored-model", "llm_base_url": "https://ignored.example/v1",
 			},
-			wantFields:   []string{"query", "schema", "engine", "deduplicate", "limit", "timeout"},
-			absentFields: []string{"llm_api_key", "llm_model", "llm_base_url"},
+			wantFields:   []string{"query", "schema", "engine", "deduplicate"},
+			absentFields: []string{"limit", "timeout", "llm_api_key", "llm_model", "llm_base_url"},
 		},
 		{
 			name: "llm keeps caller credential separate from API auth",
@@ -677,6 +726,17 @@ func TestHandleSearchWebRequestShapeAndCredentialSeparation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			body := validSearchResponseBody(t)
+			if test.arguments["include_content"] == true || test.arguments["verify"] == true || test.arguments["schema"] != nil {
+				response := validSearchResponse()
+				response.Results = []models.SearchResult{}
+				body = mustJSON(t, response)
+			}
+			if ranking, _ := test.arguments["ranking"].(string); ranking == "relevance" {
+				body = validRelevanceSearchResponseBody(t)
+			}
+			if ranking, _ := test.arguments["ranking"].(string); ranking == "trust" {
+				body = validSearchErrorBody(t, models.ErrCodeSearchUnavailable, "search is unavailable")
+			}
 			client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 				if request.Method != http.MethodPost || request.URL.String() != "http://purify.test/api/v1/search" {
 					t.Errorf("request = %s %s", request.Method, request.URL)
@@ -714,16 +774,34 @@ func TestHandleSearchWebRequestShapeAndCredentialSeparation(t *testing.T) {
 				if payload.Query != "purify search" || payload.LLMAPIKey != test.wantLLMAPIKey {
 					t.Errorf("payload = %#v", payload)
 				}
-				return httpResponse(http.StatusOK, body), nil
+				if test.arguments["ranking"] == "trust" && (payload.ExpectedSubject == nil ||
+					payload.ExpectedSubject.Name != "Purify Inc." || payload.ExpectedSubject.Hint != "company") {
+					t.Errorf("trust expected_subject = %#v", payload.ExpectedSubject)
+				}
+				status := http.StatusOK
+				if ranking, _ := test.arguments["ranking"].(string); ranking == "trust" {
+					status = http.StatusServiceUnavailable
+				}
+				return httpResponse(status, body), nil
 			})}
 			handler := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")
 
 			result, protocolErr := handler(context.Background(), searchRequest(test.arguments))
-			if protocolErr != nil || result.IsError {
+			wantToolError := test.arguments["ranking"] == "trust"
+			if protocolErr != nil || result.IsError != wantToolError {
 				t.Fatalf("result = %#v, protocol error = %v, text = %s", result, protocolErr, toolResultText(t, result))
 			}
+			if wantToolError {
+				return
+			}
 			got, ok := result.StructuredContent.(models.SearchResponse)
-			if !ok || !reflect.DeepEqual(got, validSearchResponse()) {
+			want := validSearchResponse()
+			if test.arguments["ranking"] == "relevance" {
+				want = validRelevanceSearchResponse()
+			} else if test.arguments["include_content"] == true || test.arguments["verify"] == true || test.arguments["schema"] != nil {
+				want.Results = []models.SearchResult{}
+			}
+			if !ok || !reflect.DeepEqual(got, want) {
 				t.Fatalf("structured response = %#v", result.StructuredContent)
 			}
 			var fallback models.SearchResponse
@@ -731,6 +809,82 @@ func TestHandleSearchWebRequestShapeAndCredentialSeparation(t *testing.T) {
 				t.Fatalf("fallback parity = %#v, error = %v", fallback, err)
 			}
 		})
+	}
+}
+
+func TestHandleSearchWebUsesModeAwareEffectiveDeadlineWithoutMaterializingDefaults(t *testing.T) {
+	tests := []struct {
+		name        string
+		arguments   map[string]any
+		wantSeconds int
+		wantError   bool
+	}{
+		{name: "provider", arguments: map[string]any{"query": "purify search"}, wantSeconds: 30},
+		{name: "relevance", arguments: map[string]any{"query": "purify search", "ranking": "relevance"}, wantSeconds: 30},
+		{name: "trust", arguments: map[string]any{"query": "purify search", "ranking": "trust", "expected_subject": map[string]any{"name": "Purify"}}, wantSeconds: 60, wantError: true},
+		{name: "explicit timeout", arguments: map[string]any{"query": "purify search", "timeout": 7}, wantSeconds: 7},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := validSearchResponseBody(t)
+			status := http.StatusOK
+			if test.arguments["ranking"] == "relevance" {
+				body = validRelevanceSearchResponseBody(t)
+			}
+			if test.arguments["ranking"] == "trust" {
+				body = validSearchErrorBody(t, models.ErrCodeSearchUnavailable, "search is unavailable")
+				status = http.StatusServiceUnavailable
+			}
+			client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				deadline, ok := request.Context().Deadline()
+				remaining := time.Until(deadline)
+				minimum := time.Duration(test.wantSeconds)*time.Second - time.Second
+				maximum := time.Duration(test.wantSeconds)*time.Second + time.Second
+				if !ok || remaining < minimum || remaining > maximum {
+					t.Errorf("deadline remaining = %s, want about %ds", remaining, test.wantSeconds)
+				}
+				rawBody, err := io.ReadAll(request.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal(rawBody, &fields); err != nil {
+					t.Fatal(err)
+				}
+				if _, explicit := test.arguments["timeout"]; explicit {
+					if _, present := fields["timeout"]; !present {
+						t.Errorf("explicit timeout omitted: %s", rawBody)
+					}
+				} else if _, present := fields["timeout"]; present {
+					t.Errorf("default timeout materialized: %s", rawBody)
+				}
+				if _, present := fields["limit"]; present {
+					t.Errorf("default limit materialized: %s", rawBody)
+				}
+				return httpResponse(status, body), nil
+			})}
+			result, protocolErr := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")(
+				context.Background(), searchRequest(test.arguments),
+			)
+			if protocolErr != nil || result.IsError != test.wantError {
+				t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
+			}
+		})
+	}
+}
+
+func TestSearchPayloadClonesExpectedSubject(t *testing.T) {
+	subject := map[string]any{"name": "Purify", "hint": "company"}
+	payload, _, err := searchPayload(map[string]any{
+		"query": "q", "ranking": "trust", "expected_subject": subject,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject["name"] = "mutated"
+	subject["hint"] = "mutated"
+	if payload.ExpectedSubject == nil || payload.ExpectedSubject.Name != "Purify" || payload.ExpectedSubject.Hint != "company" {
+		t.Fatalf("payload aliases caller subject: %#v", payload.ExpectedSubject)
 	}
 }
 
@@ -744,14 +898,30 @@ func TestHandleSearchWebRejectsInvalidArgumentsBeforeHTTP(t *testing.T) {
 		{name: "blank query", arguments: map[string]any{"query": " \t "}},
 		{name: "too many query words", arguments: map[string]any{"query": strings.Repeat("word ", models.MaxSearchQueryWords+1)}},
 		{name: "fractional limit", arguments: map[string]any{"query": "q", "limit": 1.5}},
+		{name: "null limit", arguments: map[string]any{"query": "q", "limit": nil}},
+		{name: "zero limit", arguments: map[string]any{"query": "q", "limit": 0}},
 		{name: "limit too high", arguments: map[string]any{"query": "q", "limit": models.MaxSearchLimit + 1}},
 		{name: "fractional timeout", arguments: map[string]any{"query": "q", "timeout": 2.5}},
+		{name: "null timeout", arguments: map[string]any{"query": "q", "timeout": nil}},
+		{name: "zero timeout", arguments: map[string]any{"query": "q", "timeout": 0}},
 		{name: "non-array domains", arguments: map[string]any{"query": "q", "domains": "example.com"}},
 		{name: "non-string domain", arguments: map[string]any{"query": "q", "domains": []any{42}}},
 		{name: "domain with URL", arguments: map[string]any{"query": "q", "domains": []any{"https://example.com"}}},
 		{name: "localhost domain", arguments: map[string]any{"query": "q", "domains": []any{"localhost"}}},
 		{name: "IP domain", arguments: map[string]any{"query": "q", "domains": []any{"127.0.0.1"}}},
 		{name: "unknown freshness", arguments: map[string]any{"query": "q", "freshness": "pw"}},
+		{name: "null ranking", arguments: map[string]any{"query": "q", "ranking": nil}},
+		{name: "unknown ranking", arguments: map[string]any{"query": "q", "ranking": "Relevance"}},
+		{name: "subject with provider", arguments: map[string]any{"query": "q", "expected_subject": map[string]any{"name": "subject"}}},
+		{name: "subject with relevance", arguments: map[string]any{"query": "q", "ranking": "relevance", "expected_subject": map[string]any{"name": "subject"}}},
+		{name: "trust missing subject", arguments: map[string]any{"query": "q", "ranking": "trust"}},
+		{name: "trust null subject", arguments: map[string]any{"query": "q", "ranking": "trust", "expected_subject": nil}},
+		{name: "trust subject missing name", arguments: map[string]any{"query": "q", "ranking": "trust", "expected_subject": map[string]any{"hint": "hint"}}},
+		{name: "trust subject case smuggle", arguments: map[string]any{"query": "q", "ranking": "trust", "expected_subject": map[string]any{"Name": "subject"}}},
+		{name: "trust subject unknown field", arguments: map[string]any{"query": "q", "ranking": "trust", "expected_subject": map[string]any{"name": "subject", "kind": "company"}}},
+		{name: "trust subject blank after normalization", arguments: map[string]any{"query": "q", "ranking": "trust", "expected_subject": map[string]any{"name": " \t "}}},
+		{name: "trust subject punctuation normalizes empty", arguments: map[string]any{"query": "q", "ranking": "trust", "expected_subject": map[string]any{"name": `..."''`}}},
+		{name: "trust limit above five", arguments: map[string]any{"query": "q", "ranking": "trust", "expected_subject": map[string]any{"name": "subject"}, "limit": 6}},
 		{name: "coerced boolean", arguments: map[string]any{"query": "q", "verify": "true"}},
 		{name: "engine without schema", arguments: map[string]any{"query": "q", "engine": "compiled"}},
 		{name: "key without schema", arguments: map[string]any{"query": "q", "llm_api_key": "key"}},
@@ -817,6 +987,9 @@ func TestHandleSearchWebInputLimits(t *testing.T) {
 			var calls atomic.Int32
 			response := validSearchResponse()
 			response.Query = strings.Join(strings.Fields(test.atLimit["query"].(string)), " ")
+			if test.atLimit["schema"] != nil {
+				response.Results = []models.SearchResult{}
+			}
 			responseBody, err := json.Marshal(response)
 			if err != nil {
 				t.Fatal(err)
@@ -838,20 +1011,52 @@ func TestHandleSearchWebInputLimits(t *testing.T) {
 	}
 }
 
+func TestSearchPayloadExpectedSubjectLimitsAndNormalization(t *testing.T) {
+	tests := []struct {
+		name     string
+		subject  map[string]any
+		wantName string
+		wantHint string
+		wantErr  bool
+	}{
+		{name: "name N", subject: map[string]any{"name": strings.Repeat("s", eav.MaxSubjectBytes)}, wantName: strings.Repeat("s", eav.MaxSubjectBytes)},
+		{name: "name N plus one", subject: map[string]any{"name": strings.Repeat("s", eav.MaxSubjectBytes+1)}, wantErr: true},
+		{name: "hint N", subject: map[string]any{"name": "subject", "hint": strings.Repeat("h", eav.MaxHintBytes)}, wantName: "subject", wantHint: strings.Repeat("h", eav.MaxHintBytes)},
+		{name: "hint N plus one", subject: map[string]any{"name": "subject", "hint": strings.Repeat("h", eav.MaxHintBytes+1)}, wantErr: true},
+		{name: "trimmed clone", subject: map[string]any{"name": "  subject  ", "hint": "  context  "}, wantName: "subject", wantHint: "context"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload, _, err := searchPayload(map[string]any{
+				"query": "q", "ranking": "trust", "expected_subject": test.subject,
+			})
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("searchPayload accepted %#v", test.subject)
+				}
+				return
+			}
+			if err != nil || payload.ExpectedSubject == nil || payload.ExpectedSubject.Name != test.wantName || payload.ExpectedSubject.Hint != test.wantHint {
+				t.Fatalf("searchPayload = %#v, %v", payload, err)
+			}
+		})
+	}
+}
+
 func TestDecodeSearchResponseAcceptsCompleteEnrichmentShape(t *testing.T) {
 	t.Parallel()
 
 	response := validSearchResponse()
 	fetchedAt := time.Date(2026, time.August, 10, 1, 2, 3, 0, time.UTC)
 	verified := true
-	unlocatedRate := 0.25
+	unlocatedRate := 0.0
 	basis := models.EvidenceBasis{
-		"/name": {
+		"name": {
 			Quote: "Purify", TextRange: [2]int{0, 6}, Method: evidence.MethodExact,
 			SnapshotID: "sha256:" + strings.Repeat("a", 64), FetchedAt: fetchedAt,
 		},
 	}
-	receipts := models.FieldReceipts{"/name": "signed-field-receipt"}
+	receipts := models.FieldReceipts{"name": "signed-field-receipt"}
 	response.Results[0].FinalURL = "https://example.com/final"
 	response.Results[0].Content = "Purify content"
 	response.Results[0].Verified = &verified
@@ -886,8 +1091,172 @@ func TestDecodeSearchResponseAcceptsCompleteEnrichmentShape(t *testing.T) {
 	}
 }
 
+func TestDecodeSearchResponseRejectsNullAnchorOffsets(t *testing.T) {
+	fetchedAt := time.Date(2026, time.August, 10, 1, 2, 3, 0, time.UTC)
+	verified := true
+	unlocatedRate := 0.0
+	base := validSearchResponse()
+	base.Results[0].Verified = &verified
+	base.Results[0].VerificationStatus = models.SearchVerificationVerified
+	base.Results[0].Evidence = &evidence.Anchor{
+		Quote: "Purify", TextRange: [2]int{0, 6}, Method: evidence.MethodExact,
+		SnapshotID: "sha256:" + strings.Repeat("a", 64), FetchedAt: fetchedAt,
+	}
+	base.Results[0].Receipt = "signed-snippet-receipt"
+	base.Results[0].Data = json.RawMessage(`{"name":"Purify"}`)
+	basis := models.EvidenceBasis{"name": *base.Results[0].Evidence}
+	receipts := models.FieldReceipts{"name": "signed-field-receipt"}
+	base.Results[0].Basis = &basis
+	base.Results[0].Receipts = &receipts
+	base.Results[0].UnlocatedRate = &unlocatedRate
+
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "snippet evidence", mutate: func(document map[string]any) {
+			result := searchResultDocument(t, document, 0)
+			result["evidence"].(map[string]any)["text_range"] = []any{nil, float64(6)}
+		}},
+		{name: "extraction basis", mutate: func(document map[string]any) {
+			result := searchResultDocument(t, document, 0)
+			result["basis"].(map[string]any)["name"].(map[string]any)["text_range"] = []any{nil, float64(6)}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := mutateSearchResponseBody(t, base, test.mutate)
+			if _, err := decodeSearchResponse(body); err == nil {
+				t.Fatalf("decoder accepted null anchor offset: %s", body)
+			}
+		})
+	}
+}
+
+func TestDecodeSearchResponseEnforcesResultTextBounds(t *testing.T) {
+	valid := validSearchResponse()
+	valid.Results[0].Title = strings.Repeat("t", models.MaxSearchResultTitleBytes)
+	valid.Results[0].Snippet = strings.Repeat("s", models.MaxSearchResultSnippetBytes)
+	valid.Results[0].Content = strings.Repeat("c", models.MaxSearchResultContentBytes)
+	valid.Results[0].FinalURL = "https://example.com/final"
+	body, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeSearchResponse(body); err != nil {
+		t.Fatalf("exact text bounds rejected: %v", err)
+	}
+	emptyTitle := validSearchResponse()
+	emptyTitle.Results[0].Title = ""
+	body, err = json.Marshal(emptyTitle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeSearchResponse(body); err != nil {
+		t.Fatalf("empty production title rejected: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*models.SearchResponse)
+	}{
+		{name: "title edge whitespace", mutate: func(response *models.SearchResponse) { response.Results[0].Title = " title" }},
+		{name: "title control", mutate: func(response *models.SearchResponse) { response.Results[0].Title = "title\x00" }},
+		{name: "title over limit", mutate: func(response *models.SearchResponse) {
+			response.Results[0].Title = strings.Repeat("t", models.MaxSearchResultTitleBytes+1)
+		}},
+		{name: "snippet edge whitespace", mutate: func(response *models.SearchResponse) { response.Results[0].Snippet = " snippet" }},
+		{name: "snippet control", mutate: func(response *models.SearchResponse) { response.Results[0].Snippet = "snippet\x00" }},
+		{name: "snippet over limit", mutate: func(response *models.SearchResponse) {
+			response.Results[0].Snippet = strings.Repeat("s", models.MaxSearchResultSnippetBytes+1)
+		}},
+		{name: "blank content", mutate: func(response *models.SearchResponse) { response.Results[0].Content = " \n " }},
+		{name: "content over limit", mutate: func(response *models.SearchResponse) {
+			response.Results[0].Content = strings.Repeat("c", models.MaxSearchResultContentBytes+1)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := searchResponseCopy(validSearchResponse(), test.mutate)
+			body, err := json.Marshal(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := decodeSearchResponse(body); err == nil {
+				t.Fatalf("decoder accepted invalid result text: %s", test.name)
+			}
+		})
+	}
+}
+
+func TestDecodeSearchResponseEnforcesVerificationReceiptBound(t *testing.T) {
+	response := validSearchResponse()
+	fetchedAt := time.Date(2026, time.August, 10, 1, 2, 3, 0, time.UTC)
+	verified := true
+	response.Results[0].FinalURL = "https://example.com/final"
+	response.Results[0].Verified = &verified
+	response.Results[0].VerificationStatus = models.SearchVerificationVerified
+	response.Results[0].Evidence = &evidence.Anchor{
+		Quote: "Purify", TextRange: [2]int{0, 6}, Method: evidence.MethodExact,
+		SnapshotID: "sha256:" + strings.Repeat("a", 64), FetchedAt: fetchedAt,
+	}
+	response.Results[0].Receipt = strings.Repeat("r", models.MaxSearchResultReceiptBytes)
+	body, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeSearchResponse(body); err != nil {
+		t.Fatalf("exact verification receipt bound rejected: %v", err)
+	}
+
+	response.Results[0].Receipt += "r"
+	body, err = json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeSearchResponse(body); err == nil {
+		t.Fatal("decoder accepted verification receipt above its production bound")
+	}
+}
+
+func TestDecodeSearchResponseEnforcesResultDataBound(t *testing.T) {
+	response := validSearchResponse()
+	fetchedAt := time.Date(2026, time.August, 10, 1, 2, 3, 0, time.UTC)
+	basis := models.EvidenceBasis{"$": {
+		Method: evidence.MethodUnlocated, SnapshotID: "sha256:" + strings.Repeat("a", 64), FetchedAt: fetchedAt,
+	}}
+	receipts := models.FieldReceipts{"$": "signed-field-receipt"}
+	unlocatedRate := 1.0
+	response.Results[0].FinalURL = "https://example.com/final"
+	response.Results[0].Data = json.RawMessage(`"` + strings.Repeat("d", models.MaxSearchResultDataBytes-2) + `"`)
+	response.Results[0].Basis = &basis
+	response.Results[0].Receipts = &receipts
+	response.Results[0].UnlocatedRate = &unlocatedRate
+	body, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeSearchResponse(body); err != nil {
+		t.Fatalf("exact data bound rejected: %v", err)
+	}
+	response.Results[0].Data = json.RawMessage(`"` + strings.Repeat("d", models.MaxSearchResultDataBytes-1) + `"`)
+	body, err = json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeSearchResponse(body); err == nil {
+		t.Fatal("decoder accepted result data above its production bound")
+	}
+}
+
 func TestDecodeSearchResponseRejectsMalformedDocuments(t *testing.T) {
 	base := validSearchResponse()
+	relevance := validRelevanceSearchResponse()
+	errorResponse := models.SearchResponse{
+		Success: false, Results: []models.SearchResult{},
+		Error: &models.ErrorDetail{Code: models.ErrCodeSearchUnavailable, Message: "search is unavailable"},
+	}
+	errorBody := mustJSON(t, errorResponse)
 	tests := []struct {
 		name string
 		body []byte
@@ -896,6 +1265,31 @@ func TestDecodeSearchResponseRejectsMalformedDocuments(t *testing.T) {
 		{name: "null response", body: []byte(`null`)},
 		{name: "trailing value", body: append(validSearchResponseBody(t), []byte(` {}`)...)},
 		{name: "duplicate top-level field", body: bytes.Replace(validSearchResponseBody(t), []byte(`{"success":true`), []byte(`{"success":true,"success":true`), 1)},
+		{name: "unicode escaped duplicate top-level field", body: bytes.Replace(validSearchResponseBody(t), []byte(`{"success":true`), []byte(`{"success":true,"\u0073uccess":true`), 1)},
+		{name: "null ranking summary", body: mutateSearchResponseBody(t, base, func(document map[string]any) {
+			document["ranking"] = nil
+		})},
+		{name: "case-smuggled ranking summary", body: bytes.Replace(validRelevanceSearchResponseBody(t), []byte(`"ranking":{"mode"`), []byte(`"Ranking":{"mode"`), 1)},
+		{name: "case-smuggled result ranking", body: bytes.Replace(validRelevanceSearchResponseBody(t), []byte(`"ranking":{"provider_rank"`), []byte(`"Ranking":{"provider_rank"`), 1)},
+		{name: "case-smuggled nested ranking field", body: bytes.Replace(validRelevanceSearchResponseBody(t), []byte(`"provider_rank":1`), []byte(`"Provider_Rank":1`), 1)},
+		{name: "case-smuggled rerank timing", body: bytes.Replace(validRelevanceSearchResponseBody(t), []byte(`"rerank_ms":0`), []byte(`"RERANK_MS":0`), 1)},
+		{name: "null relevance score", body: mutateSearchResponseBody(t, relevance, func(document map[string]any) {
+			searchResultDocument(t, document, 0)["ranking"].(map[string]any)["relevance_score"] = nil
+		})},
+		{name: "null candidate count", body: mutateSearchResponseBody(t, relevance, func(document map[string]any) {
+			document["ranking"].(map[string]any)["candidate_count"] = nil
+		})},
+		{name: "error response with ranking", body: mutateSearchResponseBody(t, errorResponse, func(document map[string]any) {
+			document["ranking"] = map[string]any{"mode": "relevance", "status": "applied", "candidate_count": 0}
+		})},
+		{name: "error response with ranking timing", body: mutateSearchResponseBody(t, errorResponse, func(document map[string]any) {
+			timing := document["timing"].(map[string]any)
+			timing["rerank_ms"] = float64(0)
+		})},
+		{name: "case-smuggled error code beside lowercase", body: bytes.Replace(errorBody,
+			[]byte(`"code":"SEARCH_UNAVAILABLE"`), []byte(`"code":"SEARCH_UNAVAILABLE","Code":"OVERRIDE"`), 1)},
+		{name: "unicode case-smuggled error code beside lowercase", body: bytes.Replace(errorBody,
+			[]byte(`"code":"SEARCH_UNAVAILABLE"`), []byte(`"code":"SEARCH_UNAVAILABLE","\u0043ode":"OVERRIDE"`), 1)},
 		{name: "unknown top-level field", body: mutateSearchResponseBody(t, base, func(document map[string]any) {
 			document["provider"] = "brave"
 		})},
@@ -946,6 +1340,199 @@ func TestDecodeSearchResponseRejectsMalformedDocuments(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := decodeSearchResponse(test.body); err == nil {
 				t.Fatalf("decode accepted malformed body: %s", test.body)
+			}
+		})
+	}
+}
+
+func TestValidateExtractErrorDetailRejectsCaseSmuggling(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{name: "exact case variant beside lowercase", raw: []byte(
+			`{"code":"SEARCH_UNAVAILABLE","Code":"OVERRIDE","message":"search is unavailable"}`)},
+		{name: "unicode case variant beside lowercase", raw: []byte(
+			`{"code":"SEARCH_UNAVAILABLE","\u0043ode":"OVERRIDE","message":"search is unavailable"}`)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var detail models.ErrorDetail
+			if err := json.Unmarshal(test.raw, &detail); err != nil {
+				t.Fatal(err)
+			}
+			if err := validateExtractErrorDetail(&detail, test.raw, "response error"); err == nil {
+				t.Fatalf("validator accepted case-smuggled detail: %s", test.raw)
+			}
+		})
+	}
+}
+
+func TestDecodeExtractResponseRejectsCaseSmuggledErrorDetail(t *testing.T) {
+	response := models.ExtractResponse{
+		Success:  false,
+		Metadata: models.Metadata{},
+		Tokens:   models.TokenInfo{},
+		Timing:   models.ExtractTimingInfo{},
+		Error:    &models.ErrorDetail{Code: models.ErrCodeContentUnusable, Message: "content is unusable"},
+	}
+	body := mustJSON(t, response)
+	for _, replacement := range [][]byte{
+		[]byte(`"code":"CONTENT_UNUSABLE","Code":"OVERRIDE"`),
+		[]byte(`"code":"CONTENT_UNUSABLE","\u0043ode":"OVERRIDE"`),
+	} {
+		malformed := bytes.Replace(body, []byte(`"code":"CONTENT_UNUSABLE"`), replacement, 1)
+		if _, err := decodeExtractResponse(malformed); err == nil {
+			t.Fatalf("decoder accepted case-smuggled extract error: %s", malformed)
+		}
+	}
+}
+
+func TestHandleSearchWebEnforcesRelevanceResponsePresenceMatrix(t *testing.T) {
+	validApplied := validRelevanceSearchResponse()
+	validEmpty := searchResponseCopy(validApplied, func(response *models.SearchResponse) {
+		response.Results = []models.SearchResult{}
+		response.Ranking.CandidateCount = 0
+	})
+	validDegraded := validRelevanceSearchResponse()
+	validDegraded.Ranking.Status = models.SearchRankingDegraded
+	validDegraded.Ranking.DegradedReason = models.SearchRankingReasonRerankerFailed
+	validDegraded.Results[0].Ranking = nil
+
+	tests := []struct {
+		name      string
+		arguments map[string]any
+		response  models.SearchResponse
+		wantError bool
+	}{
+		{name: "applied", arguments: map[string]any{"query": "purify search", "ranking": "relevance"}, response: validApplied},
+		{name: "applied empty pool", arguments: map[string]any{"query": "purify search", "ranking": "relevance"}, response: validEmpty},
+		{name: "applied empty pool requires zero rerank timing", arguments: map[string]any{"query": "purify search", "ranking": "relevance"}, response: searchResponseCopy(validEmpty, func(response *models.SearchResponse) {
+			one := int64(1)
+			response.Timing.RerankMs = &one
+		}), wantError: true},
+		{name: "degraded", arguments: map[string]any{"query": "purify search", "ranking": "relevance"}, response: validDegraded},
+		{name: "degraded requires nonempty candidate pool", arguments: map[string]any{"query": "purify search", "ranking": "relevance"}, response: searchResponseCopy(validDegraded, func(response *models.SearchResponse) {
+			response.Results = []models.SearchResult{}
+			response.Ranking.CandidateCount = 0
+		}), wantError: true},
+		{name: "provider forbids summary", arguments: map[string]any{"query": "purify search"}, response: validApplied, wantError: true},
+		{name: "explicit relevance requires summary", arguments: map[string]any{"query": "purify search", "ranking": "relevance"}, response: validSearchResponse(), wantError: true},
+		{name: "applied requires result ranking", arguments: map[string]any{"query": "purify search", "ranking": "relevance"}, response: searchResponseCopy(validApplied, func(response *models.SearchResponse) {
+			response.Results[0].Ranking = nil
+		}), wantError: true},
+		{name: "applied requires relevance score", arguments: map[string]any{"query": "purify search", "ranking": "relevance"}, response: searchResponseCopy(validApplied, func(response *models.SearchResponse) {
+			response.Results[0].Ranking.RelevanceScore = nil
+		}), wantError: true},
+		{name: "relevance requires rerank timing", arguments: map[string]any{"query": "purify search", "ranking": "relevance"}, response: searchResponseCopy(validApplied, func(response *models.SearchResponse) {
+			response.Timing.RerankMs = nil
+		}), wantError: true},
+		{name: "degraded requires reason", arguments: map[string]any{"query": "purify search", "ranking": "relevance"}, response: searchResponseCopy(validDegraded, func(response *models.SearchResponse) {
+			response.Ranking.DegradedReason = ""
+		}), wantError: true},
+		{name: "degraded forbids result ranking", arguments: map[string]any{"query": "purify search", "ranking": "relevance"}, response: searchResponseCopy(validDegraded, func(response *models.SearchResponse) {
+			score := 0.5
+			response.Results[0].Ranking = &models.SearchResultRanking{ProviderRank: 1, RelevanceScore: &score}
+		}), wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body, err := json.Marshal(test.response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return httpResponse(http.StatusOK, body), nil
+			})}
+			result, protocolErr := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")(
+				context.Background(), searchRequest(test.arguments),
+			)
+			if protocolErr != nil || result.IsError != test.wantError {
+				t.Fatalf("result = %#v, protocol error = %v, body=%s", result, protocolErr, body)
+			}
+		})
+	}
+}
+
+func TestSearchRelevanceResultBeforeUsesRequestedURL(t *testing.T) {
+	score := 0.8
+	left := models.SearchResult{
+		URL: "https://a.example/requested", FinalURL: "https://z.example/final",
+		Ranking: &models.SearchResultRanking{ProviderRank: 1, RelevanceScore: &score},
+	}
+	right := models.SearchResult{
+		URL: "https://b.example/requested", FinalURL: "https://a.example/final",
+		Ranking: &models.SearchResultRanking{ProviderRank: 1, RelevanceScore: &score},
+	}
+	if !searchRelevanceResultBefore(left, right) || searchRelevanceResultBefore(right, left) {
+		t.Fatal("relevance URL tie-break did not use the requested canonical URL")
+	}
+}
+
+func TestHandleSearchWebEnforcesRelevanceResultOrder(t *testing.T) {
+	valid := validRelevanceSearchResponseWithTwoResults()
+	tests := []struct {
+		name      string
+		response  models.SearchResponse
+		wantError bool
+	}{
+		{name: "strict total order", response: valid},
+		{name: "duplicate provider rank", response: searchResponseCopy(valid, func(response *models.SearchResponse) {
+			response.Results[1].Ranking.ProviderRank = response.Results[0].Ranking.ProviderRank
+		}), wantError: true},
+		{name: "ascending relevance score", response: searchResponseCopy(valid, func(response *models.SearchResponse) {
+			first, second := 0.6, 0.9
+			response.Results[0].Ranking.RelevanceScore = &first
+			response.Results[1].Ranking.RelevanceScore = &second
+		}), wantError: true},
+		{name: "descending provider rank breaks tied score", response: searchResponseCopy(valid, func(response *models.SearchResponse) {
+			tied := 0.8
+			response.Results[0].Ranking.RelevanceScore = &tied
+			response.Results[1].Ranking.RelevanceScore = &tied
+			response.Results[0].Ranking.ProviderRank = 2
+			response.Results[1].Ranking.ProviderRank = 1
+		}), wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body, err := json.Marshal(test.response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return httpResponse(http.StatusOK, body), nil
+			})}
+			result, protocolErr := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")(
+				context.Background(), searchRequest(map[string]any{
+					"query": "purify search", "ranking": "relevance", "limit": 2,
+				}),
+			)
+			if protocolErr != nil || result.IsError != test.wantError {
+				t.Fatalf("result = %#v, protocol error = %v, body=%s", result, protocolErr, body)
+			}
+		})
+	}
+}
+
+func TestHandleSearchWebRejectsEverySuccessfulTrustResponse(t *testing.T) {
+	responses := []models.SearchResponse{validSearchResponse(), validRelevanceSearchResponse()}
+	for index, response := range responses {
+		t.Run(fmt.Sprintf("shape %d", index), func(t *testing.T) {
+			body, err := json.Marshal(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return httpResponse(http.StatusOK, body), nil
+			})}
+			result, protocolErr := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")(
+				context.Background(), searchRequest(map[string]any{
+					"query": "purify search", "ranking": "trust",
+					"expected_subject": map[string]any{"name": "Purify"},
+				}),
+			)
+			if protocolErr != nil || !result.IsError || !strings.Contains(toolResultText(t, result), "trust ranking is unavailable") {
+				t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
 			}
 		})
 	}
@@ -1044,6 +1631,9 @@ func TestSearchProductionClientRejectsCrossOriginRedirectWithoutLeakingCredentia
 }
 
 func TestHandleSearchWebResponseBodyLimit(t *testing.T) {
+	if maxAPIResponseBytes != int64(models.MaxSearchResponseBytes) {
+		t.Fatalf("MCP/API Search output budgets differ: %d/%d", maxAPIResponseBytes, models.MaxSearchResponseBytes)
+	}
 	tests := []struct {
 		name      string
 		bodyBytes int
@@ -1054,13 +1644,14 @@ func TestHandleSearchWebResponseBodyLimit(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			body := searchResponseBodyAtSize(t, test.bodyBytes)
+			body := relevanceSearchResponseBodyAtSize(t, test.bodyBytes)
 			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 				return httpResponse(http.StatusOK, body), nil
 			})}
 			handler := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")
 			result, protocolErr := handler(context.Background(), searchRequest(map[string]any{
-				"query": "purify search", "include_content": true,
+				"query": "purify search", "ranking": "relevance", "limit": 5,
+				"include_content": true, "schema": validExtractSchemaJSON,
 			}))
 			if protocolErr != nil || result.IsError != test.wantError {
 				t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
@@ -1269,16 +1860,217 @@ func TestHandleSearchWebAcceptsSchemaDataNull(t *testing.T) {
 	}
 }
 
+func TestHandleSearchWebRejectsExtractionThatDisagreesWithRequestedSchema(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		complete  bool
+		forge     bool
+		wantError bool
+	}{
+		{name: "missing authoritative violations", wantError: true},
+		{name: "exact authoritative violations", complete: true},
+		{name: "forged partial marker", complete: true, forge: true, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := searchResponseWithNullData(t)
+			response.Query = "q"
+			if test.complete {
+				violations, err := llm.ValidateAgainstSchema(json.RawMessage(validExtractSchemaJSON), response.Results[0].Data)
+				if err != nil || len(violations) == 0 {
+					t.Fatalf("authoritative violations = %#v, %v", violations, err)
+				}
+				response.Results[0].Violations = violations
+				response.Results[0].Errors = []models.SearchResultError{{
+					Stage: models.SearchResultStageExtract, Code: models.ErrCodeLLMFailure, Message: "result extraction was partial",
+				}}
+				if test.forge {
+					response.Results[0].Errors[0].Message = "forged partial marker"
+				}
+				response.Partial = true
+			}
+			body, err := json.Marshal(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return httpResponse(http.StatusOK, body), nil
+			})}
+			handler := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")
+			result, protocolErr := handler(context.Background(), searchRequest(map[string]any{
+				"query": "q", "schema": validExtractSchemaJSON, "engine": "compiled",
+			}))
+			if protocolErr != nil || result.IsError != test.wantError {
+				t.Fatalf("result = %#v, protocol error = %v", result, protocolErr)
+			}
+		})
+	}
+}
+
+func TestHandleSearchWebRejectsSilentHeavyCapabilityOmissionForFullyAttemptedPool(t *testing.T) {
+	for _, arguments := range []map[string]any{
+		{"query": "q", "schema": `{}`, "engine": "compiled"},
+		{"query": "q", "limit": 5, "include_content": true},
+		{"query": "q", "limit": 5, "verify": true},
+		{"query": "q", "limit": 5, "schema": `{}`, "engine": "compiled"},
+	} {
+		response := validSearchResponse()
+		response.Query = "q"
+		body, err := json.Marshal(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return httpResponse(http.StatusOK, body), nil
+		})}
+		handler := handleSearchWebWithClient(client, "http://purify.test", "purify-api-secret")
+		result, protocolErr := handler(context.Background(), searchRequest(arguments))
+		if protocolErr != nil || !result.IsError || !strings.Contains(toolResultText(t, result), "failed to parse search response") {
+			t.Fatalf("arguments/result/protocol = %#v/%#v/%v", arguments, result, protocolErr)
+		}
+	}
+}
+
+func TestSearchResponseCorrelationRejectsImpossibleHeavyCapabilityStageFlow(t *testing.T) {
+	verifyUnavailable := func(code, message string) models.SearchResponse {
+		response := validSearchResponse()
+		response.Query = "q"
+		response.Results[0].FinalURL = "https://example.com/final"
+		verified := false
+		response.Results[0].Verified = &verified
+		response.Results[0].VerificationStatus = models.SearchVerificationUnavailable
+		response.Results[0].Errors = []models.SearchResultError{{
+			Stage: models.SearchResultStageVerify, Code: code, Message: message,
+		}}
+		response.Partial = true
+		return response
+	}
+	request := searchAPIPayload{
+		Query: "q", Limit: models.MaxSearchHeavyResults, Verify: true, IncludeContent: true,
+		Schema: json.RawMessage(`{}`), Engine: "compiled",
+	}
+	tests := []struct {
+		name     string
+		request  searchAPIPayload
+		response models.SearchResponse
+		wantErr  bool
+	}{
+		{
+			name:    "final URL alone",
+			request: searchAPIPayload{Query: "q", Schema: json.RawMessage(`{}`), Engine: "compiled"},
+			response: func() models.SearchResponse {
+				response := validSearchResponse()
+				response.Query = "q"
+				response.Results[0].FinalURL = "https://example.com/final"
+				return response
+			}(),
+			wantErr: true,
+		},
+		{
+			name: "nonterminal verification error omits later work", request: request,
+			response: verifyUnavailable(models.ErrCodeEvidenceUnavailable, "result verification is unavailable"), wantErr: true,
+		},
+		{
+			name: "verification timeout terminates later work", request: request,
+			response: verifyUnavailable(models.ErrCodeTimeout, "result verification timed out"),
+		},
+		{
+			name: "verification timeout cannot publish later content", request: request,
+			response: func() models.SearchResponse {
+				response := verifyUnavailable(models.ErrCodeTimeout, "result verification timed out")
+				response.Results[0].Content = "impossible late content"
+				return response
+			}(),
+			wantErr: true,
+		},
+		{
+			name: "fetch error cannot publish extraction", request: request,
+			response: func() models.SearchResponse {
+				response := searchResponseWithNullData(t)
+				response.Query = "q"
+				response.Results[0].Errors = []models.SearchResultError{{
+					Stage: models.SearchResultStageFetch, Code: models.ErrCodeNavigation, Message: "result fetch failed",
+				}}
+				response.Partial = true
+				return response
+			}(),
+			wantErr: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateSearchResponseForRequest(test.response, test.request)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validateSearchResponseForRequest() error = %v, want error %t", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestDecodeSearchResponseRejectsImpossibleEnrichmentObservation(t *testing.T) {
+	fetchedAt := time.Date(2026, time.August, 10, 1, 2, 3, 0, time.UTC)
+	base := searchResponseWithNullData(t)
+	tests := []struct {
+		name   string
+		mutate func(*models.SearchResponse)
+	}{
+		{name: "extraction without final URL", mutate: func(response *models.SearchResponse) {
+			response.Results[0].FinalURL = ""
+		}},
+		{name: "content without final URL", mutate: func(response *models.SearchResponse) {
+			response.Results[0].Data = nil
+			response.Results[0].Basis = nil
+			response.Results[0].Receipts = nil
+			response.Results[0].UnlocatedRate = nil
+			response.Results[0].FinalURL = ""
+			response.Results[0].Content = "content"
+		}},
+		{name: "basis snapshot disagrees with snippet evidence", mutate: func(response *models.SearchResponse) {
+			verified := true
+			response.Results[0].Verified = &verified
+			response.Results[0].VerificationStatus = models.SearchVerificationVerified
+			response.Results[0].Evidence = &evidence.Anchor{
+				Quote: "x", TextRange: [2]int{0, 1}, Method: evidence.MethodExact,
+				SnapshotID: "sha256:" + strings.Repeat("b", 64), FetchedAt: fetchedAt,
+			}
+			response.Results[0].Receipt = "snippet-receipt"
+		}},
+		{name: "basis observation differs across leaves", mutate: func(response *models.SearchResponse) {
+			response.Results[0].Data = json.RawMessage(`{"first":null,"second":null}`)
+			basis := models.EvidenceBasis{
+				"first":  {Method: evidence.MethodUnlocated, SnapshotID: "sha256:" + strings.Repeat("a", 64), FetchedAt: fetchedAt},
+				"second": {Method: evidence.MethodUnlocated, SnapshotID: "sha256:" + strings.Repeat("a", 64), FetchedAt: fetchedAt.Add(time.Second)},
+			}
+			receipts := models.FieldReceipts{"first": "one", "second": "two"}
+			rate := 1.0
+			response.Results[0].Basis = &basis
+			response.Results[0].Receipts = &receipts
+			response.Results[0].UnlocatedRate = &rate
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := searchResponseCopy(base, test.mutate)
+			body, err := json.Marshal(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := decodeSearchResponse(body); err == nil {
+				t.Fatalf("decoder accepted impossible enrichment: %s", test.name)
+			}
+		})
+	}
+}
+
 func TestDecodeSearchResponseAcceptsCompiledQuoteWithoutTextRange(t *testing.T) {
 	t.Parallel()
 
 	response := searchResponseWithNullData(t)
 	fetchedAt := time.Date(2026, time.August, 10, 1, 2, 3, 0, time.UTC)
-	basis := models.EvidenceBasis{"/value": {
+	basis := models.EvidenceBasis{"$": {
 		Quote: "compiled quote", Method: evidence.MethodCompiled,
 		SnapshotID: "sha256:" + strings.Repeat("a", 64), FetchedAt: fetchedAt,
 	}}
-	receipts := models.FieldReceipts{"/value": "signed-receipt"}
+	receipts := models.FieldReceipts{"$": "signed-receipt"}
 	rate := 1.0
 	response.Results[0].Basis = &basis
 	response.Results[0].Receipts = &receipts
@@ -2918,6 +3710,61 @@ func validSearchResponseBody(t *testing.T) []byte {
 	return body
 }
 
+func validRelevanceSearchResponse() models.SearchResponse {
+	response := validSearchResponse()
+	zero := int64(0)
+	relevanceScore := 0.87
+	response.Timing.RerankMs = &zero
+	response.Ranking = &models.SearchResponseRanking{
+		Mode:           models.SearchRankingRelevance,
+		Status:         models.SearchRankingApplied,
+		CandidateCount: len(response.Results),
+	}
+	for index := range response.Results {
+		response.Results[index].Ranking = &models.SearchResultRanking{
+			ProviderRank:   index + 1,
+			RelevanceScore: &relevanceScore,
+		}
+	}
+	return response
+}
+
+func validRelevanceSearchResponseWithTwoResults() models.SearchResponse {
+	response := validRelevanceSearchResponse()
+	firstScore := 0.9
+	response.Results[0].Ranking.RelevanceScore = &firstScore
+	second := response.Results[0]
+	second.Rank = 2
+	second.URL = "https://second.example/article"
+	secondScore := 0.8
+	second.Ranking = &models.SearchResultRanking{ProviderRank: 2, RelevanceScore: &secondScore}
+	response.Results = append(response.Results, second)
+	response.Ranking.CandidateCount = len(response.Results)
+	return response
+}
+
+func validRelevanceSearchResponseBody(t *testing.T) []byte {
+	t.Helper()
+	body, err := json.Marshal(validRelevanceSearchResponse())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func searchResponseCopy(source models.SearchResponse, mutate func(*models.SearchResponse)) models.SearchResponse {
+	body, err := json.Marshal(source)
+	if err != nil {
+		panic(err)
+	}
+	var copied models.SearchResponse
+	if err := json.Unmarshal(body, &copied); err != nil {
+		panic(err)
+	}
+	mutate(&copied)
+	return copied
+}
+
 func searchResponseWith(t *testing.T, mutate func(*models.SearchResponse)) models.SearchResponse {
 	t.Helper()
 	response := validSearchResponse()
@@ -2928,9 +3775,13 @@ func searchResponseWith(t *testing.T, mutate func(*models.SearchResponse)) model
 func searchResponseWithNullData(t *testing.T) models.SearchResponse {
 	t.Helper()
 	response := validSearchResponse()
-	basis := models.EvidenceBasis{}
-	receipts := models.FieldReceipts{}
-	unlocatedRate := 0.0
+	fetchedAt := time.Date(2026, time.August, 10, 1, 2, 3, 0, time.UTC)
+	basis := models.EvidenceBasis{"$": {
+		Method: evidence.MethodUnlocated, SnapshotID: "sha256:" + strings.Repeat("a", 64), FetchedAt: fetchedAt,
+	}}
+	receipts := models.FieldReceipts{"$": "signed-field-receipt"}
+	unlocatedRate := 1.0
+	response.Results[0].FinalURL = "https://example.com/final"
 	response.Results[0].Data = json.RawMessage(`null`)
 	response.Results[0].Basis = &basis
 	response.Results[0].Receipts = &receipts
@@ -2998,6 +3849,71 @@ func searchResponseBodyAtSize(t *testing.T, size int) []byte {
 		t.Fatalf("response size %d is smaller than fixture %d", size, len(body))
 	}
 	response.Results[0].Content += strings.Repeat("x", padding)
+	body, err = json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != size {
+		t.Fatalf("response bytes = %d, want %d", len(body), size)
+	}
+	return body
+}
+
+func relevanceSearchResponseBodyAtSize(t *testing.T, size int) []byte {
+	t.Helper()
+	if size < 1 {
+		t.Fatalf("invalid response size %d", size)
+	}
+	response := validRelevanceSearchResponse()
+	response.Results = nil
+	fetchedAt := time.Date(2026, time.August, 10, 1, 2, 3, 0, time.UTC)
+	for index := 0; index < models.MaxSearchHeavyResults; index++ {
+		result := validSearchResponse().Results[0]
+		result.Rank = index + 1
+		result.URL = fmt.Sprintf("https://result-%d.example/article", index)
+		result.FinalURL = fmt.Sprintf("https://result-%d.example/final", index)
+		result.Content = "x"
+		result.Data = json.RawMessage(`{"name":"x"}`)
+		basis := models.EvidenceBasis{
+			"name": {
+				Quote: "x", TextRange: [2]int{0, 1}, Method: evidence.MethodExact,
+				SnapshotID: "sha256:" + strings.Repeat("a", 64), FetchedAt: fetchedAt,
+			},
+		}
+		receipts := models.FieldReceipts{"name": "field-receipt"}
+		unlocatedRate := 0.0
+		result.Basis = &basis
+		result.Receipts = &receipts
+		result.UnlocatedRate = &unlocatedRate
+		relevanceScore := 0.9 - float64(index)/10
+		result.Ranking = &models.SearchResultRanking{ProviderRank: index + 1, RelevanceScore: &relevanceScore}
+		response.Results = append(response.Results, result)
+	}
+	response.Ranking.CandidateCount = len(response.Results)
+	body, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	padding := size - len(body)
+	if padding < 0 {
+		t.Fatalf("response size %d is smaller than fixture %d", size, len(body))
+	}
+	for index := range response.Results {
+		available := models.MaxSearchResultContentBytes - len(response.Results[index].Content)
+		added := min(padding, available)
+		response.Results[index].Content += strings.Repeat("x", added)
+		padding -= added
+	}
+	for index := range response.Results {
+		available := models.MaxSearchResultDataBytes - len(response.Results[index].Data)
+		added := min(padding, available)
+		data := response.Results[index].Data
+		response.Results[index].Data = json.RawMessage(string(data[:len(data)-2]) + strings.Repeat("d", added) + string(data[len(data)-2:]))
+		padding -= added
+	}
+	if padding != 0 {
+		t.Fatalf("response size %d exceeds bounded fixture capacity by %d bytes", size, padding)
+	}
 	body, err = json.Marshal(response)
 	if err != nil {
 		t.Fatal(err)
