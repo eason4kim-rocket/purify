@@ -165,6 +165,23 @@ func TestLoadPriceEvidenceRejectsRelativeDirectory(t *testing.T) {
 	}
 }
 
+func TestPriceFileSnapshotRejectsMutationAfterInitialRead(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "source.html")
+	writeTestFile(t, path, []byte("original"))
+	snapshot, err := openPriceFileSnapshot(directory, "source.html", 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapshot.close()
+	if err := os.WriteFile(path, []byte("mutated!"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.verify(); !errors.Is(err, ErrInvalidPriceEvidence) {
+		t.Fatalf("verify() error = %v", err)
+	}
+}
+
 func writeTestPriceEvidence(t *testing.T, body string) (string, PriceEvidenceManifest) {
 	t.Helper()
 	directory := t.TempDir()

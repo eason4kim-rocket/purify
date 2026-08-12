@@ -176,11 +176,18 @@ func LoadPriceEvidence(directory string) (PriceEvidence, error) {
 	if err != nil {
 		return PriceEvidence{}, err
 	}
-	manifestRaw, err := readExactPriceFile(directory, priceManifestName, MaxJSONLLineBytes)
+	openedFiles := make([]*priceFileSnapshot, 0, 2)
+	defer func() {
+		for _, snapshot := range openedFiles {
+			snapshot.close()
+		}
+	}()
+	manifestFile, err := openPriceFileSnapshot(directory, priceManifestName, MaxJSONLLineBytes)
 	if err != nil {
 		return PriceEvidence{}, err
 	}
-	manifest, err := DecodePriceManifest(manifestRaw)
+	openedFiles = append(openedFiles, manifestFile)
+	manifest, err := DecodePriceManifest(manifestFile.body)
 	if err != nil {
 		return PriceEvidence{}, err
 	}
@@ -195,10 +202,12 @@ func LoadPriceEvidence(directory string) (PriceEvidence, error) {
 	var derived PriceMoney
 	for _, source := range manifest.Sources {
 		expected[source.Path] = struct{}{}
-		body, readErr := readExactPriceFile(directory, source.Path, maxPriceSourceBytes)
+		sourceFile, readErr := openPriceFileSnapshot(directory, source.Path, maxPriceSourceBytes)
 		if readErr != nil {
 			return PriceEvidence{}, readErr
 		}
+		openedFiles = append(openedFiles, sourceFile)
+		body := sourceFile.body
 		if !utf8.Valid(body) || bytes.Contains(body, []byte{0xef, 0xbb, 0xbf}) || bytes.IndexByte(body, 0) >= 0 {
 			return PriceEvidence{}, ErrInvalidPriceEvidence
 		}
@@ -215,6 +224,11 @@ func LoadPriceEvidence(directory string) (PriceEvidence, error) {
 	for _, name := range initialInventory {
 		if _, present := expected[name]; !present {
 			return PriceEvidence{}, ErrInvalidPriceEvidence
+		}
+	}
+	for _, snapshot := range openedFiles {
+		if err := snapshot.verify(); err != nil {
+			return PriceEvidence{}, err
 		}
 	}
 	finalInventory, err := priceDirectoryInventory(directory)
@@ -311,7 +325,15 @@ func httpDate(value string) (time.Time, error) {
 	return parsed.UTC(), nil
 }
 
-func readExactPriceFile(directory, name string, maximum int64) ([]byte, error) {
+type priceFileSnapshot struct {
+	file    *os.File
+	path    string
+	info    os.FileInfo
+	body    []byte
+	maximum int64
+}
+
+func openPriceFileSnapshot(directory, name string, maximum int64) (*priceFileSnapshot, error) {
 	if name == "" || filepath.Base(name) != name || name == "." || name == ".." || strings.ContainsAny(name, `/\\`) {
 		return nil, ErrInvalidPriceEvidence
 	}
@@ -325,11 +347,15 @@ func readExactPriceFile(directory, name string, maximum int64) ([]byte, error) {
 	if err != nil {
 		return nil, ErrInvalidPriceEvidence
 	}
-	defer file.Close()
+	failed := true
+	defer func() {
+		if failed {
+			_ = file.Close()
+		}
+	}()
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
 		return nil, ErrInvalidPriceEvidence
 	}
-	defer func() { _ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN) }()
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(before, opened) || !opened.Mode().IsRegular() || !priceFileHasSingleLink(opened) ||
 		opened.Size() < 1 || opened.Size() > maximum {
@@ -345,7 +371,36 @@ func readExactPriceFile(directory, name string, maximum int64) ([]byte, error) {
 		after.Size() != opened.Size() || after.Mode() != opened.Mode() || !after.ModTime().Equal(opened.ModTime()) || !priceFileHasSingleLink(after) {
 		return nil, ErrInvalidPriceEvidence
 	}
-	return body, nil
+	failed = false
+	return &priceFileSnapshot{file: file, path: path, info: opened, body: body, maximum: maximum}, nil
+}
+
+func (snapshot *priceFileSnapshot) verify() error {
+	if snapshot == nil || snapshot.file == nil || snapshot.info == nil || snapshot.maximum < 1 {
+		return ErrInvalidPriceEvidence
+	}
+	if _, err := snapshot.file.Seek(0, io.SeekStart); err != nil {
+		return ErrInvalidPriceEvidence
+	}
+	body, err := io.ReadAll(io.LimitReader(snapshot.file, snapshot.maximum+1))
+	after, statErr := snapshot.file.Stat()
+	pathAfter, pathErr := os.Lstat(snapshot.path)
+	if err != nil || statErr != nil || pathErr != nil || !bytes.Equal(body, snapshot.body) ||
+		!os.SameFile(snapshot.info, after) || !os.SameFile(snapshot.info, pathAfter) ||
+		after.Size() != snapshot.info.Size() || after.Mode() != snapshot.info.Mode() ||
+		!after.ModTime().Equal(snapshot.info.ModTime()) || !priceFileHasSingleLink(after) {
+		return ErrInvalidPriceEvidence
+	}
+	return nil
+}
+
+func (snapshot *priceFileSnapshot) close() {
+	if snapshot == nil || snapshot.file == nil {
+		return
+	}
+	_ = syscall.Flock(int(snapshot.file.Fd()), syscall.LOCK_UN)
+	_ = snapshot.file.Close()
+	snapshot.file = nil
 }
 
 func extractBraveSearchPrice(body []byte) (PriceMoney, error) {
