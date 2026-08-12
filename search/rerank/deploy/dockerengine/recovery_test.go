@@ -607,6 +607,35 @@ func TestRecoveryJournalInventoryIsExactBoundedAndSorted(t *testing.T) {
 	}
 }
 
+func TestRecoveryJournalRejectsRecordLimitBeforeWriting(t *testing.T) {
+	journal, root := newTestRecoveryJournal(t)
+	for index := 0; index < maximumRecoveryJournalRecords; index++ {
+		runID := fmt.Sprintf("%032x", index+1)
+		if _, err := journal.createPrepared(runID, testRecoverySnapshotDir, testRecoverySpecDigest); err != nil {
+			t.Fatalf("createPrepared(%d) = %v", index, err)
+		}
+	}
+	before, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overflowID := strings.Repeat("f", 32)
+	if _, err := journal.createPrepared(overflowID, testRecoverySnapshotDir, testRecoverySpecDigest); !errors.Is(err, errRecoveryJournal) {
+		t.Fatalf("overflow createPrepared() = %v", err)
+	}
+	after, err := os.ReadDir(root)
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("entries after overflow = %d, want %d, err %v", len(after), len(before), err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, recoveryFilename(overflowID))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("overflow record reached disk: %v", err)
+	}
+	records, err := journal.records()
+	if err != nil || len(records) != maximumRecoveryJournalRecords {
+		t.Fatalf("records() = %d, %v", len(records), err)
+	}
+}
+
 func TestRecoveryJournalSerializesConcurrentDistinctIntents(t *testing.T) {
 	journal, _ := newTestRecoveryJournal(t)
 	const count = 8

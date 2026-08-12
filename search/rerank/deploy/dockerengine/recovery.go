@@ -296,6 +296,9 @@ func (journal *recoveryJournal) replace(current *recoveryRecord, next recoveryRe
 	if current == nil && present || current != nil && (!present || stored != *current) {
 		return errRecoveryJournal
 	}
+	if current == nil && len(records) >= maximumRecoveryJournalRecords {
+		return errRecoveryJournal
+	}
 	encoded, err := marshalRecoveryRecord(next)
 	if err != nil {
 		return errRecoveryJournal
@@ -398,7 +401,10 @@ func openRecoveryRoot(rootPath string, expectedUID int, create bool) (*os.Root, 
 		_ = root.Close()
 		return nil, false, errRecoveryJournal
 	}
-	if created && syncRecoveryParent(rootPath) != nil {
+	// Every acquisition that may authorize a later Create re-durably anchors
+	// the journal root in its parent. This also closes a prior process crash
+	// between Mkdir and the first parent-directory fsync.
+	if create && syncRecoveryParent(rootPath) != nil {
 		_ = root.Close()
 		return nil, false, errRecoveryJournal
 	}
