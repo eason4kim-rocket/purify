@@ -5,7 +5,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -322,6 +325,88 @@ func TestNewReferenceRecorderIsRecordingOnlyAndValidatesConfiguration(t *testing
 	} {
 		if got, err := NewReferenceRecorder(config); !errors.Is(err, ErrNotConfigured) || got != nil {
 			t.Fatalf("NewReferenceRecorder(%#v) = %#v, %v", config, got, err)
+		}
+	}
+}
+
+func TestNewUnixReferenceRecorderUsesOnlyPinnedSocketAndIgnoresAmbientProxy(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+	t.Setenv("NO_PROXY", "")
+
+	temporaryDirectory, err := os.MkdirTemp("", "purify-r6a-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(temporaryDirectory) })
+	socketPath := filepath.Join(temporaryDirectory, "vllm.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validAdapterRequest(t)
+	wantResponse := validVLLMResponse(request, []int{1, 0}, []float64{0.25, 1})
+	requestSeen := make(chan error, 1)
+	server := &http.Server{Handler: http.HandlerFunc(func(response http.ResponseWriter, incoming *http.Request) {
+		body, readErr := io.ReadAll(incoming.Body)
+		if readErr != nil {
+			requestSeen <- readErr
+			return
+		}
+		wantBody := []byte(`{"model":"Qwen/Qwen3-Reranker-0.6B","query":"query","documents":["alpha\nfirst","beta\nsecond"],"top_n":2}`)
+		if incoming.URL.Path != "/v1/rerank" || incoming.Host != "localhost" ||
+			incoming.Header.Get("Authorization") != "Bearer unix-record-secret" || !bytes.Equal(body, wantBody) {
+			requestSeen <- errors.New("unexpected UDS request")
+			return
+		}
+		requestSeen <- nil
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write(wantResponse)
+	})}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.Serve(listener) }()
+	t.Cleanup(func() {
+		_ = server.Close()
+		if serveErr := <-serveDone; serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			t.Errorf("Serve() error = %v", serveErr)
+		}
+	})
+
+	recorder, err := NewUnixReferenceRecorder(UnixReferenceRecorderConfig{
+		SocketPath: socketPath,
+		APIKey:     "unix-record-secret",
+		Timeout:    time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewUnixReferenceRecorder() error = %v", err)
+	}
+	t.Cleanup(recorder.Close)
+	recording, err := recorder.Record(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Record() error = %v", err)
+	}
+	if err := <-requestSeen; err != nil {
+		t.Fatal(err)
+	}
+	if recording.InputDigest == "" || recording.CandidateDigest == "" || len(recording.Observation.Scores) != 2 {
+		t.Fatalf("recording = %#v", recording)
+	}
+}
+
+func TestNewUnixReferenceRecorderRejectsInvalidConfiguration(t *testing.T) {
+	validPath := "/run/purify-r6a/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/vllm.sock"
+	for _, config := range []UnixReferenceRecorderConfig{
+		{},
+		{SocketPath: "relative.sock", APIKey: "key", Timeout: time.Second},
+		{SocketPath: validPath + "/../vllm.sock", APIKey: "key", Timeout: time.Second},
+		{SocketPath: validPath + "\n", APIKey: "key", Timeout: time.Second},
+		{SocketPath: "/" + string(bytes.Repeat([]byte{'a'}, maxReferenceUnixSocketPathBytes)), APIKey: "key", Timeout: time.Second},
+		{SocketPath: validPath, APIKey: " key", Timeout: time.Second},
+		{SocketPath: validPath, APIKey: "key", Timeout: time.Millisecond},
+		{SocketPath: validPath, APIKey: "key", Timeout: MaximumScorerTimeout + time.Second},
+	} {
+		if recorder, err := NewUnixReferenceRecorder(config); !errors.Is(err, ErrNotConfigured) || recorder != nil {
+			t.Fatalf("NewUnixReferenceRecorder(%#v) = %#v, %v", config, recorder, err)
 		}
 	}
 }
