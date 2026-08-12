@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	referenceSpecDigestVersion  = "rerank-docker-create-spec-v1"
+	referenceSpecDigestVersion  = "rerank-docker-create-spec-v2"
 	referenceEvidenceEnvVersion = "rerank-effective-env-v2"
 	maximumHostPathBytes        = 4096
 	maximumSecretBytes          = 16 << 10
@@ -52,9 +52,11 @@ func buildReferencePlan(descriptor deploy.Descriptor, paths HostPaths, generated
 	if !ok {
 		return nil, ErrAdmissionRejected
 	}
+	containerName := "purify-r6a-" + generated.RunID
 	create := CreateSpec{
 		ImageID:     ReferenceImageReference,
-		Hostname:    "purify-r6a-" + generated.RunID,
+		Name:        containerName,
+		Hostname:    containerName,
 		Entrypoint:  append([]string(nil), argv[:2]...),
 		Command:     append([]string(nil), argv[2:]...),
 		Environment: environment,

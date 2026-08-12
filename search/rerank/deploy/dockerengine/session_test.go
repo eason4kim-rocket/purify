@@ -70,6 +70,11 @@ func (engine *sessionFakeEngine) Create(_ context.Context, spec CreateSpec) (Cre
 	return engine.create, engine.createErr
 }
 
+func (engine *sessionFakeEngine) ResolveCreate(context.Context, CreateSpec) (OwnershipInspection, error) {
+	engine.record("resolve-create")
+	return OwnershipInspection{}, errors.New("unexpected resolve create")
+}
+
 func (engine *sessionFakeEngine) Start(_ context.Context, id string) error {
 	engine.record("start:" + id)
 	engine.mu.Lock()
@@ -122,7 +127,7 @@ func (engine *sessionFakeEngine) InspectOwnership(_ context.Context, id string) 
 	} else {
 		return OwnershipInspection{}, errors.New("unexpected ownership inspect")
 	}
-	return OwnershipInspection{ID: value.ID, Labels: ownershipLabels(value.Labels), State: value.State}, nil
+	return OwnershipInspection{ID: value.ID, Name: value.Name, Labels: ownershipLabels(value.Labels), State: value.State}, nil
 }
 
 func (engine *sessionFakeEngine) ReadReferenceArchive(context.Context, string, string) (io.ReadCloser, error) {
@@ -493,6 +498,30 @@ func TestReferenceSessionCleanupUsesMinimalOwnershipDespiteStaticDrift(t *testin
 	}
 	if hostCleanups != 1 || engine.closeCount() != 1 {
 		t.Fatalf("host/engine cleanup = %d/%d", hostCleanups, engine.closeCount())
+	}
+}
+
+func TestReferenceSessionCleanupRejectsRenamedContainerBeforeMutation(t *testing.T) {
+	dependencies, engine, _ := validSessionDependenciesForTest(t)
+	hostCleanups := 0
+	dependencies.cleanupHost = func() error { hostCleanups++; return nil }
+	session, err := startReferenceSession(context.Background(), dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.mu.Lock()
+	for index := range engine.inspections {
+		engine.inspections[index].Name += "-renamed"
+	}
+	engine.mu.Unlock()
+	if err := session.Close(context.Background()); !errors.Is(err, ErrSessionUnavailable) {
+		t.Fatalf("Close(renamed) = %v", err)
+	}
+	if kills, waits, removes := engine.cleanupCounts(); kills != 0 || waits != 0 || removes != 0 {
+		t.Fatalf("renamed cleanup = %d/%d/%d", kills, waits, removes)
+	}
+	if hostCleanups != 0 {
+		t.Fatalf("renamed host cleanup = %d", hostCleanups)
 	}
 }
 

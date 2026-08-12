@@ -41,8 +41,9 @@ func validateReferenceArchivePath(path string) error {
 }
 
 type ownership struct {
-	containerID string
-	labels      map[string]string
+	containerID   string
+	containerName string
+	labels        map[string]string
 }
 
 func (plan *referencePlan) establishOwnership(result CreateResult) (ownership, error) {
@@ -50,8 +51,9 @@ func (plan *referencePlan) establishOwnership(result CreateResult) (ownership, e
 		return ownership{}, ErrContainerRejected
 	}
 	return ownership{
-		containerID: result.ContainerID,
-		labels:      ownershipLabels(plan.create.Labels),
+		containerID:   result.ContainerID,
+		containerName: plan.create.Name,
+		labels:        ownershipLabels(plan.create.Labels),
 	}, nil
 }
 
@@ -97,7 +99,8 @@ func validateFinal(plan *referencePlan, owner ownership, inspection ContainerIns
 func validateContainerStatic(plan *referencePlan, inspection ContainerInspection) bool {
 	spec := plan.create
 	argv := append(append([]string(nil), spec.Entrypoint...), spec.Command...)
-	return inspection.ImageID == ReferenceImageManifestDigest && inspection.ConfiguredImage == ReferenceImageReference &&
+	return inspection.Name == "/"+spec.Name &&
+		inspection.ImageID == ReferenceImageManifestDigest && inspection.ConfiguredImage == ReferenceImageReference &&
 		validManifestDescriptor(inspection.ImageManifestDescriptor) && inspection.Platform == plan.descriptor.Platform &&
 		inspection.Path == argv[0] && reflect.DeepEqual(inspection.Args, argv[1:]) &&
 		inspection.Hostname == spec.Hostname && reflect.DeepEqual(inspection.Entrypoint, spec.Entrypoint) &&
@@ -117,6 +120,13 @@ func validateOwnership(owner ownership, containerID string, labels map[string]st
 		return ErrOwnershipLost
 	}
 	return nil
+}
+
+func validateOwnershipInspection(owner ownership, inspection OwnershipInspection) error {
+	if owner.containerName == "" || inspection.Name != "/"+owner.containerName {
+		return ErrOwnershipLost
+	}
+	return validateOwnership(owner, inspection.ID, inspection.Labels)
 }
 
 func ownershipLabels(labels map[string]string) map[string]string {

@@ -58,6 +58,7 @@ var (
 	ErrLifecycleDrift    = errors.New("rerank docker engine: lifecycle drift")
 	ErrEngineOperation   = errors.New("rerank docker engine: operation failed")
 	errContainerNotFound = errors.New("rerank docker engine: container not found")
+	errContainerConflict = errors.New("rerank docker engine: container conflict")
 )
 
 // Engine is intentionally narrower than a general Docker client. In
@@ -69,6 +70,11 @@ type Engine interface {
 	InspectDaemon(context.Context) (DaemonInspection, error)
 	InspectImage(context.Context, string) (ImageInspection, error)
 	Create(context.Context, CreateSpec) (CreateResult, error)
+	// ResolveCreate is restricted to the exact deterministic name derived from
+	// a fully admitted create spec. It exists only to recover cleanup authority
+	// after an ambiguous create response; it is not a generic name lookup or
+	// adoption surface.
+	ResolveCreate(context.Context, CreateSpec) (OwnershipInspection, error)
 	Start(context.Context, string) error
 	Inspect(context.Context, string) (ContainerInspection, error)
 	InspectOwnership(context.Context, string) (OwnershipInspection, error)
@@ -169,6 +175,7 @@ type PortBinding struct {
 // contains the in-memory API key required by the child.
 type CreateSpec struct {
 	ImageID        string
+	Name           string
 	Hostname       string
 	Entrypoint     []string
 	Command        []string
@@ -219,6 +226,7 @@ type ContainerState struct {
 // treated as an older-daemon compatibility success.
 type ContainerInspection struct {
 	ID                      string
+	Name                    string
 	ImageID                 string
 	ConfiguredImage         string
 	ImageManifestDescriptor *ManifestDescriptor
@@ -257,6 +265,7 @@ type ContainerInspection struct {
 // no environment, argv, mount, or other operator-controlled detail.
 type OwnershipInspection struct {
 	ID     string
+	Name   string
 	Labels map[string]string
 	State  ContainerState
 }

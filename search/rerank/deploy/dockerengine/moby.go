@@ -150,6 +150,25 @@ func (engine *mobyEngine) Create(ctx context.Context, spec CreateSpec) (CreateRe
 	return projected, nil
 }
 
+func (engine *mobyEngine) ResolveCreate(ctx context.Context, spec CreateSpec) (OwnershipInspection, error) {
+	if err := validateAdapterCreateSpec(spec); err != nil {
+		return OwnershipInspection{}, err
+	}
+	result, err := engine.client.ContainerInspect(ctx, spec.Name, mobyclient.ContainerInspectOptions{Size: false})
+	if err != nil {
+		return OwnershipInspection{}, operationError("resolve create", err)
+	}
+	inspection, err := projectOwnershipInspection(result.Container)
+	if err != nil {
+		return OwnershipInspection{}, operationError("project create ownership", err)
+	}
+	if inspection.Name != "/"+spec.Name ||
+		!reflect.DeepEqual(inspection.Labels, ownershipLabels(spec.Labels)) {
+		return OwnershipInspection{}, ErrOwnershipLost
+	}
+	return inspection, nil
+}
+
 func (engine *mobyEngine) Start(ctx context.Context, containerID string) error {
 	if !validLowerHex(containerID, 64) {
 		return ErrAdmissionRejected
@@ -430,7 +449,7 @@ func mobyCreateOptions(spec CreateSpec) (mobyclient.ContainerCreateOptions, erro
 		},
 		NetworkingConfig: nil,
 		Platform:         &ocispec.Platform{OS: "linux", Architecture: "amd64"},
-		Name:             "",
+		Name:             spec.Name,
 	}, nil
 }
 
@@ -524,6 +543,7 @@ func projectContainerInspection(result mobyclient.ContainerInspectResult) (Conta
 	}
 	return ContainerInspection{
 		ID:                      container.ID,
+		Name:                    container.Name,
 		ImageID:                 container.Image,
 		ConfiguredImage:         container.Config.Image,
 		ImageManifestDescriptor: projectManifestDescriptor(container.ImageManifestDescriptor),
@@ -574,7 +594,8 @@ func projectOwnershipInspection(container containertypes.InspectResponse) (Owner
 		return OwnershipInspection{}, errors.New("incomplete ownership response")
 	}
 	return OwnershipInspection{
-		ID: container.ID, Labels: ownershipLabels(container.Config.Labels), State: projectContainerState(container.State),
+		ID: container.ID, Name: container.Name,
+		Labels: ownershipLabels(container.Config.Labels), State: projectContainerState(container.State),
 	}, nil
 }
 
@@ -805,6 +826,9 @@ func operationError(operation string, err error) error {
 	}
 	if cerrdefs.IsNotFound(err) {
 		return errors.Join(ErrEngineOperation, errContainerNotFound)
+	}
+	if cerrdefs.IsConflict(err) {
+		return errors.Join(ErrEngineOperation, errContainerConflict)
 	}
 	if errors.Is(err, context.Canceled) {
 		return errors.Join(ErrEngineOperation, context.Canceled)

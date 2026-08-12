@@ -152,7 +152,10 @@ func startReferenceSession(ctx context.Context, dependencies sessionDependencies
 	prepared = true
 	result, err := dependencies.engine.Create(ctx, plan.cloneCreateSpec())
 	if validLowerHex(result.ContainerID, 64) {
-		owner = ownership{containerID: result.ContainerID, labels: ownershipLabels(plan.create.Labels)}
+		owner = ownership{
+			containerID: result.ContainerID, containerName: plan.create.Name,
+			labels: ownershipLabels(plan.create.Labels),
+		}
 		created = true
 	}
 	if err != nil {
@@ -813,7 +816,7 @@ func cleanupOwnedAttempt(ctx context.Context, engine Engine, plan *referencePlan
 		}
 		return ErrSessionUnavailable
 	}
-	if validateOwnership(owner, inspection.ID, inspection.Labels) != nil {
+	if validateOwnershipInspection(owner, inspection) != nil {
 		return ErrOwnershipLost
 	}
 	if activeContainerState(inspection.State) {
@@ -825,7 +828,7 @@ func cleanupOwnedAttempt(ctx context.Context, engine Engine, plan *referencePlan
 				}
 				return ErrSessionUnavailable
 			}
-			if validateOwnership(owner, inspection.ID, inspection.Labels) != nil {
+			if validateOwnershipInspection(owner, inspection) != nil {
 				return ErrOwnershipLost
 			}
 			if activeContainerState(inspection.State) {
@@ -840,7 +843,7 @@ func cleanupOwnedAttempt(ctx context.Context, engine Engine, plan *referencePlan
 				}
 				return ErrSessionUnavailable
 			}
-			if validateOwnership(owner, inspection.ID, inspection.Labels) != nil {
+			if validateOwnershipInspection(owner, inspection) != nil {
 				return ErrOwnershipLost
 			}
 			if activeContainerState(inspection.State) || waitErr == nil && result.ContainerID != owner.containerID {

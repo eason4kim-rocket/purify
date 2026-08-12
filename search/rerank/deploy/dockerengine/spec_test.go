@@ -146,7 +146,8 @@ func TestReferencePlanBuildsFixedCreateSpecWithoutAttestingSecret(t *testing.T) 
 	if strings.Contains(strings.Join(wantArgv, "\x00"), testAPIKey) {
 		t.Fatal("argv contains API key")
 	}
-	if spec.ImageID != ReferenceImageReference || spec.Hostname != "purify-r6a-"+testGenerated.RunID ||
+	if spec.ImageID != ReferenceImageReference || spec.Name != "purify-r6a-"+testGenerated.RunID ||
+		spec.Hostname != spec.Name ||
 		spec.NetworkMode != NetworkModeNone || !spec.ReadOnlyRootFS || spec.RestartPolicy != RestartPolicyNo ||
 		spec.Privileged || spec.TTY || spec.IPCMode != IPCModePrivate || spec.ShmSizeBytes != 1<<30 ||
 		len(spec.ExposedPorts) != 0 || len(spec.PortBindings) != 0 || len(spec.CapAdd) != 0 || len(spec.Links) != 0 {
@@ -194,6 +195,12 @@ func TestReferencePlanBuildsFixedCreateSpecWithoutAttestingSecret(t *testing.T) 
 	driftedNetworkDigest, err := digestCreateSpec(driftedNetwork)
 	if err != nil || driftedNetworkDigest == plan.specDigest {
 		t.Fatalf("spec digest did not bind network mode: %q, %v", driftedNetworkDigest, err)
+	}
+	driftedName := plan.cloneCreateSpec()
+	driftedName.Name += "-other"
+	driftedNameDigest, err := digestCreateSpec(driftedName)
+	if err != nil || driftedNameDigest == plan.specDigest {
+		t.Fatalf("spec digest did not bind container name: %q, %v", driftedNameDigest, err)
 	}
 	for _, value := range []string{plan.specDigest, spec.Labels[LabelSpecDigest]} {
 		if strings.Contains(value, testAPIKey) {
@@ -254,6 +261,7 @@ func TestCreatedInspectionRejectsCreateAndOwnershipDrift(t *testing.T) {
 		mutate    func(*ContainerInspection)
 	}{
 		{name: "container id", ownership: true, mutate: func(i *ContainerInspection) { i.ID = strings.Repeat("c", 64) }},
+		{name: "container name", mutate: func(i *ContainerInspection) { i.Name += "-renamed" }},
 		{name: "managed label", ownership: true, mutate: func(i *ContainerInspection) { i.Labels[LabelManaged] = "false" }},
 		{name: "run label", ownership: true, mutate: func(i *ContainerInspection) { i.Labels[LabelRunID] = strings.Repeat("d", 32) }},
 		{name: "spec label", ownership: true, mutate: func(i *ContainerInspection) { i.Labels[LabelSpecDigest] = strings.Repeat("e", 64) }},
@@ -308,6 +316,42 @@ func TestCreatedInspectionRejectsCreateAndOwnershipDrift(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), testAPIKey) {
 				t.Fatalf("error leaked secret: %v", err)
+			}
+		})
+	}
+}
+
+func TestOwnershipInspectionBindsExactCanonicalContainerName(t *testing.T) {
+	plan := mustPlan(t)
+	owner, err := plan.establishOwnership(CreateResult{ContainerID: strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner.containerName != plan.create.Name {
+		t.Fatalf("owner container name = %q, want %q", owner.containerName, plan.create.Name)
+	}
+	valid := OwnershipInspection{
+		ID: owner.containerID, Name: "/" + owner.containerName,
+		Labels: cloneMap(owner.labels), State: ContainerState{Status: ContainerStatusCreated},
+	}
+	if err := validateOwnershipInspection(owner, valid); err != nil {
+		t.Fatalf("validateOwnershipInspection(valid) = %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*OwnershipInspection)
+	}{
+		{name: "bare name", mutate: func(value *OwnershipInspection) { value.Name = owner.containerName }},
+		{name: "renamed", mutate: func(value *OwnershipInspection) { value.Name += "-renamed" }},
+		{name: "id", mutate: func(value *OwnershipInspection) { value.ID = strings.Repeat("c", 64) }},
+		{name: "labels", mutate: func(value *OwnershipInspection) { value.Labels[LabelManaged] = "false" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inspection := valid
+			inspection.Labels = cloneMap(valid.Labels)
+			test.mutate(&inspection)
+			if err := validateOwnershipInspection(owner, inspection); !errors.Is(err, ErrOwnershipLost) {
+				t.Fatalf("validateOwnershipInspection() = %v", err)
 			}
 		})
 	}
@@ -512,6 +556,7 @@ func validCreatedInspection(plan *referencePlan, owner ownership) ContainerInspe
 	spec := plan.cloneCreateSpec()
 	return ContainerInspection{
 		ID:                      owner.containerID,
+		Name:                    "/" + spec.Name,
 		ImageID:                 ReferenceImageManifestDigest,
 		ConfiguredImage:         ReferenceImageReference,
 		ImageManifestDescriptor: &ManifestDescriptor{Digest: plan.descriptor.ImageDigest, MediaType: ReferenceManifestMediaType},

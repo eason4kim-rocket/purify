@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -55,7 +57,7 @@ func TestMobyCreateTranslationIsExactAndAdapterRejectsArbitrarySpec(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.Config == nil || options.HostConfig == nil || options.Platform == nil || options.NetworkingConfig != nil || options.Name != "" {
+	if options.Config == nil || options.HostConfig == nil || options.Platform == nil || options.NetworkingConfig != nil || options.Name != spec.Name {
 		t.Fatalf("create options missing fixed parts: %#v", options)
 	}
 	if options.Config.Image != ReferenceImageReference || options.Config.Hostname != spec.Hostname ||
@@ -100,6 +102,7 @@ func TestMobyCreateTranslationIsExactAndAdapterRejectsArbitrarySpec(t *testing.T
 		t.Fatalf("validateAdapterCreateSpec(valid) = %v", err)
 	}
 	for _, mutate := range []func(*CreateSpec){
+		func(value *CreateSpec) { value.Name = "attacker" },
 		func(value *CreateSpec) { value.ImageID = "alpine:latest" },
 		func(value *CreateSpec) { value.Command = []string{"sh"} },
 		func(value *CreateSpec) { value.NetworkMode = "host" },
@@ -171,6 +174,7 @@ func TestMobyContainerProjectionFeedsExactStateValidator(t *testing.T) {
 	}
 	result := mobyclient.ContainerInspectResult{Container: containertypes.InspectResponse{
 		ID:           owner.containerID,
+		Name:         "/" + plan.create.Name,
 		Path:         options.Config.Entrypoint[0],
 		Args:         append(append([]string(nil), options.Config.Entrypoint[1:]...), options.Config.Cmd...),
 		State:        &containertypes.State{Status: containertypes.StateCreated},
@@ -363,6 +367,164 @@ func TestMobyOperationErrorsAreStableAndSecretFree(t *testing.T) {
 	if !errors.Is(notFound, ErrEngineOperation) || !errors.Is(notFound, errContainerNotFound) {
 		t.Fatalf("not-found error = %v", notFound)
 	}
+	conflict := operationError("create container", cerrdefs.ErrConflict)
+	if !errors.Is(conflict, ErrEngineOperation) || !errors.Is(conflict, errContainerConflict) {
+		t.Fatalf("conflict error = %v", conflict)
+	}
+}
+
+func TestMobyResolveCreateRequiresExactCanonicalNameAndOwnership(t *testing.T) {
+	plan := mustPlan(t)
+	spec := plan.cloneCreateSpec()
+	containerID := strings.Repeat("b", 64)
+	wantPath := "/v" + MinimumEngineAPIVersion + "/containers/" + spec.Name + "/json"
+
+	tests := []struct {
+		name       string
+		mutate     func(*containertypes.InspectResponse)
+		wantErr    error
+		wantHTTP   bool
+		mutateSpec func(*CreateSpec)
+	}{
+		{name: "exact", wantHTTP: true},
+		{name: "extra nonownership label", wantHTTP: true, mutate: func(value *containertypes.InspectResponse) {
+			value.Config.Labels["operator.note"] = "ignored for cleanup ownership"
+		}},
+		{name: "missing canonical name", wantHTTP: true, wantErr: ErrOwnershipLost, mutate: func(value *containertypes.InspectResponse) { value.Name = "" }},
+		{name: "bare name", wantHTTP: true, wantErr: ErrOwnershipLost, mutate: func(value *containertypes.InspectResponse) { value.Name = spec.Name }},
+		{name: "renamed", wantHTTP: true, wantErr: ErrOwnershipLost, mutate: func(value *containertypes.InspectResponse) { value.Name += "-other" }},
+		{name: "wrong run label", wantHTTP: true, wantErr: ErrOwnershipLost, mutate: func(value *containertypes.InspectResponse) {
+			value.Config.Labels[LabelRunID] = strings.Repeat("c", 32)
+		}},
+		{name: "missing managed label", wantHTTP: true, wantErr: ErrOwnershipLost, mutate: func(value *containertypes.InspectResponse) {
+			delete(value.Config.Labels, LabelManaged)
+		}},
+		{name: "bad id", wantHTTP: true, wantErr: ErrEngineOperation, mutate: func(value *containertypes.InspectResponse) { value.ID = "short" }},
+		{name: "arbitrary spec", wantErr: ErrAdmissionRejected, mutateSpec: func(value *CreateSpec) { value.Name = "attacker" }},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				requests++
+				if request.Method != http.MethodGet || request.URL.Path != wantPath {
+					t.Errorf("resolve request = %s %s", request.Method, request.URL.Path)
+				}
+				response := containertypes.InspectResponse{
+					ID: containerID, Name: "/" + spec.Name,
+					Config: &containertypes.Config{Labels: ownershipLabels(spec.Labels)},
+					State:  &containertypes.State{Status: containertypes.StateCreated},
+				}
+				if test.mutate != nil {
+					test.mutate(&response)
+				}
+				writer.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(writer).Encode(response); err != nil {
+					t.Errorf("encode inspect response: %v", err)
+				}
+			}))
+			defer server.Close()
+			engine := newTestMobyEngine(t, server.URL)
+			candidate := spec
+			if test.mutateSpec != nil {
+				test.mutateSpec(&candidate)
+			}
+			inspection, err := engine.ResolveCreate(context.Background(), candidate)
+			if test.wantErr == nil {
+				if err != nil || inspection.ID != containerID || inspection.Name != "/"+spec.Name ||
+					!reflect.DeepEqual(inspection.Labels, ownershipLabels(spec.Labels)) {
+					t.Fatalf("ResolveCreate() = %#v, %v", inspection, err)
+				}
+			} else if !errors.Is(err, test.wantErr) {
+				t.Fatalf("ResolveCreate() error = %v, want %v", err, test.wantErr)
+			}
+			wantRequests := 0
+			if test.wantHTTP {
+				wantRequests = 1
+			}
+			if requests != wantRequests {
+				t.Fatalf("resolve requests = %d, want %d", requests, wantRequests)
+			}
+		})
+	}
+}
+
+func TestMobyCreatePreservesOnlySyntacticallyValidPartialID(t *testing.T) {
+	plan := mustPlan(t)
+	spec := plan.cloneCreateSpec()
+	containerID := strings.Repeat("b", 64)
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantID     string
+		wantErr    bool
+		wantMarker error
+	}{
+		{name: "success", status: http.StatusCreated, body: `{"Id":"` + containerID + `","Warnings":[]}`, wantID: containerID},
+		{name: "decode error after id", status: http.StatusCreated, body: `{"Id":"` + containerID + `","Warnings":"invalid"}`, wantID: containerID, wantErr: true},
+		{name: "invalid partial id cleared", status: http.StatusCreated, body: `{"Id":"SHORT","Warnings":"invalid"}`, wantErr: true},
+		{name: "conflict has no id", status: http.StatusConflict, body: `{"message":"name already in use"}`, wantErr: true, wantMarker: errContainerConflict},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.Method != http.MethodPost || request.URL.Path != "/v"+MinimumEngineAPIVersion+"/containers/create" ||
+					request.URL.Query().Get("name") != spec.Name {
+					t.Errorf("create request = %s %s?%s", request.Method, request.URL.Path, request.URL.RawQuery)
+				}
+				writer.Header().Set("Content-Type", "application/json")
+				writer.WriteHeader(test.status)
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			engine := newTestMobyEngine(t, server.URL)
+			result, err := engine.Create(context.Background(), spec)
+			if result.ContainerID != test.wantID || (err != nil) != test.wantErr {
+				t.Fatalf("Create() = %#v, %v", result, err)
+			}
+			if test.wantMarker != nil && !errors.Is(err, test.wantMarker) {
+				t.Fatalf("Create() error = %v, want marker %v", err, test.wantMarker)
+			}
+		})
+	}
+}
+
+func TestMobyCreateTransportErrorHasNoRecoverableID(t *testing.T) {
+	plan := mustPlan(t)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		hijacker, ok := writer.(http.Hijacker)
+		if !ok {
+			t.Error("test response writer cannot hijack connection")
+			return
+		}
+		connection, _, err := hijacker.Hijack()
+		if err != nil {
+			t.Errorf("hijack create response: %v", err)
+			return
+		}
+		_ = connection.Close()
+	}))
+	defer server.Close()
+	engine := newTestMobyEngine(t, server.URL)
+	result, err := engine.Create(context.Background(), plan.cloneCreateSpec())
+	if err == nil || result.ContainerID != "" || len(result.Warnings) != 0 || !errors.Is(err, ErrEngineOperation) {
+		t.Fatalf("Create(transport loss) = %#v, %v", result, err)
+	}
+}
+
+func newTestMobyEngine(t *testing.T, serverURL string) *mobyEngine {
+	t.Helper()
+	client, err := mobyclient.New(
+		mobyclient.WithHost("tcp://"+strings.TrimPrefix(serverURL, "http://")),
+		mobyclient.WithAPIVersion(MinimumEngineAPIVersion),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	return &mobyEngine{client: client}
 }
 
 func mapEntries(values map[string]string) []string {
