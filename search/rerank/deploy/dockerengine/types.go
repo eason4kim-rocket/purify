@@ -1,6 +1,7 @@
-// Package dockerengine defines the bounded Docker Engine state used by the
-// recording-only R-6a supervisor. It deliberately contains no Docker client,
-// production scorer, serialized admission token, or certified registry entry.
+// Package dockerengine defines the bounded Docker Engine state and private
+// local adapter used by the recording-only R-6a supervisor. It deliberately
+// exposes no general-purpose Docker client, production scorer, serialized
+// admission token, or certified registry entry.
 package dockerengine
 
 import (
@@ -61,8 +62,8 @@ var (
 
 // Engine is intentionally narrower than a general Docker client. In
 // particular, it cannot pull, list, rename, adopt, exec in, or copy arbitrary
-// files into containers. A concrete adapter is added separately from this
-// pure state package.
+// files into containers. Its concrete adapter remains package-private and
+// exposes no generic Docker escape hatch.
 type Engine interface {
 	io.Closer
 	InspectDaemon(context.Context) (DaemonInspection, error)
