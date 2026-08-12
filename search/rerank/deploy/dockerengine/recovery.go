@@ -27,6 +27,7 @@ const (
 	recoveryLeaseFilename         = ".controller.lock"
 	maximumRecoveryJournalBytes   = 8 << 10
 	maximumRecoveryJournalRecords = 128
+	maximumRecoveryTemporaries    = 128
 	maximumRecoveryRootBytes      = 4096
 )
 
@@ -117,6 +118,22 @@ func acquireRecoveryLease(rootPath string, expectedUID int) (*recoveryLease, err
 	}
 	if !validRecoveryRootHandle(root, rootPath, expectedUID) ||
 		!validRecoveryAncestors(filepath.Dir(rootPath), expectedUID) {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		return nil, errRecoveryJournal
+	}
+	// A crash may leave only an unpublished atomic-write temporary. Remove
+	// precisely those private, bounded remnants while holding the controller
+	// lease; malformed or unsafe lookalikes remain untouched and fail closed.
+	if cleanupRecoveryTemporaries(root, expectedUID) != nil ||
+		!validRecoveryRootHandle(root, rootPath, expectedUID) ||
+		!validRecoveryAncestors(filepath.Dir(rootPath), expectedUID) {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		return nil, errRecoveryJournal
+	}
+	locked, lockedErr := file.Stat()
+	lockPath, lockPathErr := root.Lstat(recoveryLeaseFilename)
+	if lockedErr != nil || lockPathErr != nil || !validRecoveryFileInfo(locked, expectedUID, 0) ||
+		!validRecoveryFileInfo(lockPath, expectedUID, 0) || !os.SameFile(locked, lockPath) {
 		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 		return nil, errRecoveryJournal
 	}
@@ -444,6 +461,70 @@ func validRecoveryFileInfo(info os.FileInfo, expectedUID int, exactSize int64) b
 		fileUID(info) == expectedUID && fileLinkCount(info) == 1 && info.Size() == exactSize
 }
 
+func cleanupRecoveryTemporaries(root *os.Root, expectedUID int) error {
+	if root == nil {
+		return errRecoveryJournal
+	}
+	directory, err := root.Open(".")
+	if err != nil {
+		return errRecoveryJournal
+	}
+	entries, readErr := directory.ReadDir(maximumRecoveryJournalRecords + maximumRecoveryTemporaries + 2)
+	closeErr := directory.Close()
+	if readErr != nil && !errors.Is(readErr, io.EOF) || closeErr != nil ||
+		len(entries) > maximumRecoveryJournalRecords+maximumRecoveryTemporaries+1 {
+		return errRecoveryJournal
+	}
+	type recoveryTemporary struct {
+		name string
+		info os.FileInfo
+	}
+	temporaries := make([]recoveryTemporary, 0)
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		if !validRecoveryTemporaryFilename(name) {
+			return errRecoveryJournal
+		}
+		if len(temporaries) == maximumRecoveryTemporaries {
+			return errRecoveryJournal
+		}
+		before, err := root.Lstat(name)
+		if err != nil || before.Size() < 0 || before.Size() > maximumRecoveryJournalBytes ||
+			!validRecoveryFileInfo(before, expectedUID, before.Size()) {
+			return errRecoveryJournal
+		}
+		temporaries = append(temporaries, recoveryTemporary{name: name, info: before})
+	}
+	for _, temporary := range temporaries {
+		before, err := root.Lstat(temporary.name)
+		if err != nil || !os.SameFile(temporary.info, before) || before.Size() < 0 || before.Size() > maximumRecoveryJournalBytes ||
+			!validRecoveryFileInfo(before, expectedUID, before.Size()) {
+			return errRecoveryJournal
+		}
+		file, err := root.Open(temporary.name)
+		if err != nil {
+			return errRecoveryJournal
+		}
+		opened, statErr := file.Stat()
+		closeErr := file.Close()
+		after, pathErr := root.Lstat(temporary.name)
+		if statErr != nil || closeErr != nil || pathErr != nil ||
+			!validRecoveryFileInfo(opened, expectedUID, before.Size()) ||
+			!validRecoveryFileInfo(after, expectedUID, before.Size()) ||
+			!os.SameFile(temporary.info, before) || !os.SameFile(before, opened) || !os.SameFile(opened, after) ||
+			root.Remove(temporary.name) != nil {
+			return errRecoveryJournal
+		}
+	}
+	if len(temporaries) > 0 && syncRecoveryDirectory(root) != nil {
+		return errRecoveryJournal
+	}
+	return nil
+}
+
 func readRecoveryRecords(root *os.Root, expectedUID int) ([]recoveryRecord, error) {
 	if root == nil {
 		return nil, errRecoveryJournal
@@ -592,6 +673,16 @@ func validRecoveryFilename(name string) bool {
 	return strings.HasSuffix(name, recoveryJournalSuffix) &&
 		validLowerHex(strings.TrimSuffix(name, recoveryJournalSuffix), 32) &&
 		name == recoveryFilename(strings.TrimSuffix(name, recoveryJournalSuffix))
+}
+
+func validRecoveryTemporaryFilename(name string) bool {
+	if len(name) != 1+32+1+32+len(".tmp") || name[0] != '.' || !strings.HasSuffix(name, ".tmp") {
+		return false
+	}
+	runID := name[1:33]
+	nonce := name[34 : len(name)-len(".tmp")]
+	return name[33] == '.' && validLowerHex(runID, 32) && validLowerHex(nonce, 32) &&
+		name == "."+runID+"."+nonce+".tmp"
 }
 
 func recoveryTemporaryFilename(runID string) (string, error) {

@@ -3,6 +3,7 @@ package dockerengine
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -101,6 +102,220 @@ func TestRecoveryJournalHoldsExclusiveLeaseForItsLifetime(t *testing.T) {
 	if err := second.close(); err != nil {
 		t.Fatalf("second.close() = %v", err)
 	}
+}
+
+func TestRecoveryJournalLeaseRemovesOnlySafeCanonicalCrashTemporaries(t *testing.T) {
+	for name, size := range map[string]int{
+		"zero":    0,
+		"partial": 37,
+		"maximum": maximumRecoveryJournalBytes,
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(canonicalTempDir(t), "recovery")
+			if err := os.Mkdir(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			runID := strings.Repeat("7a", 16)
+			temporary := "." + runID + "." + strings.Repeat("b", 32) + ".tmp"
+			path := filepath.Join(root, temporary)
+			if err := os.WriteFile(path, bytes.Repeat([]byte{'x'}, size), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			journal, err := prepareRecoveryJournal(root, os.Geteuid())
+			if err != nil {
+				t.Fatalf("prepareRecoveryJournal() = %v", err)
+			}
+			t.Cleanup(func() { _ = journal.close() })
+			if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("temporary remains: %v", err)
+			}
+			if records, err := journal.records(); err != nil || len(records) != 0 {
+				t.Fatalf("records() = %#v, %v", records, err)
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil || len(entries) != 1 || entries[0].Name() != recoveryLeaseFilename {
+				t.Fatalf("entries after cleanup = %#v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestRecoveryJournalLeaseRejectsUnsafeTemporaryWithoutRemovingIt(t *testing.T) {
+	for name, setup := range map[string]func(*testing.T, string) string{
+		"bad name": func(t *testing.T, root string) string {
+			path := filepath.Join(root, ".bad.tmp")
+			if err := os.WriteFile(path, []byte("partial"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		},
+		"uppercase nonce": func(t *testing.T, root string) string {
+			path := filepath.Join(root, "."+strings.Repeat("8", 32)+"."+strings.Repeat("A", 32)+".tmp")
+			if err := os.WriteFile(path, []byte("partial"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		},
+		"unsafe mode": func(t *testing.T, root string) string {
+			path := validRecoveryTemporaryPath(root, "8b", "c")
+			if err := os.WriteFile(path, []byte("partial"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		},
+		"symlink": func(t *testing.T, root string) string {
+			outside := filepath.Join(filepath.Dir(root), "outside")
+			if err := os.WriteFile(outside, []byte("partial"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			path := validRecoveryTemporaryPath(root, "8c", "d")
+			if err := os.Symlink(outside, path); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		},
+		"hardlink": func(t *testing.T, root string) string {
+			path := validRecoveryTemporaryPath(root, "8d", "e")
+			if err := os.WriteFile(path, []byte("partial"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(path, filepath.Join(filepath.Dir(root), "outside-link")); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		},
+		"oversize": func(t *testing.T, root string) string {
+			path := validRecoveryTemporaryPath(root, "8e", "f")
+			if err := os.WriteFile(path, bytes.Repeat([]byte{'x'}, maximumRecoveryJournalBytes+1), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		},
+		"directory": func(t *testing.T, root string) string {
+			path := validRecoveryTemporaryPath(root, "8f", "0")
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(canonicalTempDir(t), "recovery")
+			if err := os.Mkdir(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := setup(t, root)
+			if journal, err := prepareRecoveryJournal(root, os.Geteuid()); !errors.Is(err, errRecoveryJournal) || journal != nil {
+				t.Fatalf("prepareRecoveryJournal() = %#v, %v", journal, err)
+			}
+			if _, err := os.Lstat(path); err != nil {
+				t.Fatalf("unsafe temporary was removed: %v", err)
+			}
+		})
+	}
+}
+
+func TestRecoveryJournalValidatesAllTemporariesBeforeRemovingAny(t *testing.T) {
+	root := filepath.Join(canonicalTempDir(t), "recovery")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	valid := validRecoveryTemporaryPath(root, "91", "a")
+	unsafe := validRecoveryTemporaryPath(root, "92", "b")
+	if err := os.WriteFile(valid, []byte("valid partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unsafe, []byte("unsafe partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unsafe, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if journal, err := prepareRecoveryJournal(root, os.Geteuid()); !errors.Is(err, errRecoveryJournal) || journal != nil {
+		t.Fatalf("prepareRecoveryJournal() = %#v, %v", journal, err)
+	}
+	for _, path := range []string{valid, unsafe} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("temporary removed before batch validation: %s: %v", path, err)
+		}
+	}
+}
+
+func TestRecoveryJournalCleansTemporaryAtMaximumRecordBoundary(t *testing.T) {
+	root := filepath.Join(canonicalTempDir(t), "recovery")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < maximumRecoveryJournalRecords; index++ {
+		runID := fmt.Sprintf("%032x", index+1)
+		record := recoveryRecord{
+			Version:       recoveryJournalVersion,
+			State:         recoveryStatePrepared,
+			RunID:         runID,
+			ContainerName: recoveryContainerName(runID),
+			SnapshotDir:   testRecoverySnapshotDir,
+			SpecDigest:    testRecoverySpecDigest,
+		}
+		raw, err := marshalRecoveryRecord(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(root, recoveryFilename(runID))
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	temporary := validRecoveryTemporaryPath(root, "aa", "c")
+	if err := os.WriteFile(temporary, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := prepareRecoveryJournal(root, os.Geteuid())
+	if err != nil {
+		t.Fatalf("prepareRecoveryJournal() = %v", err)
+	}
+	t.Cleanup(func() { _ = journal.close() })
+	if _, err := os.Lstat(temporary); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary remains: %v", err)
+	}
+	records, err := journal.records()
+	if err != nil || len(records) != maximumRecoveryJournalRecords {
+		t.Fatalf("records() count = %d, %v", len(records), err)
+	}
+}
+
+func TestRecoveryJournalUnknownNonTemporaryStillFailsInventory(t *testing.T) {
+	root := filepath.Join(canonicalTempDir(t), "recovery")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unknown := filepath.Join(root, "operator-note")
+	if err := os.WriteFile(unknown, []byte("do not delete"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := prepareRecoveryJournal(root, os.Geteuid())
+	if err != nil {
+		t.Fatalf("prepareRecoveryJournal() = %v", err)
+	}
+	t.Cleanup(func() { _ = journal.close() })
+	if records, err := journal.records(); !errors.Is(err, errRecoveryJournal) || records != nil {
+		t.Fatalf("records() = %#v, %v", records, err)
+	}
+	if raw, err := os.ReadFile(unknown); err != nil || string(raw) != "do not delete" {
+		t.Fatalf("unknown entry changed: %q, %v", raw, err)
+	}
+}
+
+func validRecoveryTemporaryPath(root, runPair, nonceDigit string) string {
+	return filepath.Join(root, "."+strings.Repeat(runPair, 16)+"."+strings.Repeat(nonceDigit, 32)+".tmp")
 }
 
 func TestRecoveryJournalEnforcesStateMachineAndExpectedRecord(t *testing.T) {
