@@ -478,7 +478,13 @@ func normalizeProviderResults(source []ProviderResult) ([]baselineResult, error)
 		if err != nil {
 			continue
 		}
-		result := baselineResult{title: title, url: canonicalURL, snippet: snippet, publishedAt: publishedAt}
+		result := baselineResult{
+			providerRank: candidate.Rank,
+			title:        title,
+			url:          canonicalURL,
+			snippet:      snippet,
+			publishedAt:  publishedAt,
+		}
 		if candidate.Score != nil {
 			value := *candidate.Score
 			result.score = &value
@@ -538,20 +544,7 @@ func normalizeProviderTime(source *time.Time) (*time.Time, error) {
 }
 
 func projectBaseline(source []baselineResult, domains []string, deduplicate bool, limit int) ([]models.SearchResult, int) {
-	seenURLs := make(map[string]struct{}, len(source))
-	candidates := make([]baselineResult, 0, len(source))
-	deduplicated := 0
-	for _, candidate := range source {
-		if !matchesSearchDomains(candidate.url, domains) {
-			continue
-		}
-		if _, duplicate := seenURLs[candidate.url]; duplicate {
-			deduplicated++
-			continue
-		}
-		seenURLs[candidate.url] = struct{}{}
-		candidates = append(candidates, candidate)
-	}
+	candidates, deduplicated := filterBaselineCandidates(source, domains)
 	if deduplicate {
 		var removed int
 		candidates, removed = collapseSimhashComponents(candidates)
@@ -582,12 +575,80 @@ func projectBaseline(source []baselineResult, domains []string, deduplicate bool
 	return results, deduplicated
 }
 
+func filterBaselineCandidates(source []baselineResult, domains []string) ([]baselineResult, int) {
+	byURL := make(map[string]baselineResult, len(source))
+	deduplicated := 0
+	for _, candidate := range source {
+		if !matchesSearchDomains(candidate.url, domains) {
+			continue
+		}
+		if current, duplicate := byURL[candidate.url]; duplicate {
+			deduplicated++
+			if baselineProviderOrderBefore(candidate, current) {
+				byURL[candidate.url] = candidate
+			}
+			continue
+		}
+		byURL[candidate.url] = candidate
+	}
+	candidates := make([]baselineResult, 0, len(byURL))
+	for _, candidate := range byURL {
+		candidates = append(candidates, candidate)
+	}
+	sort.Slice(candidates, func(left, right int) bool {
+		return baselineProviderOrderBefore(candidates[left], candidates[right])
+	})
+	return candidates, deduplicated
+}
+
+// baselineProviderOrderBefore restores the provider's authoritative order
+// after filtering and map-based exact-URL folding. Equal-rank comparisons are
+// defensive: normalized provider output has unique ranks, but a complete
+// metadata order keeps this package-private seam deterministic for normalized
+// input permutations.
+func baselineProviderOrderBefore(left, right baselineResult) bool {
+	if left.providerRank != right.providerRank {
+		return left.providerRank < right.providerRank
+	}
+	if left.url != right.url {
+		return left.url < right.url
+	}
+	if left.title != right.title {
+		return left.title < right.title
+	}
+	if left.snippet != right.snippet {
+		return left.snippet < right.snippet
+	}
+	if (left.score == nil) != (right.score == nil) {
+		return left.score == nil
+	}
+	if left.score != nil && *left.score != *right.score {
+		return *left.score < *right.score
+	}
+	if (left.publishedAt == nil) != (right.publishedAt == nil) {
+		return left.publishedAt == nil
+	}
+	return left.publishedAt != nil && left.publishedAt.Before(*right.publishedAt)
+}
+
 // collapseSimhashComponents computes the complete near-duplicate graph before
-// applying the public limit. Connected components make syndicated-copy
-// folding transitive; the earliest provider-ranked member is the winner.
+// applying any output limit. Connected components make syndicated-copy
+// folding transitive; the first member in the caller's priority order wins.
 func collapseSimhashComponents(source []baselineResult) ([]baselineResult, int) {
 	if len(source) < 2 {
 		return source, 0
+	}
+	components := partitionSimhashComponents(source)
+	winners := make([]baselineResult, 0, len(components))
+	for _, members := range components {
+		winners = append(winners, source[members[0]])
+	}
+	return winners, len(source) - len(winners)
+}
+
+func partitionSimhashComponents(source []baselineResult) [][]int {
+	if len(source) == 0 {
+		return make([][]int, 0)
 	}
 	fingerprints := make([]uint64, len(source))
 	parents := make([]int, len(source))
@@ -624,13 +685,19 @@ func collapseSimhashComponents(source []baselineResult) ([]baselineResult, int) 
 			}
 		}
 	}
-	winners := make([]baselineResult, 0, len(source))
+	componentByRoot := make(map[int]int, len(source))
+	components := make([][]int, 0, len(source))
 	for index := range source {
-		if find(index) == index {
-			winners = append(winners, source[index])
+		root := find(index)
+		componentIndex, exists := componentByRoot[root]
+		if !exists {
+			componentIndex = len(components)
+			componentByRoot[root] = componentIndex
+			components = append(components, nil)
 		}
+		components[componentIndex] = append(components[componentIndex], index)
 	}
-	return winners, len(source) - len(winners)
+	return components
 }
 
 func matchesSearchDomains(rawURL string, domains []string) bool {

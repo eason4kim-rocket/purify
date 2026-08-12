@@ -12,18 +12,19 @@ const (
 	baselineCacheMaxEntries = 256
 	baselineCacheMaxBytes   = 16 << 20
 	baselineCacheEntryCost  = 96
-	baselineResultCost      = 64
+	baselineResultCost      = 72
 )
 
 // baselineResult is the complete cache value. It deliberately cannot retain
 // request credentials, schemas, fetched artifacts, cleaned content, or
 // enrichment output.
 type baselineResult struct {
-	score       *float64
-	title       string
-	url         string
-	snippet     string
-	publishedAt *time.Time
+	providerRank int
+	score        *float64
+	title        string
+	url          string
+	snippet      string
+	publishedAt  *time.Time
 }
 
 type baselineCacheEntry struct {
@@ -178,18 +179,23 @@ func cloneBaselineResults(source []baselineResult) []baselineResult {
 	}
 	cloned := make([]baselineResult, len(source))
 	for index := range source {
-		cloned[index] = source[index]
-		cloned[index].title = strings.Clone(source[index].title)
-		cloned[index].url = strings.Clone(source[index].url)
-		cloned[index].snippet = strings.Clone(source[index].snippet)
-		if source[index].score != nil {
-			value := *source[index].score
-			cloned[index].score = &value
-		}
-		if source[index].publishedAt != nil {
-			value := *source[index].publishedAt
-			cloned[index].publishedAt = &value
-		}
+		cloned[index] = cloneBaselineResult(source[index])
+	}
+	return cloned
+}
+
+func cloneBaselineResult(source baselineResult) baselineResult {
+	cloned := source
+	cloned.title = strings.Clone(source.title)
+	cloned.url = strings.Clone(source.url)
+	cloned.snippet = strings.Clone(source.snippet)
+	if source.score != nil {
+		value := *source.score
+		cloned.score = &value
+	}
+	if source.publishedAt != nil {
+		value := *source.publishedAt
+		cloned.publishedAt = &value
 	}
 	return cloned
 }
