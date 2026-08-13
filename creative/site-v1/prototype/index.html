@@ -53,7 +53,7 @@
         </a>
 
         <nav class="desktop-nav" aria-label="Primary navigation">
-          <a href="#evidence" data-copy="nav.search">Search</a>
+          <a href="#product" data-copy="nav.product">Product</a>
           <a href="#technology" data-copy="nav.technology">Technology</a>
           <a href="#vision" data-copy="nav.vision">Vision</a>
           <a href="https://purify.verifly.pro/blog" target="_blank" rel="noreferrer" data-copy="nav.journal">Journal</a>
@@ -82,7 +82,7 @@
       </div>
 
       <nav class="mobile-nav" id="mobile-menu" data-mobile-menu aria-label="Mobile navigation" hidden>
-        <a href="#evidence" data-copy="nav.search">Search</a>
+        <a href="#product" data-copy="nav.product">Product</a>
         <a href="#technology" data-copy="nav.technology">Technology</a>
         <a href="#vision" data-copy="nav.vision">Vision</a>
         <a href="https://purify.verifly.pro/blog" target="_blank" rel="noreferrer" data-copy="nav.journal">Journal</a>
@@ -124,176 +124,182 @@
         </div>
       </section>
 
-      <section class="origin section" id="origin" aria-labelledby="origin-title" data-motion-section="origin">
+      <section class="product section" id="product" aria-labelledby="product-title">
         <div class="container">
           <div class="section-intro grid-12" data-reveal="section">
             <div class="section-index">
               <span>01</span>
-              <span data-copy="origin.kicker">The world, first</span>
+              <span data-copy="product.kicker">The product</span>
             </div>
             <div class="section-heading">
-              <h2 id="origin-title" data-copy="origin.title">Before it becomes data,<br />it is the world in motion.</h2>
-              <p class="lead" data-copy="origin.lead">
-                Every discovery begins with seeing. But the web keeps moving — and an answer you cannot re-check is not yet evidence.
+              <h2 id="product-title" data-copy="product.title">A search API that answers<br />with evidence attached.</h2>
+              <p class="lead" data-copy="product.lead">
+                One call reaches the live web, ranks it in an index we own, and verifies before answering — the snapshot, the sources, and a signed receipt arrive in the same response.
               </p>
             </div>
           </div>
 
-          <figure class="origin-figure" data-reveal="media" data-origin-media>
-            <div class="origin-visual media-frame" data-video-shell>
-              <video
-                class="origin-video"
-                data-origin-video
-                poster="../assets/editorial/ground-truth-glacial-v1.webp"
-                data-poster-desktop="../assets/editorial/ground-truth-glacial-v1.webp"
-                data-poster-mobile="../assets/editorial/ground-truth-glacial-v1-mobile.webp"
-                muted
-                playsinline
-                preload="none"
-                aria-label="A future 28.8 second film about nature, human observation, and trustworthy data"
-              ></video>
-              <button class="video-sound" type="button" data-video-sound data-copy="origin.sound" hidden>Watch with sound</button>
-            </div>
-            <figcaption>
-              <span class="mono" data-copy="origin.captionLabel">FILM 01 / OPENING FRAME</span>
-              <span data-copy="origin.caption">Nature is not a backdrop to data. It is where evidence begins.</span>
-            </figcaption>
-          </figure>
+          <div class="product-grid grid-12" data-reveal="section">
+            <ul class="capability-list">
+              <li>
+                <span class="mono" data-copy="product.cap1Label">LIVE, NOT CACHED</span>
+                <p data-copy="product.cap1">Answers read the page as it stands right now, with an archive fallback when the live web will not respond.</p>
+              </li>
+              <li>
+                <span class="mono" data-copy="product.cap2Label">OWNED, NOT RESOLD</span>
+                <p data-copy="product.cap2">Results rank in a bilingual index we build ourselves — no upstream terms can switch our answers off.</p>
+              </li>
+              <li>
+                <span class="mono" data-copy="product.cap3Label">SIGNED, NOT ASSERTED</span>
+                <p data-copy="product.cap3">Every promoted claim carries an Ed25519 receipt that replays through /verify.</p>
+              </li>
+            </ul>
+
+            <figure class="terminal-card" aria-label="Example API request and response">
+              <figcaption class="terminal-head">
+                <span class="mono">PURIFY TERMINAL</span>
+                <span class="mono terminal-status">GET /search · 200 OK</span>
+              </figcaption>
+              <pre class="terminal-body"><code><span class="t-prompt">$</span> curl -G "https://purify.verifly.pro/search" \
+    --data-urlencode "q=security patch release date" \
+    -H "Authorization: Bearer $PURIFY_KEY"
+
+{
+  "url": "https://docs.example.org/releases",
+  "title": "Release notes · 2026.08",
+  "observed_at": "2026-08-12T14:32:08Z",
+  "snapshot_id": "snap_9f2c41d8",
+  "verification": {
+    "state": <em>"verified"</em>,
+    "independent_sources": 3,
+    "conflicts_retained": 1,
+    "receipt": <em>"rcpt_ed25519_c7b2…"</em>
+  }
+}</code></pre>
+            </figure>
+          </div>
         </div>
       </section>
 
-      <section class="memory section" id="vision" aria-labelledby="memory-title">
+      <section class="stack section" id="technology" aria-labelledby="stack-title">
         <div class="container">
-          <div class="memory-statement grid-12" data-reveal="section">
+          <div class="section-intro grid-12" data-reveal="section">
             <div class="section-index">
               <span>02</span>
-              <span data-copy="memory.kicker">Living memory</span>
+              <span data-copy="stack.kicker">Fetch · Find · Verify</span>
             </div>
-            <div class="memory-copy">
-              <h2 id="memory-title" data-copy="memory.title">The web is humanity’s<br />living memory.</h2>
-              <p class="lead" data-copy="memory.lead">
-                Our questions, discoveries, mistakes and ideas—still changing, still connected.
+            <div class="section-heading">
+              <h2 id="stack-title" data-copy="stack.title">Three layers,<br />welded into one path.</h2>
+              <p class="lead" data-copy="stack.lead">
+                Rented layers break trust at the seams. Purify runs the whole path itself, so one receipt can cover the journey from raw page to promoted claim.
               </p>
             </div>
           </div>
 
-          <div class="memory-field grid-12" data-memory-field data-memory-state="settled" data-reveal="section">
-            <div class="memory-note">
-              <p class="quote" data-copy="memory.quote">
-                The next intelligence should inherit more than information. It should inherit the evidence to check what it knows.
-              </p>
-              <p class="mono" data-copy="memory.fieldLabel">BLUE FIELD / FRAGMENT · OVERLAP · RECONNECT</p>
-            </div>
-            <figure class="memory-art" aria-label="Abstract blue field">
-              <img
-                src="../assets/abstract/memory-field-graphic-v2.svg"
-                width="1440"
-                height="800"
-                alt="Blue square modules overlap, break apart, and reconnect across an open white field"
-                data-alt-en="Blue square modules overlap, break apart, and reconnect across an open white field"
-                data-alt-zh="蓝色方块在开放的白色空间中交叠、断开并重新连接"
-                loading="lazy"
-                decoding="async"
-              />
-            </figure>
-          </div>
-
-          <figure class="human-figure" data-memory-human data-reveal="media">
-            <div class="human-image media-frame">
-              <picture>
-                <source media="(max-width: 767px)" srcset="../assets/editorial/human-measure-researcher-v1-mobile.webp" />
+          <div class="layer-grid" data-reveal="section">
+            <article class="layer-card">
+              <figure class="layer-art">
                 <img
-                  src="../assets/editorial/human-measure-researcher-v1.webp"
-                  width="1536"
-                  height="1024"
-                  alt="A researcher comparing a core sample, herbarium sheet, and map"
-                  data-alt-en="A researcher comparing a core sample, herbarium sheet, and map"
-                  data-alt-zh="一位研究者正在对照树芯样本、植物标本与地图"
+                  src="../assets/abstract/signal-field-v1.webp"
+                  srcset="../assets/abstract/signal-field-v1-mobile.webp 720w, ../assets/abstract/signal-field-v1.webp 1254w"
+                  sizes="(max-width: 899px) calc(100vw - 40px), 373px"
+                  width="1254"
+                  height="1254"
+                  alt="Mineral-blue fragments aligning into a clear path"
+                  data-alt-en="Mineral-blue fragments aligning into a clear path"
+                  data-alt-zh="矿物蓝碎片逐渐排列成一条清晰路径"
                   loading="lazy"
                   decoding="async"
                 />
-              </picture>
-            </div>
-            <figcaption class="human-caption">
-              <span class="mono" data-copy="memory.captionLabel">HUMAN MEASURE / OBSERVE · COMPARE · JUDGE</span>
-              <p data-copy="memory.caption">
-                Facts become useful through careful observation, comparison, and the responsibility to keep uncertainty visible.
+              </figure>
+              <div class="layer-head">
+                <span class="mono" data-copy="stack.l1Index">LAYER 01 — 抓</span>
+                <h3 data-copy="stack.l1Title">Fetch</h3>
+              </div>
+              <p class="layer-body" data-copy="stack.l1Body">
+                TLS and HTTP/2 that match a real Chrome, a full browser when pages demand rendering, archives when the live web will not answer.
               </p>
-            </figcaption>
-          </figure>
+              <ul class="layer-specs">
+                <li><span class="mono">CHROME-TRUE TLS</span></li>
+                <li><span class="mono">HTTP/2 · FULL RENDER</span></li>
+                <li><span class="mono">ARCHIVE FALLBACK</span></li>
+              </ul>
+            </article>
+
+            <article class="layer-card">
+              <figure class="layer-art">
+                <img
+                  src="../assets/abstract/living-memory-v1.webp"
+                  srcset="../assets/abstract/living-memory-v1-mobile.webp 720w, ../assets/abstract/living-memory-v1.webp 1254w"
+                  sizes="(max-width: 899px) calc(100vw - 40px), 373px"
+                  width="1254"
+                  height="1254"
+                  alt="Layers of translucent paper preserve traces, impressions, and context"
+                  data-alt-en="Layers of translucent paper preserve traces, impressions, and context"
+                  data-alt-zh="透明纸层保存着痕迹、印记与上下文"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </figure>
+              <div class="layer-head">
+                <span class="mono" data-copy="stack.l2Index">LAYER 02 — 找</span>
+                <h3 data-copy="stack.l2Title">Find</h3>
+              </div>
+              <p class="layer-body" data-copy="stack.l2Body">
+                A bilingual index we build and grow ourselves — seeded from the head of the web, expanded by real demand, never resold rankings.
+              </p>
+              <ul class="layer-specs">
+                <li><span class="mono">EN + ZH FULL-TEXT</span></li>
+                <li><span class="mono">DEMAND-GROWN</span></li>
+                <li><span class="mono">ZERO UPSTREAM TERMS</span></li>
+              </ul>
+            </article>
+
+            <article class="layer-card">
+              <figure class="layer-art">
+                <img
+                  src="../assets/abstract/resolved-fact-v2.webp"
+                  srcset="../assets/abstract/resolved-fact-v2-mobile.webp 720w, ../assets/abstract/resolved-fact-v2.webp 1254w"
+                  sizes="(max-width: 899px) calc(100vw - 40px), 373px"
+                  width="1254"
+                  height="1254"
+                  alt="Pale material layers converge around one resolved Signal Blue square"
+                  data-alt-en="Pale material layers converge around one resolved Signal Blue square"
+                  data-alt-zh="浅色材料层在一个明确的矿物蓝方块周围汇聚"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </figure>
+              <div class="layer-head">
+                <span class="mono" data-copy="stack.l3Index">LAYER 03 — 核</span>
+                <h3 data-copy="stack.l3Title">Verify</h3>
+              </div>
+              <p class="layer-body" data-copy="stack.l3Body">
+                Independent sources cross-checked, conflicts kept on the record, and a receipt signed before any claim is promoted.
+              </p>
+              <ul class="layer-specs">
+                <li><span class="mono">N-SOURCE CONSENSUS</span></li>
+                <li><span class="mono">CONFLICTS RETAINED</span></li>
+                <li><span class="mono">ED25519 RECEIPT</span></li>
+              </ul>
+            </article>
+          </div>
         </div>
       </section>
 
-      <section class="technology section" id="technology" aria-labelledby="technology-title">
+      <section class="receipt section" id="evidence" aria-labelledby="receipt-title">
         <div class="container">
-          <div class="technology-intro grid-12" data-reveal="section">
+          <div class="section-intro grid-12" data-reveal="section">
             <div class="section-index">
               <span>03</span>
-              <span data-copy="technology.kicker">Fetch · Find · Verify</span>
+              <span data-copy="receipt.kicker">The receipt</span>
             </div>
-            <div class="technology-heading">
-              <h2 id="technology-title" data-copy="technology.title">Three layers turn the open web<br />into answers that prove themselves.</h2>
-              <p class="lead" data-copy="technology.lead">
-                Purify runs the whole path itself — reach the page, rank it in an index we own, verify the claim — so every result can carry a snapshot, its sources, and a signed receipt.
+            <div class="section-heading">
+              <h2 id="receipt-title" data-copy="receipt.title">Disagreement stays<br />on the record.</h2>
+              <p class="lead" data-copy="receipt.lead">
+                Every response can be re-opened: which sources, observed when, what conflicted, what was promoted — and the signature that seals it.
               </p>
             </div>
-          </div>
-
-          <div class="evidence-editorial" id="evidence" data-evidence-demo data-reveal="section">
-            <div class="evidence-copy" role="tablist" aria-label="Purify trust stack layers">
-              <button class="evidence-tab is-active" id="tab-search" type="button" role="tab" tabindex="0" aria-selected="true" aria-controls="evidence-panel" data-stage="search">
-                <span class="stage-number">01</span>
-                <span class="stage-content">
-                  <strong data-copy="technology.searchTitle">Fetch</strong>
-                  <span data-copy="technology.searchBody">Reach any public page the way a real browser does — TLS fingerprint, HTTP/2, full rendering, and an archive fallback when the live web will not answer.</span>
-                </span>
-              </button>
-              <button class="evidence-tab" id="tab-assimilation" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="evidence-panel" data-stage="assimilation">
-                <span class="stage-number">02</span>
-                <span class="stage-content">
-                  <strong data-copy="technology.assimilationTitle">Find</strong>
-                  <span data-copy="technology.assimilationBody">Query a bilingual index we build and own — grown by real demand, never resold from someone else’s rankings.</span>
-                </span>
-              </button>
-              <button class="evidence-tab" id="tab-healing" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="evidence-panel" data-stage="healing">
-                <span class="stage-number">03</span>
-                <span class="stage-content">
-                  <strong data-copy="technology.healingTitle">Verify</strong>
-                  <span data-copy="technology.healingBody">Cross-check independent sources, keep every conflict visible, and sign a receipt for each claim before it is promoted.</span>
-                </span>
-              </button>
-            </div>
-
-            <figure class="evidence-art" id="evidence-panel" role="tabpanel" aria-labelledby="tab-search" data-evidence-art>
-              <img
-                src="../assets/abstract/signal-field-v1.webp"
-                srcset="../assets/abstract/signal-field-v1-mobile.webp 720w, ../assets/abstract/signal-field-v1.webp 1254w"
-                sizes="(max-width: 899px) calc(100vw - 40px), 48vw"
-                width="1254"
-                height="1254"
-                alt="Mineral-blue fragments aligning into a clear path"
-                data-evidence-image
-                data-alt-en="Mineral-blue fragments aligning into a clear path"
-                data-alt-zh="矿物蓝碎片逐渐排列成一条清晰路径"
-                loading="lazy"
-                decoding="async"
-              />
-              <div class="evidence-signal" data-evidence-signal aria-hidden="true">
-                <span class="signal-origin">LAST VERIFIED</span>
-                <i class="signal-line signal-line-a"></i>
-                <i class="signal-break"></i>
-                <i class="signal-line signal-line-b"></i>
-                <span class="signal-candidate">CANDIDATE</span>
-              </div>
-              <figcaption>
-                <span class="stage-readout">
-                  <span class="mono" data-stage-label>LAYER 01 / FETCH</span>
-                  <span class="mono stage-result" data-stage-result></span>
-                </span>
-                <span data-copy="technology.artCaption">One record. Three layers of proof.</span>
-              </figcaption>
-            </figure>
-            <p class="sr-only" data-evidence-status aria-live="polite" aria-atomic="true"></p>
           </div>
 
           <div class="evidence-specimen" aria-label="Illustrative search receipt" data-reveal="specimen">
@@ -350,49 +356,46 @@
               </a>
             </div>
           </div>
+        </div>
+      </section>
 
-          <div class="api-sample" aria-label="Example API call" data-reveal="specimen">
-            <div class="api-sample-header">
-              <span class="mono" data-copy="api.kicker">ONE CALL / GET /search</span>
-              <h3 data-copy="api.title">The receipt is in the response.</h3>
+      <section class="proof" aria-label="Purify in numbers">
+        <div class="container">
+          <div class="proof-grid" data-reveal="section">
+            <div class="proof-item">
+              <span class="proof-figure">4</span>
+              <span class="mono" data-copy="proof.l1">FETCH ENGINES</span>
+              <p data-copy="proof.d1">Chrome-true HTTP, headless browser, stealth render, web archive.</p>
             </div>
-            <div class="api-sample-grid">
-              <figure class="api-pane">
-                <figcaption class="mono">REQUEST</figcaption>
-                <pre><code>curl -G "https://purify.verifly.pro/search" \
-  --data-urlencode "q=security patch release date" \
-  -H "Authorization: Bearer $PURIFY_KEY"</code></pre>
-              </figure>
-              <figure class="api-pane">
-                <figcaption class="mono">RESPONSE / FIRST RESULT</figcaption>
-                <pre><code>{
-  "url": "https://docs.example.org/releases",
-  "title": "Release notes · 2026.08",
-  "observed_at": "2026-08-12T14:32:08Z",
-  "snapshot_id": "snap_9f2c41d8",
-  "verification": {
-    "state": <em>"verified"</em>,
-    "independent_sources": 3,
-    "conflicts_retained": 1,
-    "receipt": <em>"rcpt_ed25519_c7b2…"</em>
-  }
-}</code></pre>
-              </figure>
+            <div class="proof-item">
+              <span class="proof-figure">2</span>
+              <span class="mono" data-copy="proof.l2">LANGUAGES INDEXED</span>
+              <p data-copy="proof.d2">English and Chinese, ranked in one merged result set.</p>
+            </div>
+            <div class="proof-item">
+              <span class="proof-figure">100%</span>
+              <span class="mono" data-copy="proof.l3">ANSWERS SNAPSHOTTED</span>
+              <p data-copy="proof.d3">Every result preserves the exact bytes it was read from.</p>
+            </div>
+            <div class="proof-item">
+              <span class="proof-figure">1</span>
+              <span class="mono" data-copy="proof.l4">RECEIPT PER ANSWER</span>
+              <p data-copy="proof.d4">Signed with Ed25519, replayable through /verify.</p>
             </div>
           </div>
         </div>
       </section>
 
-      <section class="future section" id="future" aria-labelledby="future-title">
+      <section class="future section" id="vision" aria-labelledby="future-title">
         <div class="future-horizon" aria-hidden="true"></div>
         <div class="container future-container">
           <div class="section-index future-index" data-future-item>
             <span>04</span>
             <span data-copy="future.kicker">What comes next</span>
           </div>
-          <h2 id="future-title" data-copy="future.title" data-future-item>From verified answers<br />to a living fact layer.</h2>
+          <h2 id="future-title" data-copy="future.title" data-future-item>From answers<br />to a living fact layer.</h2>
           <p class="future-lead" data-copy="future.lead" data-future-item>
-            Search is where it starts. The same receipts will assimilate into a memory that watches for change, heals what breaks, and keeps every repair inspectable — the fact layer intelligent systems can stand on.
+            Receipts accumulate into memory. Memory learns to watch for change, heal what breaks, and keep every repair inspectable. Search is only the first layer.
           </p>
 
           <div class="future-for">
@@ -423,7 +426,7 @@
 
         <div class="footer-column">
           <p class="mono" data-copy="footer.product">PRODUCT</p>
-          <a href="#evidence" data-copy="nav.search">Search</a>
+          <a href="#product" data-copy="nav.product">Product</a>
           <a href="#technology" data-copy="nav.technology">Technology</a>
           <a href="https://github.com/Easonliuliang/purify#api" target="_blank" rel="noreferrer" data-copy="nav.docs">Docs</a>
         </div>

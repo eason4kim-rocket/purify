@@ -12,7 +12,7 @@ document.documentElement.dataset.heroVariant = HERO_VARIANT;
 
 const copy = {
   en: {
-    "nav.search": "Search",
+    "nav.product": "Product",
     "nav.technology": "Technology",
     "nav.vision": "Vision",
     "nav.journal": "Journal",
@@ -28,36 +28,38 @@ const copy = {
       "Purify Search is building a path from the open, changing web to context AI systems can inspect, update, and use.",
     "hero.primary": "Try Purify",
     "hero.secondary": "Read our vision",
-    "origin.kicker": "The world, first",
-    "origin.title": "Before it becomes data,<br />it is the world in motion.",
-    "origin.lead": "Every discovery begins with seeing. But the web keeps moving — and an answer you cannot re-check is not yet evidence.",
-    "origin.captionLabel": "FILM 01 / OPENING FRAME",
-    "origin.caption": "Nature is not a backdrop to data. It is where evidence begins.",
-    "origin.sound": "Watch with sound",
-    "origin.mute": "Mute",
-    "memory.kicker": "Living memory",
-    "memory.title": "The web is humanity’s<br />living memory.",
-    "memory.lead": "Our questions, discoveries, mistakes and ideas—still changing, still connected.",
-    "memory.quote":
-      "The next intelligence should inherit more than information. It should inherit the evidence to check what it knows.",
-    "memory.fieldLabel": "BLUE FIELD / FRAGMENT · OVERLAP · RECONNECT",
-    "memory.captionLabel": "HUMAN MEASURE / OBSERVE · COMPARE · JUDGE",
-    "memory.caption":
-      "Facts become useful through careful observation, comparison, and the responsibility to keep uncertainty visible.",
-    "technology.kicker": "Fetch · Find · Verify",
-    "technology.title": "Three layers turn the open web<br />into answers that prove themselves.",
-    "technology.lead":
-      "Purify runs the whole path itself — reach the page, rank it in an index we own, verify the claim — so every result can carry a snapshot, its sources, and a signed receipt.",
-    "technology.searchTitle": "Fetch",
-    "technology.searchBody":
-      "Reach any public page the way a real browser does — TLS fingerprint, HTTP/2, full rendering, and an archive fallback when the live web will not answer.",
-    "technology.assimilationTitle": "Find",
-    "technology.assimilationBody":
-      "Query a bilingual index we build and own — grown by real demand, never resold from someone else’s rankings.",
-    "technology.healingTitle": "Verify",
-    "technology.healingBody":
-      "Cross-check independent sources, keep every conflict visible, and sign a receipt for each claim before it is promoted.",
-    "technology.artCaption": "One record. Three layers of proof.",
+    "product.kicker": "The product",
+    "product.title": "A search API that answers<br />with evidence attached.",
+    "product.lead":
+      "One call reaches the live web, ranks it in an index we own, and verifies before answering — the snapshot, the sources, and a signed receipt arrive in the same response.",
+    "product.cap1Label": "LIVE, NOT CACHED",
+    "product.cap1":
+      "Answers read the page as it stands right now, with an archive fallback when the live web will not respond.",
+    "product.cap2Label": "OWNED, NOT RESOLD",
+    "product.cap2":
+      "Results rank in a bilingual index we build ourselves — no upstream terms can switch our answers off.",
+    "product.cap3Label": "SIGNED, NOT ASSERTED",
+    "product.cap3": "Every promoted claim carries an Ed25519 receipt that replays through /verify.",
+    "stack.kicker": "Fetch · Find · Verify",
+    "stack.title": "Three layers, welded<br />into one path.",
+    "stack.lead":
+      "Rented layers break trust at the seams. Purify runs the whole path itself, so one receipt can cover the journey from raw page to promoted claim.",
+    "stack.l1Index": "LAYER 01 — 抓",
+    "stack.l1Title": "Fetch",
+    "stack.l1Body":
+      "TLS and HTTP/2 that match a real Chrome, a full browser when pages demand rendering, archives when the live web will not answer.",
+    "stack.l2Index": "LAYER 02 — 找",
+    "stack.l2Title": "Find",
+    "stack.l2Body":
+      "A bilingual index we build and grow ourselves — seeded from the head of the web, expanded by real demand, never resold rankings.",
+    "stack.l3Index": "LAYER 03 — 核",
+    "stack.l3Title": "Verify",
+    "stack.l3Body":
+      "Independent sources cross-checked, conflicts kept on the record, and a receipt signed before any claim is promoted.",
+    "receipt.kicker": "The receipt",
+    "receipt.title": "Disagreement stays<br />on the record.",
+    "receipt.lead":
+      "Every response can be re-opened: which sources, observed when, what conflicted, what was promoted — and the signature that seals it.",
     "specimen.kicker": "SEARCH RECEIPT / ILLUSTRATIVE RECORD",
     "specimen.title": "Every answer ships with a receipt you can audit.",
     "specimen.status": "Needs review",
@@ -73,16 +75,22 @@ const copy = {
     "specimen.conflict": "Conflict retained",
     "specimen.changed": "Changed",
     "specimen.link": "Read the API docs",
-    "api.kicker": "ONE CALL / GET /search",
-    "api.title": "The receipt is in the response.",
+    "proof.l1": "FETCH ENGINES",
+    "proof.d1": "Chrome-true HTTP, headless browser, stealth render, web archive.",
+    "proof.l2": "LANGUAGES INDEXED",
+    "proof.d2": "English and Chinese, ranked in one merged result set.",
+    "proof.l3": "ANSWERS SNAPSHOTTED",
+    "proof.d3": "Every result preserves the exact bytes it was read from.",
+    "proof.l4": "RECEIPT PER ANSWER",
+    "proof.d4": "Signed with Ed25519, replayable through /verify.",
     "future.kicker": "What comes next",
-    "future.title": "From verified answers<br />to a living fact layer.",
+    "future.title": "From answers<br />to a living fact layer.",
     "future.lead":
-      "Search is where it starts. The same receipts will assimilate into a memory that watches for change, heals what breaks, and keeps every repair inspectable — the fact layer intelligent systems can stand on.",
+      "Receipts accumulate into memory. Memory learns to watch for change, heal what breaks, and keep every repair inspectable. Search is only the first layer.",
     "future.researchers": "For researchers who cite what they find.",
     "future.builders": "For builders whose agents act on facts.",
     "future.systems": "For systems that must show their work.",
-    "future.final": "For every intelligence working on humanity’s next chapter.",
+    "future.final": "For every intelligence working on humanity\u2019s next chapter.",
     "future.primary": "Try Purify",
     "future.secondary": "Follow our work",
     "footer.note": "Search that can show its work.",
@@ -95,7 +103,7 @@ const copy = {
     "footer.made": "Built for an open, changing world."
   },
   zh: {
-    "nav.search": "搜索",
+    "nav.product": "产品",
     "nav.technology": "技术",
     "nav.vision": "愿景",
     "nav.journal": "手记",
@@ -111,30 +119,33 @@ const copy = {
       "Purify Search 正在建立一条通往开放且持续变化的网络之路，把其中的信息转化为 AI 系统能够检查、更新并使用的上下文。",
     "hero.primary": "试用 Purify",
     "hero.secondary": "阅读我们的愿景",
-    "origin.kicker": "世界在先",
-    "origin.title": "在成为数据之前，<br />它是流动的世界。",
-    "origin.lead": "每一次发现，始于看见。但网络始终在变——无法复查的答案，还称不上证据。",
-    "origin.captionLabel": "影片 01 / 开场画面",
-    "origin.caption": "自然不是数据的背景。它是证据开始的地方。",
-    "origin.sound": "开启声音观看",
-    "origin.mute": "静音",
-    "memory.kicker": "活的记忆",
-    "memory.title": "网络，是人类<br />仍在生长的共同记忆。",
-    "memory.lead": "我们的疑问、发现、错误与想法，仍在变化，也仍然彼此相连。",
-    "memory.quote": "下一代智能继承的，不该只有信息，还应包括让它得以求证的证据。",
-    "memory.fieldLabel": "蓝色抽象场 / 片段 · 交叠 · 重组",
-    "memory.captionLabel": "人的尺度 / 观察 · 对照 · 判断",
-    "memory.caption": "事实之所以有用，来自细致的观察、比较，以及不掩盖不确定性的责任。",
-    "technology.kicker": "抓 · 找 · 核",
-    "technology.title": "三层结构，把开放网络<br />变成能自证的答案。",
-    "technology.lead": "整条链路由 Purify 自己完成：抓得到、找得着、核得住。因此每一条结果都能带上快照、来源与签名回执。",
-    "technology.searchTitle": "抓取",
-    "technology.searchBody": "像真实浏览器一样抵达公开页面——TLS 指纹、HTTP/2、完整渲染；当活网不应答时，回退到历史存档。",
-    "technology.assimilationTitle": "检索",
-    "technology.assimilationBody": "查询我们自建自有的中英双语索引——它随真实需求生长，而非转售他人的排序。",
-    "technology.healingTitle": "核验",
-    "technology.healingBody": "交叉核对相互独立的来源，让每一处冲突保持可见，并在陈述生效前为它签发回执。",
-    "technology.artCaption": "同一条记录，三层证明。",
+    "product.kicker": "产品",
+    "product.title": "一个把证据一并交付的<br />搜索 API。",
+    "product.lead":
+      "一次调用抵达实时网页，在自建索引中排序，核验之后才作答——快照、来源与签名回执，随同一个响应返回。",
+    "product.cap1Label": "实时，而非缓存",
+    "product.cap1": "答案读取此刻的页面；活网不应答时，回退到历史存档。",
+    "product.cap2Label": "自有，而非转售",
+    "product.cap2": "结果在我们自建的中英双语索引中排序——没有任何上游条款能掐断答案。",
+    "product.cap3Label": "签名，而非口说",
+    "product.cap3": "每条生效的陈述都带有 Ed25519 回执，可通过 /verify 重放核验。",
+    "stack.kicker": "抓 · 找 · 核",
+    "stack.title": "三层，焊成<br />一条链路。",
+    "stack.lead":
+      "租来的层，信任会在接缝处断裂。Purify 自己跑通整条链路，让一张回执覆盖从原始页面到生效陈述的全程。",
+    "stack.l1Index": "第一层 — 抓",
+    "stack.l1Title": "抓取",
+    "stack.l1Body": "TLS 与 HTTP/2 同真实 Chrome 一致；页面需要渲染时用完整浏览器；活网不应答时回退历史存档。",
+    "stack.l2Index": "第二层 — 找",
+    "stack.l2Title": "检索",
+    "stack.l2Body": "自建自养的中英双语索引——以头部网络打底，随真实需求生长，绝不转售他人排序。",
+    "stack.l3Index": "第三层 — 核",
+    "stack.l3Title": "核验",
+    "stack.l3Body": "交叉核对相互独立的来源，冲突留在记录上；任何陈述生效之前，先签发回执。",
+    "receipt.kicker": "回执",
+    "receipt.title": "分歧，<br />留在记录上。",
+    "receipt.lead":
+      "每个响应都可以被重新打开：哪些来源、何时观察、哪里冲突、何者生效——以及为这一切封印的签名。",
     "specimen.kicker": "搜索回执 / 示意记录",
     "specimen.title": "每一条答案，都附带一张可以复核的回执。",
     "specimen.status": "等待复核",
@@ -149,11 +160,17 @@ const copy = {
     "specimen.conflict": "保留冲突",
     "specimen.changed": "已变化",
     "specimen.link": "查看 API 文档",
-    "api.kicker": "一次调用 / GET /search",
-    "api.title": "回执，就在响应里。",
+    "proof.l1": "抓取引擎",
+    "proof.d1": "Chrome 指纹 HTTP、无头浏览器、隐身渲染、网络存档。",
+    "proof.l2": "索引语言",
+    "proof.d2": "中文与英文，在同一份结果中合并排序。",
+    "proof.l3": "答案留有快照",
+    "proof.d3": "每条结果都保存它所依据的原始字节。",
+    "proof.l4": "每条答案一张回执",
+    "proof.d4": "以 Ed25519 签名，可经 /verify 重放核验。",
     "future.kicker": "接下来",
-    "future.title": "从可核验的答案，<br />到活的事实层。",
-    "future.lead": "搜索只是起点。同样的回执将汇入一个持续生长的记忆：察觉变化、修复断裂，并让每一次修复都可以被检查——这是智能系统可以立足的事实层。",
+    "future.title": "从答案，<br />到活的事实层。",
+    "future.lead": "回执沉淀为记忆；记忆学会察觉变化、修复断裂，并让每一次修复都可被检查。搜索，只是第一层。",
     "future.researchers": "献给引用即可溯源的研究者。",
     "future.builders": "献给让智能体依据事实行动的建设者。",
     "future.systems": "献给必须出示证据的智能系统。",
@@ -171,56 +188,6 @@ const copy = {
   }
 };
 
-const evidenceStages = {
-  search: {
-    src: "../assets/abstract/signal-field-v1.webp",
-    srcset: "../assets/abstract/signal-field-v1-mobile.webp 720w, ../assets/abstract/signal-field-v1.webp 1254w",
-    label: { en: "LAYER 01 / FETCH", zh: "层 01 / 抓取" },
-    alt: {
-      en: "Mineral-blue fragments aligning into a clear path",
-      zh: "矿物蓝碎片逐渐排列成一条清晰路径"
-    }
-  },
-  assimilation: {
-    src: "../assets/abstract/living-memory-v1.webp",
-    srcset: "../assets/abstract/living-memory-v1-mobile.webp 720w, ../assets/abstract/living-memory-v1.webp 1254w",
-    label: { en: "LAYER 02 / FIND", zh: "层 02 / 检索" },
-    alt: {
-      en: "Layers of translucent paper preserve traces, impressions, and context",
-      zh: "透明纸层保存着痕迹、印记与上下文"
-    }
-  },
-  healing: {
-    src: "../assets/abstract/resolved-fact-v2.webp",
-    srcset: "../assets/abstract/resolved-fact-v2-mobile.webp 720w, ../assets/abstract/resolved-fact-v2.webp 1254w",
-    label: { en: "LAYER 03 / VERIFY", zh: "层 03 / 核验" },
-    alt: {
-      en: "Pale material layers converge around one resolved Signal Blue square",
-      zh: "浅色材料层在一个明确的矿物蓝方块周围汇聚"
-    }
-  }
-};
-
-const evidencePhaseCopy = {
-  none: { en: "", zh: "" },
-  "healing-broken": { en: "SOURCES DISAGREE", zh: "来源出现分歧" },
-  "healing-testing-a": { en: "SOURCE A / CHECKING", zh: "来源 A / 核验中" },
-  "healing-rejected-a": { en: "SOURCE A / REJECTED", zh: "来源 A / 已排除" },
-  "healing-testing-b": { en: "SOURCE B / CHECKING", zh: "来源 B / 核验中" },
-  "healing-verified": { en: "VERIFIED / RECEIPT SIGNED", zh: "核验通过 / 回执已签发" },
-  "healing-settled": {
-    en: "CONFLICTS REMAIN ON RECORD",
-    zh: "冲突保留在案，仍然可见"
-  },
-  "healing-unresolved": {
-    en: "UNRESOLVED / LAST VERIFIED STATE HELD",
-    zh: "未决 / 保持最后核验状态"
-  },
-  "healing-summary": {
-    en: "ONLY VERIFIED CLAIMS ARE PROMOTED",
-    zh: "只有核验通过的陈述才会生效"
-  }
-};
 
 const clamp = (value, min = 0, max = 1) => Math.min(max, Math.max(min, value));
 const lerp = (from, to, amount) => from + (to - from) * amount;
@@ -235,9 +202,6 @@ const cssColor = (token, fallback) =>
 let locale = "en";
 let activeTheme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
 let hasManualTheme = false;
-let activeEvidenceStage = "search";
-let activeEvidencePhase = "none";
-let evidenceController;
 
 function seededRandom(seed) {
   let state = seed >>> 0;
@@ -1001,413 +965,6 @@ class MemoryField {
   }
 }
 
-class MemoryToEvidenceBridge {
-  constructor(section, preferences) {
-    this.section = section;
-    this.preferences = preferences;
-    this.started = false;
-    this.elapsed = 0;
-    this.lastFrame = 0;
-    this.frameRequest = 0;
-    this.visible = false;
-    this.pageVisible = !document.hidden;
-    this.canvas = document.createElement("canvas");
-    this.canvas.className = "technology-bridge-canvas";
-    this.canvas.setAttribute("aria-hidden", "true");
-    this.context = this.canvas.getContext("2d", { alpha: true });
-    this.colors = {
-      memory: cssColor("--memory-indigo", "#6474d2"),
-      evidence: cssColor("--color-data-strong", "#3d9ab6")
-    };
-    this.section.prepend(this.canvas);
-    this.resizeObserver = new ResizeObserver(() => this.resize());
-    this.resizeObserver.observe(this.section);
-    this.observer = new IntersectionObserver(
-      ([entry]) => {
-        this.visible = entry.intersectionRatio >= 0.05;
-        if (!this.started && !this.preferences.reduced && entry.intersectionRatio >= 0.08) this.start();
-        this.syncPlayback();
-      },
-      { threshold: [0, 0.05, 0.08, 0.2] }
-    );
-    this.observer.observe(this.section);
-    this.resize();
-  }
-
-  setPreferences(preferences) {
-    this.preferences = preferences;
-    if (preferences.reduced && this.frameRequest) {
-      cancelAnimationFrame(this.frameRequest);
-      this.frameRequest = 0;
-      this.clear();
-    }
-    this.width = 0;
-    this.resize();
-    this.syncPlayback();
-  }
-
-  refreshTheme() {
-    this.colors = {
-      memory: cssColor("--memory-indigo", "#6474d2"),
-      evidence: cssColor("--color-data-strong", "#3d9ab6")
-    };
-    this.width = 0;
-    this.resize();
-  }
-
-  setPageVisible(visible) {
-    this.pageVisible = visible;
-    this.syncPlayback();
-  }
-
-  resize() {
-    const width = Math.max(1, Math.round(this.section.clientWidth));
-    const height = Math.max(260, Math.min(480, Math.round(window.innerHeight * 0.55)));
-    if (width === this.width && height === this.height) return;
-    this.width = width;
-    this.height = height;
-    this.dpr = Math.min(window.devicePixelRatio || 1, width < 768 ? 1.25 : 1.75);
-    this.canvas.width = Math.round(width * this.dpr);
-    this.canvas.height = Math.round(height * this.dpr);
-    this.canvas.style.width = `${width}px`;
-    this.canvas.style.height = `${height}px`;
-    const random = seededRandom(44031);
-    this.fragments = Array.from({ length: this.preferences.constrained ? 16 : 22 }, () => ({
-      startX: width * (0.58 + random() * 0.36),
-      startY: 12 + random() * height * 0.28,
-      endX: width * (0.64 + random() * 0.28),
-      endY: height * (0.35 + random() * 0.42),
-      bend: (random() - 0.5) * 54,
-      size: 2 + random() * 3,
-      delay: random() * 0.24
-    }));
-    if (!this.frameRequest) this.draw();
-  }
-
-  start() {
-    this.started = true;
-    this.elapsed = 0;
-    this.lastFrame = performance.now();
-    this.syncPlayback();
-  }
-
-  syncPlayback() {
-    const shouldRun =
-      this.started && this.elapsed < 1100 && this.visible && this.pageVisible && !this.preferences.reduced;
-    if (shouldRun && !this.frameRequest) {
-      this.lastFrame = performance.now();
-      this.frameRequest = requestAnimationFrame((time) => this.frame(time));
-    } else if (!shouldRun && this.frameRequest) {
-      cancelAnimationFrame(this.frameRequest);
-      this.frameRequest = 0;
-    }
-  }
-
-  frame(time) {
-    this.frameRequest = 0;
-    this.elapsed += Math.min(50, time - this.lastFrame);
-    this.lastFrame = time;
-    this.draw();
-    if (this.elapsed < 1100 && this.visible && this.pageVisible && !this.preferences.reduced) {
-      this.frameRequest = requestAnimationFrame((nextTime) => this.frame(nextTime));
-    } else {
-      this.clear();
-    }
-  }
-
-  clear() {
-    if (!this.context) return;
-    this.context.setTransform(1, 0, 0, 1, 0, 0);
-    this.context.clearRect(0, 0, this.canvas.width, this.canvas.height);
-  }
-
-  draw() {
-    if (!this.context || !this.fragments) return;
-    const context = this.context;
-    this.clear();
-    context.scale(this.dpr, this.dpr);
-    this.fragments.forEach((fragment) => {
-      const progress = easeOut((this.elapsed / 1100 - fragment.delay) / (1 - fragment.delay));
-      if (progress <= 0 || progress >= 1) return;
-      const x = lerp(fragment.startX, fragment.endX, progress) + Math.sin(progress * Math.PI) * fragment.bend;
-      const y = lerp(fragment.startY, fragment.endY, progress);
-      const opacity = Math.sin(progress * Math.PI) * 0.48;
-      context.globalAlpha = opacity;
-      context.fillStyle = progress < 0.48 ? this.colors.memory : this.colors.evidence;
-      if (progress < 0.48) {
-        context.beginPath();
-        context.arc(x, y, fragment.size * (1 - progress * 0.28), 0, Math.PI * 2);
-        context.fill();
-      } else {
-        const size = fragment.size * (0.72 + progress * 0.38);
-        context.fillRect(x - size / 2, y - size / 2, size, size);
-      }
-    });
-    context.globalAlpha = 1;
-  }
-}
-
-class EvidenceDemo {
-  constructor(root, preferences) {
-    this.root = root;
-    this.preferences = preferences;
-    this.tabs = [...root.querySelectorAll("[data-stage]")];
-    this.art = root.querySelector("[data-evidence-art]");
-    this.image = root.querySelector("[data-evidence-image]");
-    this.label = root.querySelector("[data-stage-label]");
-    this.result = root.querySelector("[data-stage-result]");
-    this.live = root.querySelector("[data-evidence-status]");
-    this.runId = 0;
-    this.waiters = new Set();
-    this.swapTimer = 0;
-    this.swapToken = 0;
-    this.demoStarted = false;
-    this.userControlled = false;
-    this.inView = false;
-    this.pageVisible = !document.hidden;
-    this.activeVisualStage = "search";
-    this.candidateBVerified = root.dataset.candidateBVerified !== "false";
-
-    this.tabs.forEach((tab) => {
-      tab.addEventListener("pointerdown", () => this.cancelAuto());
-      tab.addEventListener("click", () => this.handleUserSelection(tab.dataset.stage));
-      tab.addEventListener("keydown", (event) => this.handleKeydown(event));
-    });
-
-    const trigger = window.innerWidth < 768 ? 0.2 : 0.45;
-    this.observer = new IntersectionObserver(
-      ([entry]) => {
-        this.inView = entry.intersectionRatio >= 0.15;
-        this.syncWaiters();
-        if (!this.demoStarted && !this.userControlled && !this.preferences.reduced && entry.intersectionRatio >= trigger) {
-          this.demoStarted = true;
-          this.runAutomaticDemo();
-        }
-      },
-      { threshold: [0, 0.15, 0.2, 0.45, 0.7] }
-    );
-    this.observer.observe(root);
-    this.select("search", { source: "initial", immediate: true });
-  }
-
-  setPreferences(preferences) {
-    this.preferences = preferences;
-    if (preferences.reduced) this.cancelAuto();
-  }
-
-  setPageVisible(visible) {
-    this.pageVisible = visible;
-    this.syncWaiters();
-  }
-
-  freezeForFuture() {
-    const unfinishedHealing =
-      activeEvidenceStage === "healing" &&
-      !["healing-verified", "healing-settled", "healing-summary", "healing-unresolved"].includes(activeEvidencePhase);
-    this.cancelAuto();
-    if (unfinishedHealing) {
-      this.select("healing", {
-        source: "future",
-        phase: "healing-unresolved",
-        visualStage: "assimilation",
-        immediate: true
-      });
-    }
-  }
-
-  cancelAuto() {
-    this.userControlled = true;
-    this.runId += 1;
-    this.waiters.forEach((waiter) => {
-      if (waiter.timer) clearTimeout(waiter.timer);
-      waiter.resolve(false);
-    });
-    this.waiters.clear();
-    if (this.swapTimer) clearTimeout(this.swapTimer);
-    this.swapTimer = 0;
-    this.swapToken += 1;
-    this.art.classList.remove("is-changing");
-  }
-
-  wait(milliseconds, runId) {
-    return new Promise((resolve) => {
-      const waiter = {
-        resolve,
-        remaining: milliseconds,
-        runId,
-        timer: 0,
-        startedAt: 0
-      };
-      this.waiters.add(waiter);
-      this.scheduleWaiter(waiter);
-    });
-  }
-
-  scheduleWaiter(waiter) {
-    if (waiter.timer || !this.inView || !this.pageVisible || this.preferences.reduced) return;
-    waiter.startedAt = performance.now();
-    waiter.timer = window.setTimeout(() => {
-      waiter.timer = 0;
-      this.waiters.delete(waiter);
-      waiter.resolve(this.runId === waiter.runId);
-    }, waiter.remaining);
-  }
-
-  syncWaiters() {
-    const shouldRun = this.inView && this.pageVisible && !this.preferences.reduced;
-    this.waiters.forEach((waiter) => {
-      if (shouldRun) {
-        this.scheduleWaiter(waiter);
-      } else if (waiter.timer) {
-        clearTimeout(waiter.timer);
-        waiter.timer = 0;
-        waiter.remaining = Math.max(0, waiter.remaining - (performance.now() - waiter.startedAt));
-      }
-    });
-  }
-
-  setTabs(stageName) {
-    this.tabs.forEach((tab) => {
-      const selected = tab.dataset.stage === stageName;
-      tab.classList.toggle("is-active", selected);
-      tab.setAttribute("aria-selected", String(selected));
-      tab.tabIndex = selected ? 0 : -1;
-    });
-    this.art.setAttribute("aria-labelledby", `tab-${stageName}`);
-  }
-
-  swapImage(stageName, immediate = false) {
-    const stage = evidenceStages[stageName];
-    if (!stage) return;
-    const token = ++this.swapToken;
-    if (this.swapTimer) clearTimeout(this.swapTimer);
-    const commit = () => {
-      if (token !== this.swapToken) return;
-      this.image.src = stage.src;
-      this.image.srcset = stage.srcset;
-      this.image.alt = stage.alt[locale];
-      this.image.dataset.altEn = stage.alt.en;
-      this.image.dataset.altZh = stage.alt.zh;
-      requestAnimationFrame(() => {
-        if (token === this.swapToken) this.art.classList.remove("is-changing");
-      });
-    };
-
-    if (immediate || this.preferences.reduced) {
-      this.art.classList.remove("is-changing");
-      commit();
-      return;
-    }
-    this.art.classList.add("is-changing");
-    this.swapTimer = window.setTimeout(commit, 160);
-  }
-
-  updateLocalizedText(announce = false) {
-    const stage = evidenceStages[activeEvidenceStage];
-    const visualStage = evidenceStages[this.activeVisualStage] || stage;
-    if (!stage) return;
-    this.label.textContent = stage.label[locale];
-    this.result.textContent = evidencePhaseCopy[activeEvidencePhase]?.[locale] || "";
-    this.image.alt = visualStage.alt[locale];
-    if (announce) {
-      const messages = {
-        en: {
-          search: "Fetch layer selected.",
-          assimilation: "Find layer selected.",
-          healing: "Verify layer selected. Only verified claims are promoted."
-        },
-        zh: {
-          search: "已选择抓取层。",
-          assimilation: "已选择检索层。",
-          healing: "已选择核验层。只有核验通过的陈述才会生效。"
-        }
-      };
-      this.live.textContent = messages[locale][activeEvidenceStage];
-    }
-  }
-
-  select(stageName, { source = "auto", phase = "none", visualStage = stageName, immediate = false, announce = false } = {}) {
-    if (!evidenceStages[stageName]) return;
-    activeEvidenceStage = stageName;
-    activeEvidencePhase = phase;
-    this.activeVisualStage = visualStage;
-    this.setTabs(stageName);
-    this.art.dataset.evidenceState = phase;
-    this.swapImage(visualStage, immediate);
-    this.updateLocalizedText(announce || source === "user");
-  }
-
-  async runHealingSequence(runId, source = "auto") {
-    this.select("healing", { source, phase: "healing-broken", visualStage: "assimilation" });
-    if (!(await this.wait(350, runId))) return false;
-    this.select("healing", { source, phase: "healing-testing-a", visualStage: "assimilation", immediate: true });
-    if (!(await this.wait(550, runId))) return false;
-    this.select("healing", { source, phase: "healing-rejected-a", visualStage: "assimilation", immediate: true });
-    if (!(await this.wait(300, runId))) return false;
-    this.select("healing", { source, phase: "healing-testing-b", visualStage: "assimilation", immediate: true });
-    if (!(await this.wait(650, runId))) return false;
-
-    if (!this.candidateBVerified) {
-      this.select("healing", {
-        source,
-        phase: "healing-unresolved",
-        visualStage: "assimilation",
-        announce: true
-      });
-      return true;
-    }
-
-    this.select("healing", { source, phase: "healing-verified", visualStage: "healing", announce: source === "user" });
-    if (!(await this.wait(500, runId))) return false;
-    this.select("healing", { source, phase: "healing-settled", visualStage: "healing", immediate: true });
-    await this.wait(1200, runId);
-    return true;
-  }
-
-  async runAutomaticDemo() {
-    const runId = ++this.runId;
-    this.select("search", { source: "auto", immediate: true });
-    if (!(await this.wait(2200, runId))) return;
-    this.select("assimilation", { source: "auto" });
-    if (!(await this.wait(2800, runId))) return;
-    await this.runHealingSequence(runId, "auto");
-  }
-
-  handleUserSelection(stageName) {
-    this.cancelAuto();
-    if (stageName !== "healing") {
-      this.select(stageName, { source: "user" });
-      return;
-    }
-    if (this.preferences.reduced) {
-      this.select("healing", {
-        source: "user",
-        phase: "healing-summary",
-        visualStage: "healing",
-        immediate: true
-      });
-      return;
-    }
-    const runId = ++this.runId;
-    this.runHealingSequence(runId, "user");
-  }
-
-  handleKeydown(event) {
-    const currentIndex = this.tabs.indexOf(event.currentTarget);
-    let nextIndex = currentIndex;
-    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % this.tabs.length;
-    else if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + this.tabs.length) % this.tabs.length;
-    else if (event.key === "Home") nextIndex = 0;
-    else if (event.key === "End") nextIndex = this.tabs.length - 1;
-    else return;
-
-    event.preventDefault();
-    const nextTab = this.tabs[nextIndex];
-    nextTab.focus();
-    this.handleUserSelection(nextTab.dataset.stage);
-  }
-}
-
 function readStoredTheme() {
   try {
     const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
@@ -1498,11 +1055,6 @@ function applyLocale(nextLocale) {
       ? "Purify Search 是一个会抓、会找、会核的搜索 API——每一条答案都附带快照、来源与签名回执。"
       : "Purify Search is a search API that fetches, finds, and verifies the open web — every answer ships with a snapshot, sources, and a signed receipt.";
 
-  evidenceController?.updateLocalizedText();
-  const soundButton = document.querySelector("[data-video-sound]");
-  if (soundButton) {
-    soundButton.textContent = soundButton.dataset.soundEnabled === "true" ? copy[nextLocale]["origin.mute"] : copy[nextLocale]["origin.sound"];
-  }
   syncThemeControl();
 }
 
@@ -1559,25 +1111,6 @@ function setupMenu() {
   });
 }
 
-function setupEvidencePreload(preferences) {
-  if (preferences.constrained) return;
-  const technology = document.querySelector("#technology");
-  if (!technology) return;
-  const observer = new IntersectionObserver(
-    ([entry]) => {
-      if (!entry.isIntersecting) return;
-      Object.values(evidenceStages).forEach((stage) => {
-        const image = new Image();
-        image.src = stage.src;
-        image.srcset = stage.srcset;
-      });
-      observer.disconnect();
-    },
-    { rootMargin: "600px 0px" }
-  );
-  observer.observe(technology);
-}
-
 function setupSectionReveals(preferences) {
   const revealTargets = [...document.querySelectorAll("[data-reveal]")];
   const future = document.querySelector(".future");
@@ -1594,16 +1127,7 @@ function setupSectionReveals(preferences) {
       entries.forEach((entry) => {
         if (!entry.isIntersecting) return;
         const target = entry.target;
-        if (target.matches(".future")) {
-          target.classList.add("is-visible");
-        } else if (target.matches("[data-memory-human]")) {
-          const image = target.querySelector("img");
-          const reveal = () => target.classList.add("is-visible");
-          if (image?.complete) reveal();
-          else image?.decode().then(reveal).catch(reveal);
-        } else {
-          target.classList.add("is-visible");
-        }
+        target.classList.add("is-visible");
         pendingTargets.delete(target);
         observer.unobserve(target);
       });
@@ -1635,99 +1159,6 @@ function setupSectionReveals(preferences) {
   requestAnimationFrame(revealPassedContent);
 }
 
-function setupOriginVideo(initialPreferences) {
-  const video = document.querySelector("[data-origin-video]");
-  const shell = document.querySelector("[data-video-shell]");
-  const soundButton = document.querySelector("[data-video-sound]");
-  const noopController = { setPreferences() {}, setPageVisible() {} };
-  if (!video || !shell || !soundButton) return noopController;
-
-  const posterMedia = window.matchMedia("(max-width: 767px)");
-  const applyPoster = () => {
-    const nextPoster = posterMedia.matches ? video.dataset.posterMobile : video.dataset.posterDesktop;
-    if (nextPoster && video.getAttribute("poster") !== nextPoster) video.setAttribute("poster", nextPoster);
-  };
-  applyPoster();
-  posterMedia.addEventListener("change", applyPoster);
-
-  let preferences = initialPreferences;
-  let pageVisible = !document.hidden;
-  const sourceElement = video.querySelector("source");
-  const source = video.dataset.src || sourceElement?.src;
-  if (!source) {
-    shell.classList.add("is-placeholder");
-    return noopController;
-  }
-  if (video.dataset.src) {
-    video.src = video.dataset.src;
-    video.load();
-  }
-
-  soundButton.hidden = false;
-  let started = false;
-  let leftAt = 0;
-  let soundEnabled = false;
-  let intersectionRatio = 0;
-  soundButton.dataset.soundEnabled = "false";
-  video.loop = true;
-
-  const pause = () => {
-    if (!video.paused) video.pause();
-    if (started) leftAt = performance.now();
-  };
-
-  const syncPlayback = () => {
-    if (!pageVisible || preferences.reduced || preferences.constrained) {
-      pause();
-      return;
-    }
-    if (intersectionRatio < 0.15) {
-      pause();
-      return;
-    }
-    if (intersectionRatio < 0.35) return;
-    if (leftAt && performance.now() - leftAt > 8000) video.currentTime = 0;
-    video.muted = !soundEnabled;
-    video.play().catch(() => {});
-    started = true;
-    leftAt = 0;
-  };
-
-  const observer = new IntersectionObserver(
-    ([entry]) => {
-      intersectionRatio = entry.intersectionRatio;
-      syncPlayback();
-    },
-    { threshold: [0, 0.15, 0.35, 0.75] }
-  );
-  observer.observe(video);
-
-  soundButton.addEventListener("click", () => {
-    soundEnabled = !soundEnabled;
-    soundButton.dataset.soundEnabled = String(soundEnabled);
-    if (soundEnabled) {
-      video.currentTime = 0;
-      video.muted = false;
-      video.play().catch(() => {});
-      started = true;
-    } else {
-      video.muted = true;
-    }
-    soundButton.textContent = soundEnabled ? copy[locale]["origin.mute"] : copy[locale]["origin.sound"];
-  });
-
-  return {
-    setPreferences(nextPreferences) {
-      preferences = nextPreferences;
-      syncPlayback();
-    },
-    setPageVisible(visible) {
-      pageVisible = visible;
-      syncPlayback();
-    }
-  };
-}
-
 document.addEventListener("DOMContentLoaded", () => {
   let preferences = getMotionPreferences();
   let heroPreferences = getMotionPreferences({ ignoreVisualLock: HERO_MATRIX_LIVE });
@@ -1744,48 +1175,20 @@ document.addEventListener("DOMContentLoaded", () => {
     document.querySelector("[data-hero]"),
     heroPreferences
   );
-  const memoryMotion = {
-    setPageVisible() {},
-    setPreferences() {}
-  };
-  const memoryBridge = new MemoryToEvidenceBridge(document.querySelector("#technology"), preferences);
-  evidenceController = new EvidenceDemo(document.querySelector("[data-evidence-demo]"), preferences);
   document.addEventListener("purify:theme-change", () => {
     heroMotion.refreshTheme();
-    memoryBridge.refreshTheme();
   });
-  const futureFreezeObserver = new IntersectionObserver(
-    ([entry]) => {
-      if (!entry.isIntersecting) return;
-      evidenceController.freezeForFuture();
-      futureFreezeObserver.disconnect();
-    },
-    { threshold: 0.08 }
-  );
-  futureFreezeObserver.observe(document.querySelector("#future"));
-  setupEvidencePreload(preferences);
-  const originVideo = setupOriginVideo(preferences);
 
   document.querySelector("[data-language-toggle]")?.addEventListener("click", () => {
     applyLocale(locale === "en" ? "zh" : "en");
   });
 
   document.addEventListener("visibilitychange", () => {
-    const visible = !document.hidden;
-    heroMotion.setPageVisible(visible);
-    memoryMotion.setPageVisible(visible);
-    memoryBridge.setPageVisible(visible);
-    evidenceController.setPageVisible(visible);
-    originVideo.setPageVisible(visible);
+    heroMotion.setPageVisible(!document.hidden);
   });
 
   document.addEventListener("purify:menu-state", (event) => {
-    const visible = !document.hidden && !event.detail.open;
-    heroMotion.setPageVisible(visible);
-    memoryMotion.setPageVisible(visible);
-    memoryBridge.setPageVisible(visible);
-    evidenceController.setPageVisible(visible);
-    originVideo.setPageVisible(visible);
+    heroMotion.setPageVisible(!document.hidden && !event.detail.open);
   });
 
   const applyPreferences = () => {
@@ -1802,10 +1205,6 @@ document.addEventListener("DOMContentLoaded", () => {
     document.documentElement.classList.toggle("motion-reduced", preferences.reduced);
     document.documentElement.classList.toggle("motion-constrained", preferences.constrained);
     heroMotion.setPreferences(heroPreferences);
-    memoryMotion.setPreferences(preferences);
-    memoryBridge.setPreferences(preferences);
-    evidenceController.setPreferences(preferences);
-    originVideo.setPreferences(preferences);
   };
 
   const reducedMedia = window.matchMedia("(prefers-reduced-motion: reduce)");
