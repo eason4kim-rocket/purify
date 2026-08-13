@@ -27,6 +27,19 @@ type FrontierItem struct {
 
 // Enqueue inserts pending URLs. Existing rows are left untouched.
 func (s *Store) Enqueue(ctx context.Context, items []FrontierItem) (int, error) {
+	return s.enqueue(ctx, items, 0)
+}
+
+// EnqueueBounded inserts pending URLs while the root's total frontier
+// footprint — pending, leased, done, and failed rows alike — stays below
+// perRootBudget. Done rows count because they are spent crawl budget; a root
+// that consumed its budget must not win more by linking to itself. A budget
+// of zero or less means unbounded.
+func (s *Store) EnqueueBounded(ctx context.Context, items []FrontierItem, perRootBudget int) (int, error) {
+	return s.enqueue(ctx, items, perRootBudget)
+}
+
+func (s *Store) enqueue(ctx context.Context, items []FrontierItem, perRootBudget int) (int, error) {
 	if err := s.guard(ctx); err != nil {
 		return 0, err
 	}
@@ -53,10 +66,26 @@ func (s *Store) Enqueue(ctx context.Context, items []FrontierItem) (int, error) 
 		if item.URL == "" || item.Root == "" {
 			continue
 		}
-		result, execErr := tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO frontier(url, root, state) VALUES(?, ?, ?)`,
-			item.URL, item.Root, FrontierPending,
-		)
+		var result sql.Result
+		var execErr error
+		if perRootBudget > 0 {
+			// The guarded INSERT re-counts inside the transaction, so budget
+			// checks see rows added earlier in this same batch. A duplicate URL
+			// passes the WHERE and lands on the conflict clause, leaving the
+			// count — and therefore the budget — untouched.
+			result, execErr = tx.ExecContext(ctx, `
+				INSERT INTO frontier(url, root, state)
+				SELECT ?1, ?2, ?3
+				WHERE (SELECT COUNT(*) FROM frontier WHERE root = ?2) < ?4
+				ON CONFLICT(url) DO NOTHING`,
+				item.URL, item.Root, FrontierPending, perRootBudget,
+			)
+		} else {
+			result, execErr = tx.ExecContext(ctx, `
+				INSERT OR IGNORE INTO frontier(url, root, state) VALUES(?, ?, ?)`,
+				item.URL, item.Root, FrontierPending,
+			)
+		}
 		if execErr != nil {
 			return 0, fmt.Errorf("searchindex: enqueue: %w", execErr)
 		}
@@ -67,6 +96,28 @@ func (s *Store) Enqueue(ctx context.Context, items []FrontierItem) (int, error) 
 		return 0, fmt.Errorf("searchindex: commit enqueue: %w", err)
 	}
 	return inserted, nil
+}
+
+// ActiveFrontier counts pending and leased rows. Link discovery lets an
+// in-flight page refill an empty frontier, so a crawler may only stop when
+// this count reaches zero.
+func (s *Store) ActiveFrontier(ctx context.Context) (int, error) {
+	if err := s.guard(ctx); err != nil {
+		return 0, err
+	}
+	s.gate.RLock()
+	defer s.gate.RUnlock()
+	if s.closed {
+		return 0, ErrClosed
+	}
+	var active int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM frontier WHERE state IN (?, ?)`,
+		FrontierPending, FrontierLeased,
+	).Scan(&active); err != nil {
+		return 0, fmt.Errorf("searchindex: count active frontier: %w", err)
+	}
+	return active, nil
 }
 
 // Lease claims one pending URL whose root is not already leased.

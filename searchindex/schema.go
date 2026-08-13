@@ -43,4 +43,10 @@ CREATE TABLE frontier (
 CREATE INDEX frontier_pick ON frontier(state, root);
 `
 
-var migrations = []string{schemaMigrationV1}
+// In-crawl link discovery enforces a per-root row budget, which needs a count
+// by root alone; frontier_pick leads on state and cannot serve that seek.
+const schemaMigrationV2 = `
+CREATE INDEX frontier_root ON frontier(root);
+`
+
+var migrations = []string{schemaMigrationV1, schemaMigrationV2}

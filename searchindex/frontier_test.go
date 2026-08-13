@@ -2,6 +2,8 @@ package searchindex
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"testing"
 	"time"
 )
@@ -71,6 +73,114 @@ func TestFrontierReleaseStaleLeasesUnblocksTheRoot(t *testing.T) {
 	if item.Root != "example" {
 		t.Fatalf("released root not leasable: %#v", item)
 	}
+}
+
+// TestEnqueueBoundedStopsAtThePerRootBudget locks the growth guardrail: link
+// discovery feeds the frontier while the crawl runs, so without a per-root
+// budget one heavily linked host could flood the table and starve every other
+// root of crawl time.
+func TestEnqueueBoundedStopsAtThePerRootBudget(t *testing.T) {
+	store := openTestStore(t)
+	seeded, err := store.Enqueue(context.Background(), []FrontierItem{
+		{URL: "https://a.example/1", Root: "example"},
+		{URL: "https://a.example/2", Root: "example"},
+	})
+	if err != nil || seeded != 2 {
+		t.Fatalf("Enqueue() = %d, %v", seeded, err)
+	}
+	inserted, err := store.EnqueueBounded(context.Background(), []FrontierItem{
+		{URL: "https://a.example/2", Root: "example"}, // duplicate: must not consume budget
+		{URL: "https://a.example/3", Root: "example"},
+		{URL: "https://a.example/4", Root: "example"}, // over budget
+		{URL: "https://b.example/1", Root: "b.example"},
+	}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inserted != 2 {
+		t.Fatalf("EnqueueBounded() inserted = %d, want 2 (one per root)", inserted)
+	}
+	for url, want := range map[string]bool{
+		"https://a.example/3": true,
+		"https://a.example/4": false,
+		"https://b.example/1": true,
+	} {
+		if got := frontierHas(t, store, url); got != want {
+			t.Fatalf("frontier row %s present = %v, want %v", url, got, want)
+		}
+	}
+	// Completed rows are spent budget, so they still count against the cap.
+	item, ok, err := store.Lease(context.Background(), time.Unix(1_700_000_100, 0))
+	if err != nil || !ok {
+		t.Fatal(err, ok)
+	}
+	if err := store.Complete(context.Background(), item.URL); err != nil {
+		t.Fatal(err)
+	}
+	inserted, err = store.EnqueueBounded(context.Background(),
+		[]FrontierItem{{URL: "https://a.example/5", Root: "example"}}, 3)
+	if err != nil || inserted != 0 {
+		t.Fatalf("EnqueueBounded() past spent budget = %d, %v, want 0 inserts", inserted, err)
+	}
+}
+
+func TestEnqueueBoundedUnlimitedWhenBudgetUnset(t *testing.T) {
+	store := openTestStore(t)
+	inserted, err := store.EnqueueBounded(context.Background(), []FrontierItem{
+		{URL: "https://a.example/1", Root: "example"},
+		{URL: "https://a.example/2", Root: "example"},
+		{URL: "https://a.example/3", Root: "example"},
+	}, 0)
+	if err != nil || inserted != 3 {
+		t.Fatalf("EnqueueBounded(cap=0) = %d, %v, want 3", inserted, err)
+	}
+}
+
+// TestActiveFrontierCountsPendingAndLeased locks the crawl-liveness signal:
+// workers may only stop when no URL is waiting or in flight, because an
+// in-flight page can still enqueue links that refill an empty frontier.
+func TestActiveFrontierCountsPendingAndLeased(t *testing.T) {
+	store := openTestStore(t)
+	if _, err := store.Enqueue(context.Background(), []FrontierItem{
+		{URL: "https://a.example/1", Root: "example"},
+		{URL: "https://b.example/1", Root: "b.example"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if active, err := store.ActiveFrontier(context.Background()); err != nil || active != 2 {
+		t.Fatalf("ActiveFrontier() = %d, %v, want 2", active, err)
+	}
+	item, ok, err := store.Lease(context.Background(), time.Unix(1_700_000_100, 0))
+	if err != nil || !ok {
+		t.Fatal(err, ok)
+	}
+	if active, err := store.ActiveFrontier(context.Background()); err != nil || active != 2 {
+		t.Fatalf("ActiveFrontier() with lease = %d, %v, want 2", active, err)
+	}
+	if err := store.Complete(context.Background(), item.URL); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Fail(context.Background(), "https://b.example/1", 0); err != nil {
+		t.Fatal(err)
+	}
+	// b.example went back to pending (attempts below the limit), a.example is done.
+	if active, err := store.ActiveFrontier(context.Background()); err != nil || active != 1 {
+		t.Fatalf("ActiveFrontier() after complete = %d, %v, want 1", active, err)
+	}
+}
+
+func frontierHas(t *testing.T, store *Store, url string) bool {
+	t.Helper()
+	var one int
+	err := store.db.QueryRow(`SELECT 1 FROM frontier WHERE url = ?`, url).Scan(&one)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	t.Fatal(err)
+	return false
 }
 
 func TestFrontierFailRetriesThenGivesUp(t *testing.T) {
