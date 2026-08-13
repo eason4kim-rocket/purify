@@ -222,13 +222,23 @@ func (s *Store) Lease(ctx context.Context, now time.Time) (FrontierItem, bool, e
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Roots are picked uniformly, not by global URL order. Link discovery
+	// keeps refilling the queue, and under one global ordering the crawl
+	// wedges into whatever sorts first (every http:// URL precedes every
+	// https:// one) while later roots starve; a fair root pick spreads the
+	// politeness-limited workers across sites. Within a root, URL order
+	// keeps section locality.
 	var item FrontierItem
 	err = tx.QueryRowContext(ctx, `
 		SELECT url, root, attempts FROM frontier
 		WHERE state = ?
-		  AND root NOT IN (SELECT root FROM frontier WHERE state = ?)
+		  AND root = (
+			SELECT root FROM frontier
+			WHERE state = ?
+			  AND root NOT IN (SELECT root FROM frontier WHERE state = ?)
+			GROUP BY root ORDER BY RANDOM() LIMIT 1)
 		ORDER BY url LIMIT 1`,
-		FrontierPending, FrontierLeased,
+		FrontierPending, FrontierPending, FrontierLeased,
 	).Scan(&item.URL, &item.Root, &item.Attempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		if commitErr := tx.Commit(); commitErr != nil {

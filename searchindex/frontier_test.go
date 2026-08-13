@@ -34,11 +34,16 @@ func TestFrontierLeaseOneRootAtATimeAndCompletes(t *testing.T) {
 	if err != nil || ok {
 		t.Fatalf("third Lease() = %#v, %v, %v want empty", third, ok, err)
 	}
-	if err := store.Complete(context.Background(), first.URL); err != nil {
+	// Completing the two-URL root's lease frees that root for its next URL.
+	twoURLRoot := first
+	if twoURLRoot.Root != "example" {
+		twoURLRoot = second
+	}
+	if err := store.Complete(context.Background(), twoURLRoot.URL); err != nil {
 		t.Fatal(err)
 	}
 	again, ok, err := store.Lease(context.Background(), now.Add(time.Second))
-	if err != nil || !ok || again.Root != first.Root {
+	if err != nil || !ok || again.Root != "example" {
 		t.Fatalf("lease after complete = %#v, %v, %v", again, ok, err)
 	}
 }
@@ -74,6 +79,40 @@ func TestFrontierReleaseStaleLeasesUnblocksTheRoot(t *testing.T) {
 	if item.Root != "example" {
 		t.Fatalf("released root not leasable: %#v", item)
 	}
+}
+
+// TestFrontierLeaseDoesNotStarveLaterSortingRoots locks lease fairness: with
+// one global URL ordering the crawl wedges into whatever sorts first (every
+// http:// URL precedes every https:// one), and a root landing late in the
+// order never gets a worker while link discovery keeps refilling the front.
+func TestFrontierLeaseDoesNotStarveLaterSortingRoots(t *testing.T) {
+	store := openTestStore(t)
+	items := make([]FrontierItem, 0, 301)
+	for index := range 300 {
+		items = append(items, FrontierItem{
+			URL:  fmt.Sprintf("http://early.example/%03d", index),
+			Root: "early.example",
+		})
+	}
+	items = append(items, FrontierItem{URL: "https://late.example/", Root: "late.example"})
+	if _, err := store.Enqueue(context.Background(), items); err != nil {
+		t.Fatal(err)
+	}
+	// Forty fair picks over two roots miss one with probability 2^-40; the
+	// old global order needed all 300 early rows drained first.
+	for range 40 {
+		item, ok, err := store.Lease(context.Background(), time.Now())
+		if err != nil || !ok {
+			t.Fatal(err, ok)
+		}
+		if item.Root == "late.example" {
+			return
+		}
+		if err := store.Complete(context.Background(), item.URL); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Fatal("late-sorting root was never leased in 40 picks")
 }
 
 // TestEnqueueBoundedStopsAtThePerRootBudget locks the growth guardrail: link
@@ -161,10 +200,15 @@ func TestActiveFrontierCountsPendingAndLeased(t *testing.T) {
 	if err := store.Complete(context.Background(), item.URL); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Fail(context.Background(), "https://b.example/1", 0); err != nil {
+	otherURL := "https://b.example/1"
+	if item.URL == otherURL {
+		otherURL = "https://a.example/1"
+	}
+	if err := store.Fail(context.Background(), otherURL, 0); err != nil {
 		t.Fatal(err)
 	}
-	// b.example went back to pending (attempts below the limit), a.example is done.
+	// The failed row went back to pending (attempts below the limit), the
+	// completed one is done.
 	if active, err := store.ActiveFrontier(context.Background()); err != nil || active != 1 {
 		t.Fatalf("ActiveFrontier() after complete = %d, %v, want 1", active, err)
 	}
@@ -183,31 +227,31 @@ func TestRequeueReopensFinishedRows(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Two leases claim both roots in whatever order the fair pick lands on;
+	// within a root the first URL is deterministic.
 	now := time.Unix(1_700_000_100, 0)
-	item, ok, err := store.Lease(context.Background(), now)
-	if err != nil || !ok {
-		t.Fatal(err, ok)
+	byURL := map[string]bool{}
+	for range 2 {
+		item, ok, err := store.Lease(context.Background(), now)
+		if err != nil || !ok {
+			t.Fatal(err, ok)
+		}
+		byURL[item.URL] = true
 	}
-	if err := store.Complete(context.Background(), item.URL); err != nil {
+	if !byURL["https://a.example/"] || !byURL["https://b.example/"] {
+		t.Fatalf("leases = %#v, want both roots' first URLs", byURL)
+	}
+	if err := store.Complete(context.Background(), "https://a.example/"); err != nil {
 		t.Fatal(err)
 	}
-	// Occupy a.example/deep so the next lease reaches b.example, then exhaust
-	// b.example into the failed state.
-	deep, ok, err := store.Lease(context.Background(), now)
-	if err != nil || !ok || deep.URL != "https://a.example/deep" {
-		t.Fatalf("Lease() = %#v, %v, %v", deep, ok, err)
-	}
-	leased, ok, err := store.Lease(context.Background(), now)
-	if err != nil || !ok || leased.URL != "https://b.example/" {
-		t.Fatalf("Lease() = %#v, %v, %v", leased, ok, err)
-	}
+	// b.example was leased once, so one more failure exhausts it.
 	if err := store.Fail(context.Background(), "https://b.example/", 1); err != nil {
 		t.Fatal(err)
 	}
 	// Reopen the done and failed rows; the unknown URL is a no-op and the
-	// in-flight a.example/deep lease stays untouched.
+	// still-pending a.example/deep row stays untouched.
 	requeued, err := store.Requeue(context.Background(), []string{
-		item.URL, "https://b.example/", "https://missing.example/",
+		"https://a.example/", "https://b.example/", "https://missing.example/",
 	})
 	if err != nil {
 		t.Fatal(err)
