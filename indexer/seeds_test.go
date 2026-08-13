@@ -45,6 +45,35 @@ func TestSeedFrontierEnqueuesDiscoveredURLs(t *testing.T) {
 	}
 }
 
+// TestSeedFrontierSkipsForeignLocalePaths locks the crawl-budget guard:
+// sitemaps of multi-locale documentation sites hand back every translation of
+// every page, and only en/zh variants may reach the frontier. Technical paths
+// that merely look like locale tags ("/js/", uppercase "/TR/") must survive.
+func TestSeedFrontierSkipsForeignLocalePaths(t *testing.T) {
+	store, err := searchindex.Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	discoverer := stubDiscoverer{urls: []string{
+		"https://a.example/de/docs/Web",
+		"https://a.example/pt-BR/docs/Web",
+		"https://a.example/ja/",
+		"https://a.example/en-US/docs/Web",
+		"https://a.example/zh-cn/3/tutorial",
+		"https://a.example/js/js-window.html",
+		"https://a.example/TR/html52/",
+	}}
+	n, err := SeedFrontier(context.Background(), store, discoverer, []string{"https://a.example/"}, true)
+	if err != nil {
+		t.Fatalf("SeedFrontier() error = %v", err)
+	}
+	// Seed + en-US + zh-cn + js + TR; de, pt-BR, and ja stay out.
+	if n != 5 {
+		t.Fatalf("SeedFrontier() = %d, want 5", n)
+	}
+}
+
 type stubDiscoverer struct{ urls []string }
 
 func (s stubDiscoverer) Discover(context.Context, string) (*discovery.Result, error) {
