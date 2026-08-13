@@ -6,6 +6,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /purify ./cmd/purify
+# The indexer ships alongside the server so an operator can build the local
+# search index inside the same container that will serve it.
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /purify-index ./cmd/purify-index
 
 # ── Stage 2: Runtime with Chromium ───────────────────────────────
 FROM debian:bookworm-slim
@@ -25,6 +28,7 @@ USER purify
 WORKDIR /home/purify
 
 COPY --from=builder /purify /usr/local/bin/purify
+COPY --from=builder /purify-index /usr/local/bin/purify-index
 
 # Point go-rod to system Chromium; enable no-sandbox for container.
 ENV PURIFY_BROWSER_BIN=/usr/bin/chromium

@@ -21,8 +21,13 @@ services:
       # still require enough tokens (maximum trust Search 59; legacy max 22).
       PURIFY_RATE_RPS: "5"
       PURIFY_RATE_BURST: "59"
-      # ── Local search index (empty leaves search/answer/watch disabled) ──
-      PURIFY_SEARCH_INDEX_PATH: "${PURIFY_SEARCH_INDEX_PATH:-}"
+      # ── Local search index ──
+      # Defaults into the durable volume. Search stays unavailable until the
+      # file exists, so this is safe before the first purify-index run:
+      #   docker compose exec purify purify-index \
+      #     -seeds /data/seeds.json -out /data/index.db -max-pages 100000
+      #   docker compose restart purify   # the index is opened at startup
+      PURIFY_SEARCH_INDEX_PATH: "${PURIFY_SEARCH_INDEX_PATH:-/data/index.db}"
       # ── Process-owned metadata reranker (default-off; no sidecar here) ──
       PURIFY_RERANK_ENABLED: "${PURIFY_RERANK_ENABLED:-false}"
       PURIFY_RERANK_ENDPOINT: "${PURIFY_RERANK_ENDPOINT:-}"
