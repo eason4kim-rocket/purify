@@ -76,8 +76,17 @@ func NewScraper(browserCfg config.BrowserConfig, scraperCfg config.ScraperConfig
 	}
 
 	l := launcher.New().
-		Headless(browserCfg.Headless).
 		NoSandbox(browserCfg.NoSandbox)
+
+	// Chromium 132 removed the legacy headless mode. rod's Headless(true) still
+	// emits a bare --headless, which on Chromium 151 fails every navigation with
+	// net::ERR_BLOCKED_BY_CLIENT. Select the new headless implementation
+	// explicitly so navigation works on current Chromium.
+	if browserCfg.Headless {
+		l.Set(flags.Flag("headless"), "new")
+	} else {
+		l.Headless(false)
+	}
 
 	if browserCfg.BrowserBin != "" {
 		l = l.Bin(browserCfg.BrowserBin)

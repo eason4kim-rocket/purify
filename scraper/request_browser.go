@@ -275,7 +275,12 @@ func browserHeaders(req *models.ScrapeRequest) map[string]string {
 	headers := make(map[string]string, len(req.Headers)+1)
 	if _, hasReferer := req.Headers["Referer"]; !hasReferer {
 		if parsed, err := url.Parse(req.URL); err == nil && parsed.Scheme == "https" {
-			headers["Referer"] = "https://www.google.com/search?q=" + url.QueryEscape(parsed.Hostname())
+			// Real Google traffic sends only the origin as the referer (Google's
+			// referrer policy strips the /search?q=... path), so the origin is
+			// both more authentic and safe. The full search URL was an anti-bot
+			// tell that also trips Chromium 151 into net::ERR_BLOCKED_BY_CLIENT,
+			// failing every browser navigation.
+			headers["Referer"] = "https://www.google.com/"
 		}
 	}
 	for key, value := range req.Headers {
