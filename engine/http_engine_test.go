@@ -23,8 +23,114 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/http2"
+
 	"github.com/use-agent/purify/proxypool"
 )
+
+// TestChromeRoundTripperNegotiatesHTTP2 locks the core of the Chrome-coherent
+// fingerprint: when the server offers h2 over ALPN, the direct utls path must
+// actually speak HTTP/2 rather than fall back to HTTP/1.1. Offering h2 in the
+// ClientHello but then speaking h1 was the JA4 tell this replaces.
+func TestChromeRoundTripperNegotiatesHTTP2(t *testing.T) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(writer, "<html><body>proto=%s</body></html>", request.Proto)
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	resp, body := directTLSRoundTrip(t, server)
+	defer resp.Body.Close()
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("negotiated %s, want HTTP/2", resp.Proto)
+	}
+	if !strings.Contains(body, "proto=HTTP/2.0") {
+		t.Fatalf("server saw %q, want HTTP/2.0", body)
+	}
+}
+
+// TestChromeRoundTripperFallsBackToHTTP1 covers a server that does not offer h2:
+// the same direct utls path must complete the request over HTTP/1.1.
+func TestChromeRoundTripperFallsBackToHTTP1(t *testing.T) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(writer, "<html><body>proto=%s</body></html>", request.Proto)
+	}))
+	server.EnableHTTP2 = false
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	resp, body := directTLSRoundTrip(t, server)
+	defer resp.Body.Close()
+	if resp.ProtoMajor != 1 {
+		t.Fatalf("negotiated %s, want HTTP/1.1", resp.Proto)
+	}
+	if !strings.Contains(body, "proto=HTTP/1.1") {
+		t.Fatalf("server saw %q, want HTTP/1.1", body)
+	}
+}
+
+// TestChromeRoundTripperReusesAcrossConnections guards a real bug: reusing one
+// utls ClientHello spec across connections mutates its key material, so the
+// second handshake fails with a bad record MAC. Every request must build a
+// fresh hello, so many sequential fetches through one client must all succeed.
+func TestChromeRoundTripperReusesAcrossConnections(t *testing.T) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/html")
+		_, _ = writer.Write([]byte("<html><body>ok</body></html>"))
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	roots := x509.NewCertPool()
+	roots.AddCert(server.Certificate())
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	client := &http.Client{Transport: &chromeRoundTripper{
+		dialTCP: func(ctx context.Context, addr string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp", addr)
+		},
+		tlsConfig: &tls.Config{RootCAs: roots},
+		h2:        &http2.Transport{},
+	}}
+
+	for i := range 5 {
+		resp, err := client.Get(server.URL)
+		if err != nil {
+			t.Fatalf("Get(%d) error = %v", i, err)
+		}
+		_, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+	}
+}
+
+// directTLSRoundTrip drives one GET through the direct chromeRoundTripper,
+// trusting the test server's certificate, and returns the response and body.
+func directTLSRoundTrip(t *testing.T, server *httptest.Server) (*http.Response, string) {
+	t.Helper()
+	roots := x509.NewCertPool()
+	roots.AddCert(server.Certificate())
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	transport := &chromeRoundTripper{
+		dialTCP: func(ctx context.Context, addr string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp", addr)
+		},
+		tlsConfig: &tls.Config{RootCAs: roots},
+		h2:        &http2.Transport{},
+	}
+	client := &http.Client{Transport: transport}
+	resp, err := client.Get(server.URL)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	return resp, string(body)
+}
 
 func TestHTTPEngineHonorsHeadersCookiesAndDefaultNetworkWait(t *testing.T) {
 	wait := true

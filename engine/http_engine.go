@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/html"
+	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
 
 	"github.com/use-agent/purify/proxypool"
@@ -36,35 +36,11 @@ const (
 	hardMaximumResponseBodyBytes    int64 = 64 << 20
 )
 
-// chromeH1Spec is a Chrome-like TLS ClientHello with ALPN forced to http/1.1
-// only. Computed once at init time and reused for every connection.
-var chromeH1Spec utls.ClientHelloSpec
-
-func init() {
-	spec, err := utls.UTLSIdToSpec(utls.HelloChrome_Auto)
-	if err != nil {
-		// Fallback: if spec generation fails, use HelloChrome_Auto as-is.
-		// (Should never happen with a valid utls version.)
-		return
-	}
-	// Replace h2 with http/1.1 only in the ALPN extension so the server
-	// never negotiates HTTP/2 (which Go's http.Transport cannot handle
-	// over a utls connection).
-	for i, ext := range spec.Extensions {
-		if alpn, ok := ext.(*utls.ALPNExtension); ok {
-			alpn.AlpnProtocols = []string{"http/1.1"}
-			spec.Extensions[i] = alpn
-			break
-		}
-	}
-	chromeH1Spec = spec
-}
-
 // NewHTTPEngine creates an HTTPEngine with a Chrome-like TLS fingerprint.
-// ALPN is locked to http/1.1 to avoid the HTTP/2 framing mismatch that
-// occurs when utls negotiates h2 but Go's http.Transport only speaks h1.
-// If proxyURL is non-empty, all connections are routed through the proxy
-// (SOCKS5 with optional username/password auth is supported).
+// Direct connections present the full Chrome ClientHello (h2 + http/1.1 in
+// ALPN) and speak whichever protocol the server negotiates; see
+// chromeRoundTripper. If proxyURL is non-empty, all connections are routed
+// through the proxy (SOCKS5 with optional username/password auth is supported).
 func NewHTTPEngine(proxyURL string) *HTTPEngine {
 	return NewHTTPEngineWithPool(proxyURL, nil)
 }
@@ -103,55 +79,47 @@ func newHTTPClientWithTLSConfig(proxyURL string, tlsConfig *stdtls.Config) (*htt
 		return nil, err
 	}
 
+	limitRedirects := func(_ *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("too many redirects")
+		}
+		return nil
+	}
+
+	// Direct connections present the full Chrome fingerprint and negotiate the
+	// protocol (h2 or http/1.1) exactly as the ALPN offer implies.
+	if proxyURL == "" {
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		transport := &chromeRoundTripper{
+			dialTCP: func(ctx context.Context, addr string) (net.Conn, error) {
+				return dialer.DialContext(ctx, "tcp", addr)
+			},
+			tlsConfig: tlsConfig,
+			h2:        &http2.Transport{},
+		}
+		return &http.Client{Transport: transport, CheckRedirect: limitRedirects}, nil
+	}
+
+	// Proxied connections keep net/http's proxy handling. This path uses the
+	// standard TLS fingerprint; unifying utls through the proxy tunnel is a
+	// deliberate follow-up, so deployments that need the Chrome fingerprint
+	// should pin the proxy per target rather than route every fetch through it.
+	proxy, _ := url.Parse(proxyURL) // validated above
 	transport := &http.Transport{
 		ForceAttemptHTTP2: false,
+		Proxy:             http.ProxyURL(proxy),
 	}
-	if proxyURL == "" {
-		transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			var conn net.Conn
-			var err error
-			dialer := &net.Dialer{Timeout: 10 * time.Second}
-			conn, err = dialer.DialContext(ctx, network, addr)
-			if err != nil {
-				return nil, err
-			}
-
-			host, _, _ := net.SplitHostPort(addr)
-			tlsConn := utls.UClient(conn, &utls.Config{ServerName: host}, utls.HelloCustom)
-			if err := tlsConn.ApplyPreset(&chromeH1Spec); err != nil {
-				conn.Close()
-				return nil, fmt.Errorf("http_engine: apply tls spec: %w", err)
-			}
-			if err := tlsConn.HandshakeContext(ctx); err != nil {
-				conn.Close()
-				return nil, err
-			}
-			return tlsConn, nil
+	config := &stdtls.Config{MinVersion: stdtls.VersionTLS12}
+	if tlsConfig != nil {
+		config = tlsConfig.Clone()
+		if config.MinVersion == 0 {
+			config.MinVersion = stdtls.VersionTLS12
 		}
-	} else {
-		proxy, _ := url.Parse(proxyURL) // validated above
-		transport.Proxy = http.ProxyURL(proxy)
-		config := &stdtls.Config{MinVersion: stdtls.VersionTLS12}
-		if tlsConfig != nil {
-			config = tlsConfig.Clone()
-			if config.MinVersion == 0 {
-				config.MinVersion = stdtls.VersionTLS12
-			}
-		}
-		// net/http applies ServerName separately for the HTTPS proxy and the
-		// tunneled target while preserving certificate verification.
-		transport.TLSClientConfig = config
 	}
-
-	return &http.Client{
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return fmt.Errorf("too many redirects")
-			}
-			return nil
-		},
-	}, nil
+	// net/http applies ServerName separately for the HTTPS proxy and the
+	// tunneled target while preserving certificate verification.
+	transport.TLSClientConfig = config
+	return &http.Client{Transport: transport, CheckRedirect: limitRedirects}, nil
 }
 
 func validateProxyURL(rawURL string) error {
