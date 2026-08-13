@@ -232,9 +232,8 @@ func normalizePage(page Page) (Page, error) {
 	return page, nil
 }
 
-// insertFTS and deleteFTS must apply the same indexText rewrite: an FTS5
-// external-content delete replays the indexed tokens, so a delete built from
-// the raw row would leave the rewritten Chinese postings behind.
+// insertFTS writes the rewritten token stream. The table is contentless, so
+// this stream is free to differ from the text kept in pages.
 func insertFTS(ctx context.Context, tx *sql.Tx, id int64, page Page) error {
 	table := ftsTable(page.Lang)
 	if _, err := tx.ExecContext(ctx,
@@ -246,12 +245,11 @@ func insertFTS(ctx context.Context, tx *sql.Tx, id int64, page Page) error {
 	return nil
 }
 
-func deleteFTS(ctx context.Context, tx *sql.Tx, id int64, lang, title, body string) error {
+// deleteFTS relies on contentless_delete, so it no longer has to replay the
+// exact indexed tokens to retract a row.
+func deleteFTS(ctx context.Context, tx *sql.Tx, id int64, lang string) error {
 	table := ftsTable(lang)
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO `+table+`(`+table+`, rowid, title, body) VALUES('delete', ?, ?, ?)`,
-		id, indexText(lang, title), indexText(lang, body),
-	); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE rowid = ?`, id); err != nil {
 		return fmt.Errorf("searchindex: delete fts: %w", err)
 	}
 	return nil

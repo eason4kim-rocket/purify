@@ -8,9 +8,8 @@ import (
 )
 
 const (
-	// snippetScanRunes bounds how much stored body is read back for a Chinese
-	// snippet; snippetWindowRunes is the fragment finally returned.
-	snippetScanRunes   = 20000
+	// snippetLeadRunes is the context kept before the first term hit;
+	// snippetWindowRunes is the fragment finally returned.
 	snippetLeadRunes   = 20
 	snippetWindowRunes = 120
 )
@@ -66,19 +65,14 @@ func (s *Store) queryTable(ctx context.Context, lang string, terms []string, lim
 		return nil, nil
 	}
 	table := ftsTable(lang)
-	// Chinese rows are indexed as bigrams, so FTS5 token offsets no longer line
-	// up with the original text in the external-content table and snippet()
-	// returns nothing usable. Those snippets are cut from the stored body here.
-	snippetColumn := fmt.Sprintf(`snippet(%s, 1, '', '', '…', 24)`, table)
-	if lang == LangChinese {
-		snippetColumn = fmt.Sprintf(`substr(p.body, 1, %d)`, snippetScanRunes)
-	}
+	// The FTS tables are contentless, so snippet() has no text to work from.
+	// Fragments come from the stored plain lead instead, which also keeps the
+	// compressed body off the query path entirely.
 	query := fmt.Sprintf(`
-		SELECT p.url, p.title, p.root, p.fetched_at,
-		       bm25(%s, 5.0, 1.0) AS score,
-		       %s AS snip
+		SELECT p.url, p.title, p.root, p.fetched_at, p.lead,
+		       bm25(%s, 5.0, 1.0) AS score
 		FROM %s JOIN pages p ON p.id = %s.rowid
-		WHERE %s MATCH ? ORDER BY score LIMIT ?`, table, snippetColumn, table, table, table)
+		WHERE %s MATCH ? ORDER BY score LIMIT ?`, table, table, table, table)
 	rows, err := s.db.QueryContext(ctx, query, match, limit)
 	if err != nil {
 		return nil, fmt.Errorf("searchindex: query %s: %w", table, err)
@@ -87,13 +81,12 @@ func (s *Store) queryTable(ctx context.Context, lang string, terms []string, lim
 	hits := make([]Hit, 0, limit)
 	for rows.Next() {
 		var hit Hit
-		if err := rows.Scan(&hit.URL, &hit.Title, &hit.Root, &hit.FetchedAt, &hit.Score, &hit.Snippet); err != nil {
+		var lead string
+		if err := rows.Scan(&hit.URL, &hit.Title, &hit.Root, &hit.FetchedAt, &lead, &hit.Score); err != nil {
 			return nil, fmt.Errorf("searchindex: scan hit: %w", err)
 		}
 		hit.Lang = lang
-		if lang == LangChinese {
-			hit.Snippet = plainSnippet(hit.Snippet, terms)
-		}
+		hit.Snippet = plainSnippet(lead, terms)
 		hits = append(hits, hit)
 	}
 	return hits, rows.Err()

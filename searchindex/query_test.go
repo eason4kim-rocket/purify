@@ -154,3 +154,34 @@ func mustUpsert(t *testing.T, store *Store, page Page) {
 		t.Fatalf("Upsert() error = %v", err)
 	}
 }
+
+// TestReindexRebuildsFromCompressedBodies locks the reason the compressed body
+// is kept at all: a tokenizer change must cost one local pass, not a re-crawl.
+func TestReindexRebuildsFromCompressedBodies(t *testing.T) {
+	store := openTestStore(t)
+	mustUpsert(t, store, Page{
+		URL: "https://example.com/en", Root: "example.com", Title: "Nginx proxy",
+		Body: "configure the nginx reverse proxy read timeout", Lang: LangEnglish, FetchedAt: time.Now(),
+	})
+	mustUpsert(t, store, Page{
+		URL: "https://zh.example/cn", Root: "example", Title: "Redis 配置",
+		Body: "这是讲 Redis 配置和价格的文档。", Lang: LangChinese, FetchedAt: time.Now(),
+	})
+
+	rebuilt, err := store.Reindex(context.Background())
+	if err != nil {
+		t.Fatalf("Reindex() error = %v", err)
+	}
+	if rebuilt != 2 {
+		t.Fatalf("rebuilt = %d, want 2", rebuilt)
+	}
+	for _, query := range []string{"nginx timeout", "配置", "价格"} {
+		hits, err := store.Query(context.Background(), query, 5)
+		if err != nil || len(hits) == 0 {
+			t.Fatalf("after reindex Query(%q) = %#v, %v", query, hits, err)
+		}
+		if hits[0].Snippet == "" {
+			t.Fatalf("after reindex Query(%q) lost its snippet", query)
+		}
+	}
+}

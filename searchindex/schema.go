@@ -1,12 +1,22 @@
 package searchindex
 
+// The schema is pre-release: it is edited in place rather than migrated, so a
+// tokenizer or layout change means rebuilding the index file.
+//
+// Measured on a real 86-page crawl, storing plain body text cost 149% of the
+// text while the inverted index alone cost 39%. Pages therefore keep a
+// zstd-compressed body plus a short plain lead, and the FTS tables are
+// contentless. That also removes the external-content coupling: the indexed
+// token stream no longer has to equal the stored text, which is what a
+// rewritten (segmented) Chinese stream needs.
 const schemaMigrationV1 = `
 CREATE TABLE pages (
 	id INTEGER PRIMARY KEY,
 	url TEXT NOT NULL UNIQUE,
 	root TEXT NOT NULL,
 	title TEXT NOT NULL DEFAULT '',
-	body TEXT NOT NULL DEFAULT '',
+	lead TEXT NOT NULL DEFAULT '',
+	body_z BLOB,
 	lang TEXT NOT NULL,
 	fetched_at INTEGER NOT NULL,
 	content_hash TEXT NOT NULL,
@@ -18,13 +28,10 @@ CREATE INDEX pages_root ON pages(root);
 CREATE INDEX pages_hash ON pages(content_hash);
 CREATE INDEX pages_render ON pages(needs_render) WHERE needs_render = 1;
 
--- Both tables use unicode61. Chinese reaches it through the indexText bigram
--- rewrite in lang.go rather than through the trigram tokenizer, which cannot
--- match the two-character words that dominate real Chinese queries.
 CREATE VIRTUAL TABLE pages_fts_en USING fts5(
-	title, body, content='pages', content_rowid='id', tokenize='unicode61');
+	title, body, content='', contentless_delete=1, tokenize='unicode61');
 CREATE VIRTUAL TABLE pages_fts_zh USING fts5(
-	title, body, content='pages', content_rowid='id', tokenize='unicode61');
+	title, body, content='', contentless_delete=1, tokenize='unicode61');
 
 CREATE TABLE frontier (
 	url TEXT PRIMARY KEY,
