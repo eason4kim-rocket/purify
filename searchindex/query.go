@@ -44,23 +44,32 @@ func (s *Store) Query(ctx context.Context, text string, limit int) ([]Hit, error
 		return nil, nil
 	}
 	preferred := DetectLanguage(text)
-	preferredHits, err := s.queryTable(ctx, preferred, terms, limit)
-	if err != nil {
-		return nil, err
-	}
 	other := LangEnglish
 	if preferred == LangEnglish {
 		other = LangChinese
 	}
-	otherHits, err := s.queryTable(ctx, other, terms, limit)
-	if err != nil {
-		return nil, err
+	// Strictness is chosen globally, not per table: the strictest operator
+	// that yields any hit is applied to both languages. A per-table fallback
+	// would interleave weak single-term matches from the other language in
+	// between strong full matches from the preferred one.
+	for _, operator := range []string{" AND ", " OR "} {
+		preferredHits, err := s.queryTable(ctx, preferred, terms, limit, operator)
+		if err != nil {
+			return nil, err
+		}
+		otherHits, err := s.queryTable(ctx, other, terms, limit, operator)
+		if err != nil {
+			return nil, err
+		}
+		if len(preferredHits)+len(otherHits) > 0 {
+			return mergeHitsByRank(preferredHits, otherHits, limit), nil
+		}
 	}
-	return mergeHitsByRank(preferredHits, otherHits, limit), nil
+	return nil, nil
 }
 
-func (s *Store) queryTable(ctx context.Context, lang string, terms []string, limit int) ([]Hit, error) {
-	match, err := ftsMatch(lang, terms)
+func (s *Store) queryTable(ctx context.Context, lang string, terms []string, limit int, operator string) ([]Hit, error) {
+	match, err := ftsMatch(lang, terms, operator)
 	if err != nil {
 		return nil, err
 	}
@@ -139,11 +148,11 @@ func queryTerms(text string) []string {
 	return terms
 }
 
-// ftsMatch joins terms with OR. Whitespace between FTS5 phrases means AND, so
-// the earlier space-joined form required every term to appear on one page and
-// returned nothing for ordinary multi-word queries. OR keeps recall and lets
-// bm25 rank partial matches, which is the point of bm25.
-func ftsMatch(lang string, terms []string) (string, error) {
+// ftsMatch joins terms with the given operator. Query pursues AND first and
+// falls back to OR only when no page holds every term: pure OR let a single
+// common term ("policy", "变量") pull unrelated hub pages into the head of the
+// ranking, while pure AND returned nothing for broad multi-word queries.
+func ftsMatch(lang string, terms []string, operator string) (string, error) {
 	phrases := make([]string, 0, len(terms))
 	seen := make(map[string]struct{}, len(terms))
 	for _, term := range terms {
@@ -166,7 +175,7 @@ func ftsMatch(lang string, terms []string) (string, error) {
 			phrases = append(phrases, `"`+token+`"`)
 		}
 	}
-	return strings.Join(phrases, " OR "), nil
+	return strings.Join(phrases, operator), nil
 }
 
 // plainSnippet cuts a window around the first term hit in the stored body.

@@ -54,9 +54,64 @@ func TestQueryEscapesFTSOperators(t *testing.T) {
 	}
 }
 
-// TestQueryKeepsPartialMatches locks OR semantics. Joining phrases with
-// whitespace means AND in FTS5, which made ordinary multi-word queries return
-// nothing and made bm25's partial-match ranking unreachable.
+// TestQueryPrefersPagesMatchingAllTerms locks the AND-first pass: while any
+// page holds every term, pages matching only one common term stay out of the
+// results entirely instead of leaking into the head of the ranking.
+func TestQueryPrefersPagesMatchingAllTerms(t *testing.T) {
+	store := openTestStore(t)
+	mustUpsert(t, store, Page{
+		URL: "https://k8s.example/restart", Root: "k8s.example", Title: "Kubernetes pod restart policy",
+		Body:      "The restart policy for pods controls how kubernetes restarts containers.",
+		Lang:      LangEnglish,
+		FetchedAt: time.Now(),
+	})
+	mustUpsert(t, store, Page{
+		URL: "https://blog.example/privacy", Root: "blog.example", Title: "Site policy",
+		Body: "Our privacy policy explains cookie retention.", Lang: LangEnglish, FetchedAt: time.Now(),
+	})
+
+	hits, err := store.Query(context.Background(), "kubernetes restart policy", 5)
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if len(hits) != 1 || hits[0].URL != "https://k8s.example/restart" {
+		t.Fatalf("AND-first hits = %#v", hits)
+	}
+}
+
+// TestQueryAndPassSuppressesOtherLanguageNoise locks the global strictness
+// rule: when the preferred language satisfies AND, the other language table
+// must not interleave weak single-term matches into the merged ranking.
+func TestQueryAndPassSuppressesOtherLanguageNoise(t *testing.T) {
+	store := openTestStore(t)
+	mustUpsert(t, store, Page{
+		URL: "https://k8s.example/restart", Root: "k8s.example", Title: "Kubernetes pod restart policy",
+		Body:      "The restart policy for pods controls how kubernetes restarts containers.",
+		Lang:      LangEnglish,
+		FetchedAt: time.Now(),
+	})
+	mustUpsert(t, store, Page{
+		URL: "https://zh.example/k8s", Root: "example", Title: "Kubernetes 集群入门",
+		Body: "这一篇介绍 kubernetes 集群的部署。", Lang: LangChinese, FetchedAt: time.Now(),
+	})
+
+	hits, err := store.Query(context.Background(), "kubernetes restart policy", 5)
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	for _, hit := range hits {
+		if hit.URL == "https://zh.example/k8s" {
+			t.Fatalf("other-language partial match leaked into AND results: %#v", hits)
+		}
+	}
+	if len(hits) != 1 || hits[0].URL != "https://k8s.example/restart" {
+		t.Fatalf("AND-first hits = %#v", hits)
+	}
+}
+
+// TestQueryKeepsPartialMatches locks the OR fallback. When no page holds every
+// term, the query degrades to OR so bm25 can still rank partial matches
+// instead of returning nothing.
 func TestQueryKeepsPartialMatches(t *testing.T) {
 	store := openTestStore(t)
 	mustUpsert(t, store, Page{
