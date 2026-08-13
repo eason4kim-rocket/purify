@@ -235,10 +235,18 @@ func normalizePage(page Page) (Page, error) {
 // insertFTS writes the rewritten token stream. The table is contentless, so
 // this stream is free to differ from the text kept in pages.
 func insertFTS(ctx context.Context, tx *sql.Tx, id int64, page Page) error {
+	title, err := indexText(page.Lang, page.Title)
+	if err != nil {
+		return err
+	}
+	body, err := indexText(page.Lang, page.Body)
+	if err != nil {
+		return err
+	}
 	table := ftsTable(page.Lang)
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO `+table+`(rowid, title, body) VALUES(?,?,?)`,
-		id, indexText(page.Lang, page.Title), indexText(page.Lang, page.Body),
+		id, title, body,
 	); err != nil {
 		return fmt.Errorf("searchindex: insert fts: %w", err)
 	}

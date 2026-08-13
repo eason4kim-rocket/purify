@@ -185,3 +185,39 @@ func TestReindexRebuildsFromCompressedBodies(t *testing.T) {
 		}
 	}
 }
+
+// TestQueryMatchesChineseCompoundParts locks what search-mode segmentation buys
+// over character bigrams: a compound is indexed together with its parts, so a
+// query for either half reaches the page without matching arbitrary character
+// pairs that straddle two words.
+func TestQueryMatchesChineseCompoundParts(t *testing.T) {
+	store := openTestStore(t)
+	mustUpsert(t, store, Page{
+		URL: "https://zh.example/pricing", Root: "example", Title: "计费说明",
+		Body: "价格按内存容量计费，缓存命中率越高单位成本越低。", Lang: LangChinese, FetchedAt: time.Now(),
+	})
+	mustUpsert(t, store, Page{
+		URL: "https://zh.example/rivers", Root: "example", Title: "河流",
+		Body: "这一页讲河流与航运，和计价无关。", Lang: LangChinese, FetchedAt: time.Now(),
+	})
+
+	for _, query := range []string{"内存容量", "内存", "容量", "命中率"} {
+		hits, err := store.Query(context.Background(), query, 5)
+		if err != nil {
+			t.Fatalf("Query(%q) error = %v", query, err)
+		}
+		if len(hits) == 0 || hits[0].URL != "https://zh.example/pricing" {
+			t.Fatalf("Query(%q) hits = %#v", query, hits)
+		}
+	}
+
+	// "存容" spans the boundary of 内存|容量 and is not a word, so a word index
+	// must not match it the way a character bigram index would.
+	spurious, err := store.Query(context.Background(), "存容", 5)
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if len(spurious) != 0 {
+		t.Fatalf("cross-word fragment matched: %#v", spurious)
+	}
+}

@@ -60,7 +60,10 @@ func (s *Store) Query(ctx context.Context, text string, limit int) ([]Hit, error
 }
 
 func (s *Store) queryTable(ctx context.Context, lang string, terms []string, limit int) ([]Hit, error) {
-	match := ftsMatch(lang, terms)
+	match, err := ftsMatch(lang, terms)
+	if err != nil {
+		return nil, err
+	}
 	if match == "" {
 		return nil, nil
 	}
@@ -140,14 +143,18 @@ func queryTerms(text string) []string {
 // the earlier space-joined form required every term to appear on one page and
 // returned nothing for ordinary multi-word queries. OR keeps recall and lets
 // bm25 rank partial matches, which is the point of bm25.
-func ftsMatch(lang string, terms []string) string {
+func ftsMatch(lang string, terms []string) (string, error) {
 	phrases := make([]string, 0, len(terms))
 	seen := make(map[string]struct{}, len(terms))
 	for _, term := range terms {
-		// A Chinese term is indexed as bigrams, so it must be expanded into the
-		// same bigrams here; each one is its own OR operand rather than one
-		// phrase, so a page does not have to contain the whole run verbatim.
-		for _, token := range strings.Fields(indexText(lang, term)) {
+		// A Chinese term is segmented the same way the index was, so each word
+		// becomes its own OR operand instead of one long phrase and a page does
+		// not have to contain the whole run verbatim.
+		segmented, err := queryText(lang, term)
+		if err != nil {
+			return "", err
+		}
+		for _, token := range strings.Fields(segmented) {
 			token = strings.ReplaceAll(token, `"`, "")
 			if token == "" {
 				continue
@@ -159,7 +166,7 @@ func ftsMatch(lang string, terms []string) string {
 			phrases = append(phrases, `"`+token+`"`)
 		}
 	}
-	return strings.Join(phrases, " OR ")
+	return strings.Join(phrases, " OR "), nil
 }
 
 // plainSnippet cuts a window around the first term hit in the stored body.
