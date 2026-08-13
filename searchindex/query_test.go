@@ -54,6 +54,34 @@ func TestQueryEscapesFTSOperators(t *testing.T) {
 	}
 }
 
+// TestQueryProximitySuppressesHubPages locks the NEAR tier: a link-directory
+// page mentions every term somewhere in its soup, but only the content page
+// holds them inside one passage, so the hub must stay out of the results.
+func TestQueryProximitySuppressesHubPages(t *testing.T) {
+	store := openTestStore(t)
+	filler := strings.Repeat("unrelated filler words about many other subjects entirely ", 12)
+	mustUpsert(t, store, Page{
+		URL: "https://docs.example/status", Root: "docs.example", Title: "HTTP status codes explained",
+		Body:      "Every http response carries a status code that tells the client what happened.",
+		Lang:      LangEnglish,
+		FetchedAt: time.Now(),
+	})
+	mustUpsert(t, store, Page{
+		URL: "https://hub.example/sitemap", Root: "hub.example", Title: "All articles",
+		Body:      "http client tutorial " + filler + " status " + filler + " code reference " + filler,
+		Lang:      LangEnglish,
+		FetchedAt: time.Now(),
+	})
+
+	hits, err := store.Query(context.Background(), "http status code", 5)
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if len(hits) != 1 || hits[0].URL != "https://docs.example/status" {
+		t.Fatalf("NEAR-tier hits = %#v", hits)
+	}
+}
+
 // TestQueryPrefersPagesMatchingAllTerms locks the AND-first pass: while any
 // page holds every term, pages matching only one common term stay out of the
 // results entirely instead of leaking into the head of the ranking.

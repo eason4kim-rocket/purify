@@ -48,16 +48,16 @@ func (s *Store) Query(ctx context.Context, text string, limit int) ([]Hit, error
 	if preferred == LangEnglish {
 		other = LangChinese
 	}
-	// Strictness is chosen globally, not per table: the strictest operator
-	// that yields any hit is applied to both languages. A per-table fallback
-	// would interleave weak single-term matches from the other language in
-	// between strong full matches from the preferred one.
-	for _, operator := range []string{" AND ", " OR "} {
-		preferredHits, err := s.queryTable(ctx, preferred, terms, limit, operator)
+	// Strictness is chosen globally, not per table: the strictest tier that
+	// yields any hit is applied to both languages. A per-table fallback would
+	// interleave weak single-term matches from the other language in between
+	// strong full matches from the preferred one.
+	for _, tier := range []matchTier{tierNear, tierAnd, tierOr} {
+		preferredHits, err := s.queryTable(ctx, preferred, terms, limit, tier)
 		if err != nil {
 			return nil, err
 		}
-		otherHits, err := s.queryTable(ctx, other, terms, limit, operator)
+		otherHits, err := s.queryTable(ctx, other, terms, limit, tier)
 		if err != nil {
 			return nil, err
 		}
@@ -68,8 +68,24 @@ func (s *Store) Query(ctx context.Context, text string, limit int) ([]Hit, error
 	return nil, nil
 }
 
-func (s *Store) queryTable(ctx context.Context, lang string, terms []string, limit int, operator string) ([]Hit, error) {
-	match, err := ftsMatch(lang, terms, operator)
+// matchTier is one strictness level of the three-tier query plan.
+type matchTier int
+
+const (
+	// tierNear requires every term within a small token window. Hub pages —
+	// pagination indexes, link directories, sidebar soups — contain almost
+	// every term somewhere, but only genuine content pages hold them close
+	// together, so this tier keeps hubs out of the head of the ranking.
+	tierNear matchTier = iota
+	tierAnd
+	tierOr
+)
+
+// nearWindow is the token distance allowed between query terms in tierNear.
+const nearWindow = 20
+
+func (s *Store) queryTable(ctx context.Context, lang string, terms []string, limit int, tier matchTier) ([]Hit, error) {
+	match, err := ftsMatch(lang, terms, tier)
 	if err != nil {
 		return nil, err
 	}
@@ -148,11 +164,12 @@ func queryTerms(text string) []string {
 	return terms
 }
 
-// ftsMatch joins terms with the given operator. Query pursues AND first and
-// falls back to OR only when no page holds every term: pure OR let a single
-// common term ("policy", "变量") pull unrelated hub pages into the head of the
-// ranking, while pure AND returned nothing for broad multi-word queries.
-func ftsMatch(lang string, terms []string, operator string) (string, error) {
+// ftsMatch renders terms for one tier. Query walks NEAR, then AND, then OR:
+// pure OR let a single common term ("policy", "变量") pull unrelated hub pages
+// into the head of the ranking, pure AND still admitted link-directory pages
+// that mention every term somewhere, and NEAR alone would return nothing for
+// broad queries whose terms never sit in one passage.
+func ftsMatch(lang string, terms []string, tier matchTier) (string, error) {
 	phrases := make([]string, 0, len(terms))
 	seen := make(map[string]struct{}, len(terms))
 	for _, term := range terms {
@@ -175,7 +192,18 @@ func ftsMatch(lang string, terms []string, operator string) (string, error) {
 			phrases = append(phrases, `"`+token+`"`)
 		}
 	}
-	return strings.Join(phrases, operator), nil
+	switch {
+	case len(phrases) == 0:
+		return "", nil
+	case tier == tierOr:
+		return strings.Join(phrases, " OR "), nil
+	case tier == tierNear && len(phrases) > 1:
+		return fmt.Sprintf("NEAR(%s, %d)", strings.Join(phrases, " "), nearWindow), nil
+	default:
+		// A single term makes NEAR meaningless, so it degrades to AND here
+		// and Query's AND pass then finds nothing new to add.
+		return strings.Join(phrases, " AND "), nil
+	}
 }
 
 // plainSnippet cuts a window around the first term hit in the stored body.
