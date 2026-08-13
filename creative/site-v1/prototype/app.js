@@ -30,7 +30,7 @@ const copy = {
     "hero.secondary": "Read our vision",
     "origin.kicker": "The world, first",
     "origin.title": "Before it becomes data,<br />it is the world in motion.",
-    "origin.lead": "Every discovery begins with seeing. Every leap forward begins with understanding.",
+    "origin.lead": "Every discovery begins with seeing. But the web keeps moving — and an answer you cannot re-check is not yet evidence.",
     "origin.captionLabel": "FILM 01 / OPENING FRAME",
     "origin.caption": "Nature is not a backdrop to data. It is where evidence begins.",
     "origin.sound": "Watch with sound",
@@ -39,49 +39,53 @@ const copy = {
     "memory.title": "The web is humanity’s<br />living memory.",
     "memory.lead": "Our questions, discoveries, mistakes and ideas—still changing, still connected.",
     "memory.quote":
-      "The next intelligence should inherit more than information. It should inherit the context that gives it meaning.",
+      "The next intelligence should inherit more than information. It should inherit the evidence to check what it knows.",
     "memory.fieldLabel": "BLUE FIELD / FRAGMENT · OVERLAP · RECONNECT",
     "memory.captionLabel": "HUMAN MEASURE / OBSERVE · COMPARE · JUDGE",
     "memory.caption":
       "Facts become useful through careful observation, comparison, and the responsibility to keep uncertainty visible.",
-    "technology.kicker": "Living evidence",
-    "technology.title": "From the changing web<br />to evidence AI can inspect.",
+    "technology.kicker": "Fetch · Find · Verify",
+    "technology.title": "Three layers turn the open web<br />into answers that prove themselves.",
     "technology.lead":
-      "One continuous practice: find what changed, preserve what conflicts, and keep every repair inspectable.",
-    "technology.searchTitle": "Search",
-    "technology.searchBody": "Reach the open web and turn retrieved pages into clean, usable context.",
-    "technology.assimilationTitle": "Assimilation",
+      "Purify runs the whole path itself — reach the page, rank it in an index we own, verify the claim — so every result can carry a snapshot, its sources, and a signed receipt.",
+    "technology.searchTitle": "Fetch",
+    "technology.searchBody":
+      "Reach any public page the way a real browser does — TLS fingerprint, HTTP/2, full rendering, and an archive fallback when the live web will not answer.",
+    "technology.assimilationTitle": "Find",
     "technology.assimilationBody":
-      "Preserve sources, changes, and conflicting claims as evidence evolves over time.",
-    "technology.healingTitle": "Self-healing",
-    "technology.healingBody": "Test bounded repair candidates and keep unresolved failures explicit.",
-    "technology.artCaption": "One visual object. Three states of evidence.",
-    "specimen.kicker": "LIVING EVIDENCE / ILLUSTRATIVE RECORD",
-    "specimen.title": "An evidence record keeps disagreement visible.",
+      "Query a bilingual index we build and own — grown by real demand, never resold from someone else’s rankings.",
+    "technology.healingTitle": "Verify",
+    "technology.healingBody":
+      "Cross-check independent sources, keep every conflict visible, and sign a receipt for each claim before it is promoted.",
+    "technology.artCaption": "One record. Three layers of proof.",
+    "specimen.kicker": "SEARCH RECEIPT / ILLUSTRATIVE RECORD",
+    "specimen.title": "Every answer ships with a receipt you can audit.",
     "specimen.status": "Needs review",
     "specimen.queryLabel": "QUESTION",
-    "specimen.query": "What changed in the public dataset?",
+    "specimen.query": "When was the security patch released?",
     "specimen.summaryLabel": "PURIFY NOTE",
     "specimen.summary":
-      "Two sources disagree on the release date. Both claims remain attached to their sources; neither is promoted automatically.",
+      "Two sources disagree on the release date. Each claim stays attached to its source and snapshot; neither is promoted until verification settles it.",
     "specimen.source": "Source",
     "specimen.observed": "Observed",
     "specimen.state": "State",
     "specimen.current": "Current",
     "specimen.conflict": "Conflict retained",
     "specimen.changed": "Changed",
-    "specimen.link": "Inspect the technology",
+    "specimen.link": "Read the API docs",
+    "api.kicker": "ONE CALL / GET /search",
+    "api.title": "The receipt is in the response.",
     "future.kicker": "What comes next",
-    "future.title": "Build the future on a clearer<br />understanding of the world.",
+    "future.title": "From verified answers<br />to a living fact layer.",
     "future.lead":
-      "We are building the connection between humanity’s changing knowledge and the intelligent systems that will work alongside us.",
-    "future.researchers": "For researchers discovering faster.",
-    "future.builders": "For builders solving harder problems.",
-    "future.systems": "For intelligent systems working alongside people.",
+      "Search is where it starts. The same receipts will assimilate into a memory that watches for change, heals what breaks, and keeps every repair inspectable — the fact layer intelligent systems can stand on.",
+    "future.researchers": "For researchers who cite what they find.",
+    "future.builders": "For builders whose agents act on facts.",
+    "future.systems": "For systems that must show their work.",
     "future.final": "For every intelligence working on humanity’s next chapter.",
     "future.primary": "Try Purify",
     "future.secondary": "Follow our work",
-    "footer.note": "Search for intelligence that stays connected to the world.",
+    "footer.note": "Search that can show its work.",
     "footer.product": "PRODUCT",
     "footer.perspective": "PERSPECTIVE",
     "footer.company": "COMPANY",
@@ -109,7 +113,7 @@ const copy = {
     "hero.secondary": "阅读我们的愿景",
     "origin.kicker": "世界在先",
     "origin.title": "在成为数据之前，<br />它是流动的世界。",
-    "origin.lead": "每一次发现，始于看见。每一次跨越，始于理解。",
+    "origin.lead": "每一次发现，始于看见。但网络始终在变——无法复查的答案，还称不上证据。",
     "origin.captionLabel": "影片 01 / 开场画面",
     "origin.caption": "自然不是数据的背景。它是证据开始的地方。",
     "origin.sound": "开启声音观看",
@@ -117,44 +121,46 @@ const copy = {
     "memory.kicker": "活的记忆",
     "memory.title": "网络，是人类<br />仍在生长的共同记忆。",
     "memory.lead": "我们的疑问、发现、错误与想法，仍在变化，也仍然彼此相连。",
-    "memory.quote": "下一代智能继承的，不该只有信息，还应包括赋予信息意义的上下文。",
+    "memory.quote": "下一代智能继承的，不该只有信息，还应包括让它得以求证的证据。",
     "memory.fieldLabel": "蓝色抽象场 / 片段 · 交叠 · 重组",
     "memory.captionLabel": "人的尺度 / 观察 · 对照 · 判断",
     "memory.caption": "事实之所以有用，来自细致的观察、比较，以及不掩盖不确定性的责任。",
-    "technology.kicker": "可信证据",
-    "technology.title": "从持续变化的网络，<br />到 AI 可以检查的证据。",
-    "technology.lead": "这是一项连续的工作：找到变化，保留冲突，并让每一次修复都能被检查。",
-    "technology.searchTitle": "搜索",
-    "technology.searchBody": "进入开放网络，把检索到的页面转化为干净、可用的上下文。",
-    "technology.assimilationTitle": "同化",
-    "technology.assimilationBody": "保存来源、变化和互相冲突的陈述，让证据随时间演进而不失去来路。",
-    "technology.healingTitle": "自愈",
-    "technology.healingBody": "在限定范围内测试修复候选，并把仍未解决的失败明确保留下来。",
-    "technology.artCaption": "同一个视觉对象，证据的三种状态。",
-    "specimen.kicker": "可信证据 / 示意记录",
-    "specimen.title": "一条证据记录，应该让分歧保持可见。",
+    "technology.kicker": "抓 · 找 · 核",
+    "technology.title": "三层结构，把开放网络<br />变成能自证的答案。",
+    "technology.lead": "整条链路由 Purify 自己完成：抓得到、找得着、核得住。因此每一条结果都能带上快照、来源与签名回执。",
+    "technology.searchTitle": "抓取",
+    "technology.searchBody": "像真实浏览器一样抵达公开页面——TLS 指纹、HTTP/2、完整渲染；当活网不应答时，回退到历史存档。",
+    "technology.assimilationTitle": "检索",
+    "technology.assimilationBody": "查询我们自建自有的中英双语索引——它随真实需求生长，而非转售他人的排序。",
+    "technology.healingTitle": "核验",
+    "technology.healingBody": "交叉核对相互独立的来源，让每一处冲突保持可见，并在陈述生效前为它签发回执。",
+    "technology.artCaption": "同一条记录，三层证明。",
+    "specimen.kicker": "搜索回执 / 示意记录",
+    "specimen.title": "每一条答案，都附带一张可以复核的回执。",
     "specimen.status": "等待复核",
     "specimen.queryLabel": "问题",
-    "specimen.query": "这份公开数据集发生了什么变化？",
+    "specimen.query": "这个安全补丁是什么时候发布的？",
     "specimen.summaryLabel": "PURIFY 注记",
-    "specimen.summary": "两个来源对发布日期的说法并不一致。两种陈述都与各自来源保留关联，系统不会自动把其中之一当作结论。",
+    "specimen.summary": "两个来源对发布日期说法不一。每种陈述都与其来源和快照保持关联；在核验完成之前，谁也不会被自动当作结论。",
     "specimen.source": "来源",
     "specimen.observed": "观察时间",
     "specimen.state": "状态",
     "specimen.current": "当前",
     "specimen.conflict": "保留冲突",
     "specimen.changed": "已变化",
-    "specimen.link": "查看技术实现",
+    "specimen.link": "查看 API 文档",
+    "api.kicker": "一次调用 / GET /search",
+    "api.title": "回执，就在响应里。",
     "future.kicker": "接下来",
-    "future.title": "让未来建立在<br />对世界更清晰的理解之上。",
-    "future.lead": "我们正在建立人类不断变化的知识与未来将和我们并肩工作的智能系统之间的连接。",
-    "future.researchers": "献给更快抵达发现的研究者。",
-    "future.builders": "献给解决更困难问题的建设者。",
-    "future.systems": "献给与人共同工作的智能系统。",
+    "future.title": "从可核验的答案，<br />到活的事实层。",
+    "future.lead": "搜索只是起点。同样的回执将汇入一个持续生长的记忆：察觉变化、修复断裂，并让每一次修复都可以被检查——这是智能系统可以立足的事实层。",
+    "future.researchers": "献给引用即可溯源的研究者。",
+    "future.builders": "献给让智能体依据事实行动的建设者。",
+    "future.systems": "献给必须出示证据的智能系统。",
     "future.final": "献给每一种参与书写人类下一章的智能。",
     "future.primary": "试用 Purify",
     "future.secondary": "关注我们的进展",
-    "footer.note": "让智能通过搜索，始终与真实世界保持连接。",
+    "footer.note": "让每一次搜索，都能出示自己的证据。",
     "footer.product": "产品",
     "footer.perspective": "观点",
     "footer.company": "公司",
@@ -169,7 +175,7 @@ const evidenceStages = {
   search: {
     src: "../assets/abstract/signal-field-v1.webp",
     srcset: "../assets/abstract/signal-field-v1-mobile.webp 720w, ../assets/abstract/signal-field-v1.webp 1254w",
-    label: { en: "STATE 01 / DISCOVER", zh: "状态 01 / 发现" },
+    label: { en: "LAYER 01 / FETCH", zh: "层 01 / 抓取" },
     alt: {
       en: "Mineral-blue fragments aligning into a clear path",
       zh: "矿物蓝碎片逐渐排列成一条清晰路径"
@@ -178,7 +184,7 @@ const evidenceStages = {
   assimilation: {
     src: "../assets/abstract/living-memory-v1.webp",
     srcset: "../assets/abstract/living-memory-v1-mobile.webp 720w, ../assets/abstract/living-memory-v1.webp 1254w",
-    label: { en: "STATE 02 / REMEMBER", zh: "状态 02 / 留存" },
+    label: { en: "LAYER 02 / FIND", zh: "层 02 / 检索" },
     alt: {
       en: "Layers of translucent paper preserve traces, impressions, and context",
       zh: "透明纸层保存着痕迹、印记与上下文"
@@ -187,7 +193,7 @@ const evidenceStages = {
   healing: {
     src: "../assets/abstract/resolved-fact-v2.webp",
     srcset: "../assets/abstract/resolved-fact-v2-mobile.webp 720w, ../assets/abstract/resolved-fact-v2.webp 1254w",
-    label: { en: "STATE 03 / SELF-HEAL", zh: "状态 03 / 自愈" },
+    label: { en: "LAYER 03 / VERIFY", zh: "层 03 / 核验" },
     alt: {
       en: "Pale material layers converge around one resolved Signal Blue square",
       zh: "浅色材料层在一个明确的矿物蓝方块周围汇聚"
@@ -197,22 +203,22 @@ const evidenceStages = {
 
 const evidencePhaseCopy = {
   none: { en: "", zh: "" },
-  "healing-broken": { en: "PATH INTERRUPTED", zh: "连接已中断" },
-  "healing-testing-a": { en: "CANDIDATE A / TESTING", zh: "候选 A / 验证中" },
-  "healing-rejected-a": { en: "CANDIDATE A / REJECTED", zh: "候选 A / 已拒绝" },
-  "healing-testing-b": { en: "CANDIDATE B / TESTING", zh: "候选 B / 验证中" },
-  "healing-verified": { en: "VERIFIED / CONNECTION RESTORED", zh: "验证通过 / 连接已恢复" },
+  "healing-broken": { en: "SOURCES DISAGREE", zh: "来源出现分歧" },
+  "healing-testing-a": { en: "SOURCE A / CHECKING", zh: "来源 A / 核验中" },
+  "healing-rejected-a": { en: "SOURCE A / REJECTED", zh: "来源 A / 已排除" },
+  "healing-testing-b": { en: "SOURCE B / CHECKING", zh: "来源 B / 核验中" },
+  "healing-verified": { en: "VERIFIED / RECEIPT SIGNED", zh: "核验通过 / 回执已签发" },
   "healing-settled": {
-    en: "UNRESOLVED FAILURES REMAIN EXPLICIT",
-    zh: "未解决的失败仍然明确可见"
+    en: "CONFLICTS REMAIN ON RECORD",
+    zh: "冲突保留在案，仍然可见"
   },
   "healing-unresolved": {
-    en: "UNRESOLVED / LAST VERIFIED STATE RESTORED",
-    zh: "未解决 / 已恢复最后验证状态"
+    en: "UNRESOLVED / LAST VERIFIED STATE HELD",
+    zh: "未决 / 保持最后核验状态"
   },
   "healing-summary": {
-    en: "ONLY VERIFIED REPAIRS ARE PROMOTED",
-    zh: "只有通过验证的修复才会生效"
+    en: "ONLY VERIFIED CLAIMS ARE PROMOTED",
+    zh: "只有核验通过的陈述才会生效"
   }
 };
 
@@ -1306,14 +1312,14 @@ class EvidenceDemo {
     if (announce) {
       const messages = {
         en: {
-          search: "Search state selected.",
-          assimilation: "Assimilation state selected.",
-          healing: "Self-healing state selected. Only verified repair candidates restore a connection."
+          search: "Fetch layer selected.",
+          assimilation: "Find layer selected.",
+          healing: "Verify layer selected. Only verified claims are promoted."
         },
         zh: {
-          search: "已选择搜索状态。",
-          assimilation: "已选择同化状态。",
-          healing: "已选择自愈状态。只有通过验证的修复候选才能恢复连接。"
+          search: "已选择抓取层。",
+          assimilation: "已选择检索层。",
+          healing: "已选择核验层。只有核验通过的陈述才会生效。"
         }
       };
       this.live.textContent = messages[locale][activeEvidenceStage];
@@ -1489,8 +1495,8 @@ function applyLocale(nextLocale) {
       : "Purify Search — Search is how intelligence meets the world.";
   document.querySelector('meta[name="description"]').content =
     nextLocale === "zh"
-      ? "Purify Search 把开放且持续变化的网络转化为 AI 系统可以检查的证据。"
-      : "Purify Search connects AI systems to the open, changing web through inspectable evidence.";
+      ? "Purify Search 是一个会抓、会找、会核的搜索 API——每一条答案都附带快照、来源与签名回执。"
+      : "Purify Search is a search API that fetches, finds, and verifies the open web — every answer ships with a snapshot, sources, and a signed receipt.";
 
   evidenceController?.updateLocalizedText();
   const soundButton = document.querySelector("[data-video-sound]");

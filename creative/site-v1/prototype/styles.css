@@ -1427,6 +1427,78 @@ html[lang="zh-CN"] .specimen-header h3 {
   background: var(--hairline);
 }
 
+.api-sample {
+  width: min(100%, 1120px);
+  margin: var(--major-gap) auto 0;
+  overflow: hidden;
+  border: 1px solid rgba(6, 24, 32, 0.18);
+  border-radius: 12px;
+  background: var(--surface-elevated);
+}
+
+.api-sample-header {
+  padding: 28px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.api-sample-header .mono {
+  color: var(--color-brand-text);
+}
+
+.api-sample-header h3 {
+  max-width: 620px;
+  margin-top: 12px;
+  font-family: var(--font-display-en);
+  font-size: 32px;
+  font-weight: 400;
+  font-optical-sizing: auto;
+  font-variation-settings: "opsz" 44, "wght" 400;
+  line-height: 1.14;
+  letter-spacing: -0.018em;
+}
+
+html[lang="zh-CN"] .api-sample-header h3 {
+  font-family: var(--font-display-zh);
+  line-height: 1.28;
+  letter-spacing: 0;
+}
+
+.api-sample-grid {
+  display: grid;
+  grid-template-columns: 5fr 7fr;
+}
+
+.api-pane {
+  min-width: 0;
+  margin: 0;
+  padding: 22px 28px 26px;
+}
+
+.api-pane + .api-pane {
+  border-left: 1px solid var(--hairline);
+}
+
+.api-pane figcaption {
+  color: var(--ink-faint);
+}
+
+.api-pane pre {
+  margin-top: 14px;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.8;
+  color: var(--ink-soft);
+}
+
+.api-pane code {
+  font-family: var(--font-mono);
+}
+
+.api-pane code em {
+  font-style: normal;
+  color: var(--color-brand-text);
+}
+
 /* Act IV / Future */
 .future {
   display: flex;
@@ -1774,6 +1846,15 @@ html[lang="zh-CN"] .future-for p {
   .desktop-nav,
   .nav-sign-in {
     display: none;
+  }
+
+  .api-sample-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .api-pane + .api-pane {
+    border-left: 0;
+    border-top: 1px solid var(--hairline);
   }
 
   .menu-toggle {
@@ -2155,6 +2236,22 @@ html[lang="zh-CN"] .future-for p {
 
   .trace i {
     width: 9px;
+  }
+
+  .api-sample {
+    margin-top: var(--major-gap);
+  }
+
+  .api-sample-header {
+    padding: 22px 18px;
+  }
+
+  .api-sample-header h3 {
+    font-size: 25px;
+  }
+
+  .api-pane {
+    padding: 20px 18px 24px;
   }
 
   .future {
@@ -2547,6 +2644,11 @@ html[data-theme="dark"] .evidence-art img {
 }
 
 html[data-theme="dark"] .evidence-specimen {
+  border-color: rgba(160, 181, 211, 0.2);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.26);
+}
+
+html[data-theme="dark"] .api-sample {
   border-color: rgba(160, 181, 211, 0.2);
   box-shadow: 0 28px 80px rgba(0, 0, 0, 0.26);
 }
