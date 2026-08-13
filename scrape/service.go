@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"slices"
 	"strings"
@@ -147,6 +148,11 @@ func (s *Service) Run(ctx context.Context, request *models.ScrapeRequest, observ
 		fetchDuration := nonNegativeDuration(fetchStarted, s.now())
 		navigationTime += fetchDuration
 		if fetchErr != nil {
+			// The HTTP response deliberately carries only the error category, so
+			// this is the one place the underlying fetch error stays diagnosable.
+			slog.Warn("fetch attempt failed",
+				"engine", fetcher.Name(), "url", req.URL,
+				"duration_ms", fetchDuration.Milliseconds(), "error", fetchErr)
 			attempt := models.FetchAttempt{
 				Engine:     fetcher.Name(),
 				Outcome:    models.FetchAttemptFailed,
