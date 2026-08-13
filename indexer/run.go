@@ -40,6 +40,12 @@ type RunConfig struct {
 	// default from MaxPerHost; frontier rows outlive a single run's page
 	// budget, so the default leaves room beyond MaxPerHost.
 	MaxFrontierPerHost int
+
+	// ReopenStarvedBelow reopens the closed rows of roots holding fewer
+	// frontier rows than this before the crawl starts. Indexes built before
+	// in-crawl link discovery never mined their fetched pages, so those
+	// roots cannot grow until their pages are refetched. Zero disables it.
+	ReopenStarvedBelow int
 }
 
 // Stats is a coarse run summary.
@@ -84,6 +90,11 @@ func Run(ctx context.Context, store *searchindex.Store, fetcher *Fetcher, discov
 	discovered, err := SeedFrontier(ctx, store, discoverer, seeds, cfg.AllowPrivate)
 	if err != nil {
 		return Stats{}, err
+	}
+	if cfg.ReopenStarvedBelow > 0 {
+		if _, err := store.RequeueStarvedRoots(ctx, cfg.ReopenStarvedBelow); err != nil {
+			return Stats{}, err
+		}
 	}
 	run := &runState{
 		store:     store,

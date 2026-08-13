@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -216,6 +217,64 @@ func TestRequeueReopensFinishedRows(t *testing.T) {
 	}
 	if active, err := store.ActiveFrontier(context.Background()); err != nil || active != 3 {
 		t.Fatalf("ActiveFrontier() after requeue = %d, %v, want all 3 rows open", active, err)
+	}
+}
+
+// TestRequeueStarvedRootsReopensSmallRootsOnly locks the legacy-index
+// recovery: pages fetched before in-crawl link discovery existed were never
+// mined for links, and once such a root's rows are all closed it can never
+// grow. Reopening is bounded to small roots so a sitemap-fed site with
+// thousands of already-mined rows is not refetched wholesale.
+func TestRequeueStarvedRootsReopensSmallRootsOnly(t *testing.T) {
+	store := openTestStore(t)
+	items := []FrontierItem{
+		{URL: "https://small.example/", Root: "small.example"},
+		{URL: "https://small.example/a", Root: "small.example"},
+	}
+	for index := range 5 {
+		items = append(items, FrontierItem{
+			URL:  fmt.Sprintf("https://big.example/%d", index),
+			Root: "big.example",
+		})
+	}
+	if _, err := store.Enqueue(context.Background(), items); err != nil {
+		t.Fatal(err)
+	}
+	closeAllFrontierRows(t, store)
+
+	reopened, err := store.RequeueStarvedRoots(context.Background(), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened != 2 {
+		t.Fatalf("RequeueStarvedRoots() = %d, want small.example's 2 rows", reopened)
+	}
+	active, err := store.ActiveFrontier(context.Background())
+	if err != nil || active != 2 {
+		t.Fatalf("ActiveFrontier() = %d, %v, want only the starved root open", active, err)
+	}
+}
+
+func closeAllFrontierRows(t *testing.T, store *Store) {
+	t.Helper()
+	for {
+		item, ok, err := store.Lease(context.Background(), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			active, err := store.ActiveFrontier(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if active == 0 {
+				return
+			}
+			continue
+		}
+		if err := store.Complete(context.Background(), item.URL); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

@@ -146,6 +146,41 @@ func (s *Store) Requeue(ctx context.Context, urls []string) (int, error) {
 	return reopened, nil
 }
 
+// RequeueStarvedRoots reopens the done and failed rows of every root holding
+// fewer than maxRows frontier rows. Indexes built before in-crawl link
+// discovery never mined their fetched pages, and once such a root's rows all
+// close it can never grow again; a small row count marks exactly those
+// starved roots, while sitemap-fed roots with thousands of rows stay closed
+// instead of being refetched wholesale. A maxRows of zero or less reopens
+// nothing.
+func (s *Store) RequeueStarvedRoots(ctx context.Context, maxRows int) (int, error) {
+	if err := s.guard(ctx); err != nil {
+		return 0, err
+	}
+	if maxRows <= 0 {
+		return 0, nil
+	}
+	s.gate.RLock()
+	defer s.gate.RUnlock()
+	if s.closed {
+		return 0, ErrClosed
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE frontier SET state=?, leased_at=0, attempts=0
+		WHERE state IN (?, ?)
+		  AND root IN (SELECT root FROM frontier GROUP BY root HAVING COUNT(*) < ?)`,
+		FrontierPending, FrontierDone, FrontierFailed, maxRows,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("searchindex: requeue starved roots: %w", err)
+	}
+	reopened, _ := result.RowsAffected()
+	return int(reopened), nil
+}
+
 // ActiveFrontier counts pending and leased rows. Link discovery lets an
 // in-flight page refill an empty frontier, so a crawler may only stop when
 // this count reaches zero.

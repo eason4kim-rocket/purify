@@ -19,18 +19,19 @@ func main() {
 	maxPages := flag.Int("max-pages", 500, "stop after this many indexed pages")
 	maxPerHost := flag.Int("max-per-host", 10000, "per-domain page cap")
 	maxFrontierPerHost := flag.Int("max-frontier-per-host", 0, "per-domain frontier row budget for link discovery (0 = 2x max-per-host)")
+	reopenStarved := flag.Int("reopen-starved", 0, "refetch closed rows of domains holding fewer frontier rows than this (0 = off)")
 	allowPrivate := flag.Bool("allow-private", false, "allow loopback/private seed hosts")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, *seedsPath, *outPath, *maxPages, *maxPerHost, *maxFrontierPerHost, *allowPrivate); err != nil {
+	if err := run(ctx, *seedsPath, *outPath, *maxPages, *maxPerHost, *maxFrontierPerHost, *reopenStarved, *allowPrivate); err != nil {
 		fmt.Fprintf(os.Stderr, "purify-index: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, seedsPath, outPath string, maxPages, maxPerHost, maxFrontierPerHost int, allowPrivate bool) error {
+func run(ctx context.Context, seedsPath, outPath string, maxPages, maxPerHost, maxFrontierPerHost, reopenStarved int, allowPrivate bool) error {
 	if seedsPath == "" {
 		return fmt.Errorf("-seeds is required")
 	}
@@ -57,7 +58,8 @@ func run(ctx context.Context, seedsPath, outPath string, maxPages, maxPerHost, m
 	}
 	stats, err := indexer.Run(ctx, store, fetcher, discoverer, seeds, indexer.RunConfig{
 		MaxPages: maxPages, MaxPerHost: maxPerHost,
-		MaxFrontierPerHost: maxFrontierPerHost, AllowPrivate: allowPrivate,
+		MaxFrontierPerHost: maxFrontierPerHost,
+		ReopenStarvedBelow: reopenStarved, AllowPrivate: allowPrivate,
 	})
 	if err != nil {
 		return err
