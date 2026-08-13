@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en" class="scroll-smooth">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Purify turns webpages into clean, AI-ready context through REST, MCP, or a self-hosted Go service."
+    />
+    <title>Purify — Clean web context for AI agents</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              canvas: {
+                DEFAULT: "#FFFFFF",
+                soft: "#F9FAFB"
+              },
+              premium: "#080B11",
+              accent: "#0066FF",
+              ink: "#111318",
+              muted: "#666D7D"
+            },
+            fontFamily: {
+              sans: [
+                "Inter",
+                "SF Pro Display",
+                "SF Pro Text",
+                "-apple-system",
+                "BlinkMacSystemFont",
+                "Segoe UI",
+                "sans-serif"
+              ],
+              mono: [
+                "Fira Code",
+                "SFMono-Regular",
+                "Menlo",
+                "Monaco",
+                "Consolas",
+                "monospace"
+              ]
+            }
+          }
+        }
+      };
+    </script>
+
+    <style>
+      :root {
+        --canvas: #ffffff;
+        --canvas-soft: #f9fafb;
+        --dark-premium: #080b11;
+        --accent-blue: #0066ff;
+        --text-primary: #111318;
+        --text-secondary: #666d7d;
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      body {
+        min-width: 320px;
+        background: var(--canvas);
+        color: var(--text-primary);
+      }
+
+      .skeleton-shimmer {
+        background-image: linear-gradient(
+          90deg,
+          rgba(102, 109, 125, 0.08) 20%,
+          rgba(255, 255, 255, 0.92) 50%,
+          rgba(102, 109, 125, 0.08) 80%
+        );
+        background-size: 220% 100%;
+        animation: skeleton-shimmer 2.8s ease-in-out infinite;
+      }
+
+      .feature-visual {
+        isolation: isolate;
+      }
+
+      .aura-layer {
+        position: absolute;
+        inset: -4%;
+        z-index: -1;
+        transform: translate3d(0, 0, 0) scale(1);
+        transition: transform 700ms cubic-bezier(0.22, 1, 0.36, 1);
+        will-change: transform;
+      }
+
+      .feature-visual:hover .aura-layer {
+        transform: translate3d(1.25%, -1%, 0) scale(1.02);
+      }
+
+      .aura-warm {
+        background: #fcd34d;
+      }
+
+      .aura-cool {
+        background: #6ee7b7;
+      }
+
+      .performance-bar {
+        animation: bar-breathe 3.4s ease-in-out infinite;
+      }
+
+      @keyframes skeleton-shimmer {
+        0% {
+          background-position: 200% 0;
+        }
+        100% {
+          background-position: -20% 0;
+        }
+      }
+
+      @keyframes bar-breathe {
+        0%,
+        100% {
+          box-shadow: 0 0 14px rgba(0, 102, 255, 0.2);
+        }
+        50% {
+          box-shadow: 0 0 24px rgba(0, 102, 255, 0.38);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+
+        .skeleton-shimmer,
+        .performance-bar {
+          animation: none;
+        }
+
+        .aura-layer {
+          transition: none;
+        }
+
+        .feature-visual:hover .aura-layer {
+          transform: none;
+        }
+      }
+    </style>
+  </head>
+
+  <body class="overflow-x-hidden bg-canvas font-sans text-ink antialiased selection:bg-accent/20">
+    <main>
+      <!-- 1. Hero Section (首屏) -->
+      <section class="bg-canvas px-6 py-24 sm:px-8 lg:py-32">
+        <div class="mx-auto max-w-7xl">
+          <div class="mx-auto max-w-4xl text-center">
+            <p class="mb-7 text-sm font-semibold tracking-[0.18em] text-muted uppercase">Purify / Web Context API</p>
+            <h1 class="text-4xl font-bold tracking-[-0.045em] text-ink sm:text-5xl sm:leading-[1.04]">
+              Turn any webpage into clean context for your AI agents.
+            </h1>
+            <p class="mx-auto mt-7 max-w-2xl text-base leading-7 text-muted sm:text-lg sm:leading-8">
+              Purify selects HTTP or browser rendering, removes navigation, ads, and styling, then returns Markdown,
+              metadata, reference links, and token metrics through REST or MCP.
+            </p>
+            <div class="mt-10 flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
+              <a
+                href="https://purify.verifly.pro"
+                class="inline-flex min-h-12 items-center justify-center rounded-lg bg-accent px-6 text-sm font-semibold text-white shadow-sm transition hover:bg-accent/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2"
+              >
+                Try For Free
+              </a>
+              <a
+                href="https://github.com/Easonliuliang/purify#api"
+                class="inline-flex min-h-12 items-center justify-center rounded-lg border border-ink/10 bg-canvas px-6 text-sm font-semibold text-ink shadow-sm transition hover:bg-canvas-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2"
+              >
+                View Documentation
+              </a>
+            </div>
+          </div>
+
+          <div
+            class="mx-auto mt-16 max-w-6xl overflow-hidden rounded-2xl border border-ink/[0.06] bg-canvas shadow-[0_28px_90px_rgba(8,11,17,0.09)]"
+            aria-label="Purify search console loading preview"
+          >
+            <div class="flex h-12 items-center gap-2 border-b border-ink/[0.06] px-5">
+              <span class="h-2.5 w-2.5 rounded-full bg-red-400" aria-hidden="true"></span>
+              <span class="h-2.5 w-2.5 rounded-full bg-yellow-400" aria-hidden="true"></span>
+              <span class="h-2.5 w-2.5 rounded-full bg-green-400" aria-hidden="true"></span>
+              <div class="ml-4 h-6 flex-1 rounded-md bg-canvas-soft"></div>
+            </div>
+
+            <div class="grid min-h-[390px] grid-cols-1 md:grid-cols-[220px_1fr]">
+              <div class="hidden border-r border-ink/[0.06] bg-canvas-soft p-6 md:block">
+                <div class="h-8 w-28 rounded-md bg-ink/[0.06]"></div>
+                <div class="mt-8 space-y-4">
+                  <div class="h-3 w-24 rounded-full bg-ink/[0.05]"></div>
+                  <div class="h-3 w-32 rounded-full bg-ink/[0.05]"></div>
+                  <div class="h-3 w-20 rounded-full bg-ink/[0.05]"></div>
+                  <div class="h-3 w-28 rounded-full bg-ink/[0.05]"></div>
+                </div>
+              </div>
+
+              <div class="p-6 sm:p-10">
+                <div class="flex items-center justify-between gap-6">
+                  <div>
+                    <div class="h-4 w-36 rounded-full bg-ink/[0.08]"></div>
+                    <div class="mt-3 h-3 w-52 max-w-full rounded-full bg-ink/[0.05]"></div>
+                  </div>
+                  <div class="h-9 w-24 rounded-md bg-accent"></div>
+                </div>
+
+                <div class="mt-10 rounded-xl border border-ink/[0.06] bg-canvas-soft p-5 sm:p-7">
+                  <div class="mb-6 flex items-center gap-3">
+                    <div class="h-7 w-7 rounded-md bg-accent/10"></div>
+                    <div class="h-3 w-40 rounded-full bg-ink/[0.08]"></div>
+                  </div>
+                  <div class="space-y-5" aria-hidden="true">
+                    <div class="skeleton-shimmer h-3 w-full rounded-full"></div>
+                    <div class="skeleton-shimmer h-3 w-10/12 rounded-full"></div>
+                    <div class="skeleton-shimmer h-3 w-8/12 rounded-full"></div>
+                    <div class="skeleton-shimmer h-3 w-11/12 rounded-full"></div>
+                    <div class="skeleton-shimmer h-3 w-7/12 rounded-full"></div>
+                  </div>
+                </div>
+
+                <div class="mt-7 grid grid-cols-2 gap-4 sm:grid-cols-4">
+                  <div class="h-16 rounded-lg bg-canvas-soft"></div>
+                  <div class="h-16 rounded-lg bg-canvas-soft"></div>
+                  <div class="h-16 rounded-lg bg-canvas-soft"></div>
+                  <div class="h-16 rounded-lg bg-canvas-soft"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. Logo Wall (信任背书) -->
+      <section class="bg-canvas-soft px-6 py-24 sm:px-8">
+        <div class="mx-auto max-w-6xl text-center">
+          <p class="text-sm font-medium text-muted">Designed to make your Agent smarter</p>
+          <div class="mt-10 grid grid-cols-2 items-center gap-x-8 gap-y-7 sm:grid-cols-5">
+            <span class="text-sm font-semibold tracking-[0.16em] text-muted/45">COMPANY 01</span>
+            <span class="text-sm font-semibold tracking-[0.16em] text-muted/45">COMPANY 02</span>
+            <span class="text-sm font-semibold tracking-[0.16em] text-muted/45">COMPANY 03</span>
+            <span class="text-sm font-semibold tracking-[0.16em] text-muted/45">COMPANY 04</span>
+            <span class="col-span-2 text-sm font-semibold tracking-[0.16em] text-muted/45 sm:col-span-1">COMPANY 05</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. Feature Cards (功能卡片区) -->
+      <section class="bg-canvas px-6 py-24 sm:px-8 lg:py-32">
+        <div class="mx-auto max-w-7xl">
+          <div class="mx-auto mb-16 max-w-2xl text-center">
+            <p class="text-sm font-semibold tracking-[0.16em] text-accent uppercase">A cleaner path to the web</p>
+            <h2 class="mt-5 text-3xl font-bold tracking-[-0.035em] text-ink sm:text-4xl">
+              Product proof, without the infrastructure overhead.
+            </h2>
+          </div>
+
+          <div class="space-y-8 lg:space-y-10">
+            <article
+              class="grid overflow-hidden rounded-2xl bg-canvas-soft shadow-sm ring-1 ring-ink/[0.04] lg:grid-cols-2"
+            >
+              <div class="feature-visual relative min-h-[390px] overflow-hidden lg:min-h-[520px]">
+                <div class="aura-layer aura-warm" aria-hidden="true">
+                  <div class="absolute -right-20 -top-24 h-80 w-80 rounded-full bg-[#34D399]/60 blur-3xl"></div>
+                  <div class="absolute -bottom-28 left-12 h-72 w-72 rounded-full bg-canvas/45 blur-3xl"></div>
+                </div>
+
+                <svg
+                  class="absolute inset-0 z-10 h-full w-full text-ink"
+                  viewBox="0 0 640 520"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <path d="M66 352C170 182 276 428 392 226C454 118 510 142 576 82" stroke="#0066FF" stroke-opacity="0.28" stroke-width="2" />
+                  <path d="M74 392C184 240 278 458 406 286C474 194 520 202 584 150" stroke="#0066FF" stroke-opacity="0.2" stroke-width="2" />
+                  <path d="M86 432C202 314 300 470 424 350C490 286 536 286 590 226" stroke="#0066FF" stroke-opacity="0.15" stroke-width="2" />
+
+                  <g stroke="currentColor" stroke-opacity="0.4" stroke-width="1">
+                    <path d="M186 154L286 98L390 150L458 250L368 346L244 330L152 252L186 154Z" />
+                    <path d="M286 98L244 330M390 150L152 252M458 250L186 154M368 346L390 150" />
+                    <path d="M186 154L368 346M286 98L458 250M152 252L390 150" />
+                  </g>
+
+                  <g fill="currentColor">
+                    <circle cx="186" cy="154" r="4" />
+                    <circle cx="286" cy="98" r="4" />
+                    <circle cx="390" cy="150" r="4" />
+                    <circle cx="458" cy="250" r="4" />
+                    <circle cx="368" cy="346" r="4" />
+                    <circle cx="244" cy="330" r="4" />
+                    <circle cx="152" cy="252" r="4" />
+                    <circle cx="302" cy="224" r="5" fill="#0066FF" />
+                  </g>
+                </svg>
+
+                <span class="absolute bottom-8 right-9 z-20 -rotate-3 font-serif text-3xl font-bold italic text-ink">
+                  n¹⁺ᵟ
+                </span>
+              </div>
+
+              <div class="flex flex-col justify-center p-8 sm:p-12 lg:p-16">
+                <p class="text-sm font-semibold text-accent">01 / FETCH &amp; CLEAN</p>
+                <h3 class="mt-5 text-3xl font-bold tracking-[-0.035em] text-ink">Keep the page. Remove the noise.</h3>
+                <p class="mt-5 max-w-lg text-base leading-7 text-muted">
+                  Purify starts with fast HTTP retrieval and escalates to browser rendering when a page needs JavaScript.
+                  Navigation, ads, scripts, and unrelated structure are removed before the result reaches your model.
+                </p>
+                <ul class="mt-8 space-y-3 text-sm text-muted">
+                  <li class="flex gap-3"><span class="text-accent">01</span><span>HTTP, browser, and stealth-capable retrieval paths</span></li>
+                  <li class="flex gap-3"><span class="text-accent">02</span><span>Readability, pruning, and automatic cleaning modes</span></li>
+                  <li class="flex gap-3"><span class="text-accent">03</span><span>Token and timing metrics returned with every result</span></li>
+                </ul>
+              </div>
+            </article>
+
+            <article
+              class="grid overflow-hidden rounded-2xl bg-canvas-soft shadow-sm ring-1 ring-ink/[0.04] lg:grid-cols-2"
+            >
+              <div class="flex flex-col justify-center p-8 sm:p-12 lg:p-16 lg:order-1">
+                <p class="text-sm font-semibold text-accent">02 / DEVELOPER-NATIVE</p>
+                <h3 class="mt-5 text-3xl font-bold tracking-[-0.035em] text-ink">Structured output your agent can use immediately.</h3>
+                <p class="mt-5 max-w-lg text-base leading-7 text-muted">
+                  Request Markdown, text, HTML, reference-style links, or structured extraction. Use the REST API directly or
+                  connect through the five tools included in the MCP server.
+                </p>
+                <div class="mt-8 flex flex-wrap gap-x-6 gap-y-3 font-mono text-xs text-muted">
+                  <span>MARKDOWN</span><span>METADATA</span><span>CITATIONS</span><span>REST</span><span>MCP</span>
+                </div>
+              </div>
+
+              <div class="feature-visual relative min-h-[390px] overflow-hidden lg:order-2 lg:min-h-[520px]">
+                <div class="aura-layer aura-cool" aria-hidden="true">
+                  <div class="absolute -bottom-28 -left-24 h-96 w-96 rounded-full bg-[#3B82F6]/70 blur-3xl"></div>
+                  <div class="absolute -right-20 top-10 h-80 w-80 rounded-full bg-[#A78BFA]/45 blur-3xl"></div>
+                  <div class="absolute left-1/3 top-0 h-64 w-64 rounded-full bg-canvas/35 blur-3xl"></div>
+                </div>
+
+                <div class="absolute inset-6 z-10 flex items-center justify-center sm:inset-10">
+                  <div class="w-full max-w-xl overflow-hidden rounded-xl bg-[#0D1117] shadow-[0_24px_60px_rgba(8,11,17,0.28)]">
+                    <div class="flex h-11 items-center gap-2 border-b border-white/10 px-4" aria-hidden="true">
+                      <span class="h-2 w-2 rounded-full bg-red-400"></span>
+                      <span class="h-2 w-2 rounded-full bg-yellow-400"></span>
+                      <span class="h-2 w-2 rounded-full bg-green-400"></span>
+                      <span class="ml-3 font-mono text-[10px] text-white/35">response.json</span>
+                    </div>
+                    <pre class="overflow-x-auto p-5 font-mono text-[11px] leading-6 text-white/75 sm:p-7 sm:text-xs"><code>{
+  <span class="text-[#34D399]">"success"</span>: <span class="text-accent">true</span>,
+  <span class="text-[#34D399]">"engine_used"</span>: <span class="text-[#FCD34D]">"http"</span>,
+  <span class="text-[#34D399]">"content"</span>: <span class="text-[#FCD34D]">"# Clean Markdown…"</span>,
+  <span class="text-[#34D399]">"original_tokens"</span>: <span class="text-accent">11708</span>,
+  <span class="text-[#34D399]">"cleaned_tokens"</span>: <span class="text-accent">5572</span>,
+  <span class="text-[#34D399]">"total_ms"</span>: <span class="text-accent">400</span>
+}</code></pre>
+                  </div>
+                </div>
+
+                <span class="absolute bottom-6 right-8 z-20 -rotate-3 font-serif text-3xl font-bold italic text-ink">
+                  ∑ context
+                </span>
+              </div>
+            </article>
+
+            <article
+              class="grid overflow-hidden rounded-2xl bg-canvas-soft shadow-sm ring-1 ring-ink/[0.04] lg:grid-cols-2"
+            >
+              <div class="feature-visual relative min-h-[390px] overflow-hidden bg-canvas lg:min-h-[500px]">
+                <div
+                  class="absolute inset-0 opacity-60"
+                  style="background-image: linear-gradient(rgba(17,19,24,.045) 1px, transparent 1px), linear-gradient(90deg, rgba(17,19,24,.045) 1px, transparent 1px); background-size: 40px 40px"
+                  aria-hidden="true"
+                ></div>
+
+                <div class="absolute inset-8 flex items-center justify-center sm:inset-12">
+                  <div class="relative grid w-full max-w-lg grid-cols-[1fr_auto_1fr] items-center gap-4">
+                    <div class="space-y-4">
+                      <div class="rounded-xl bg-canvas-soft p-4 shadow-sm ring-1 ring-ink/[0.06]">
+                        <p class="font-mono text-[10px] text-muted">REST API</p>
+                        <p class="mt-2 text-sm font-semibold text-ink">POST /scrape</p>
+                      </div>
+                      <div class="rounded-xl bg-canvas-soft p-4 shadow-sm ring-1 ring-ink/[0.06]">
+                        <p class="font-mono text-[10px] text-muted">MCP SERVER</p>
+                        <p class="mt-2 text-sm font-semibold text-ink">5 built-in tools</p>
+                      </div>
+                    </div>
+
+                    <div class="flex items-center" aria-hidden="true">
+                      <span class="h-px w-6 bg-ink/15"></span>
+                      <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-accent font-mono text-xs font-semibold text-white shadow-sm">P</span>
+                      <span class="h-px w-6 bg-ink/15"></span>
+                    </div>
+
+                    <div class="rounded-xl bg-premium p-5 text-white shadow-sm">
+                      <p class="font-mono text-[10px] text-white/45">SELF-HOST</p>
+                      <p class="mt-3 text-lg font-semibold">Single Go service</p>
+                      <p class="mt-2 text-xs leading-5 text-white/55">No Redis or Postgres required.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="flex flex-col justify-center p-8 sm:p-12 lg:p-16">
+                <p class="text-sm font-semibold text-accent">03 / DEPLOY YOUR WAY</p>
+                <h3 class="mt-5 text-3xl font-bold tracking-[-0.035em] text-ink">Self-host without building an infrastructure project.</h3>
+                <p class="mt-5 max-w-lg text-base leading-7 text-muted">
+                  Run Purify as a single Go service, keep the data path inside your environment, or use the hosted API when
+                  you want to start without operating the service yourself.
+                </p>
+                <a
+                  href="https://github.com/Easonliuliang/purify#self-hosting"
+                  class="mt-8 inline-flex w-fit items-center gap-2 text-sm font-semibold text-ink underline decoration-ink/20 underline-offset-8 transition hover:decoration-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-4"
+                >
+                  Explore self-hosting <span aria-hidden="true">↗</span>
+                </a>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- 4. Data Comparison (数据对比图表) -->
+      <section class="bg-canvas-soft px-6 py-24 sm:px-8 lg:py-32">
+        <div class="mx-auto grid max-w-7xl overflow-hidden rounded-2xl bg-premium lg:grid-cols-2">
+          <div class="flex flex-col justify-center p-8 text-white sm:p-12 lg:p-16">
+            <p class="text-sm font-semibold tracking-[0.16em] text-white/45 uppercase">Context efficiency</p>
+            <h2 class="mt-5 text-3xl font-bold tracking-[-0.035em] sm:text-4xl">More signal in every request.</h2>
+            <p class="mt-6 max-w-lg text-base leading-7 text-white/60">
+              On the current Hacker News example, Purify reduces an estimated 11,708 raw tokens to 5,572 clean tokens in
+              roughly 400 milliseconds.
+            </p>
+            <p class="mt-8 font-mono text-[10px] leading-5 text-white/35">
+              Illustrative relative comparison. Replace competitor placeholders with a reproducible dataset before publishing.
+            </p>
+          </div>
+
+          <div class="border-t border-white/10 p-8 sm:p-12 lg:border-l lg:border-t-0 lg:p-16">
+            <div
+              class="grid h-80 grid-cols-3 items-end gap-5 border-b border-white/15 px-2 sm:gap-8 sm:px-6"
+              role="img"
+              aria-label="Illustrative bar chart: Alternative A 30 percent, Purify 90 percent, Alternative B 30 percent"
+            >
+              <div class="flex h-full flex-col justify-end">
+                <div class="mx-auto h-[30%] w-full max-w-20 bg-gray-700"></div>
+                <p class="mt-4 text-center font-mono text-[10px] text-white/45">ALT. A</p>
+              </div>
+              <div class="flex h-full flex-col justify-end">
+                <div class="performance-bar mx-auto h-[90%] w-full max-w-20 bg-accent"></div>
+                <p class="mt-4 text-center font-mono text-[10px] font-semibold text-white">PURIFY</p>
+              </div>
+              <div class="flex h-full flex-col justify-end">
+                <div class="mx-auto h-[30%] w-full max-w-20 bg-gray-700"></div>
+                <p class="mt-4 text-center font-mono text-[10px] text-white/45">ALT. B</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 5. Testimonial (客户证言) -->
+      <section class="bg-canvas px-6 py-24 sm:px-8 lg:py-32">
+        <div class="mx-auto grid max-w-6xl items-center gap-12 lg:grid-cols-[1fr_2fr] lg:gap-20">
+          <div class="flex items-center gap-5 lg:block">
+            <div class="flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-ink/[0.06] text-sm font-semibold text-muted">
+              CN
+            </div>
+            <div class="lg:mt-5">
+              <p class="text-sm font-semibold text-ink">Customer Name</p>
+              <p class="mt-1 text-sm text-muted">Role · Company</p>
+            </div>
+          </div>
+
+          <!-- Replace this placeholder with a verified, approved customer quotation before publishing. -->
+          <blockquote class="text-2xl font-medium italic leading-snug tracking-[-0.025em] text-ink sm:text-3xl lg:text-4xl">
+            “Replace this block with an approved customer quote before publishing the landing page.”
+          </blockquote>
+        </div>
+      </section>
+
+      <!-- 6. Trust & Security (企业安全) -->
+      <section class="bg-canvas-soft px-6 py-24 sm:px-8 lg:py-32">
+        <div class="mx-auto max-w-7xl">
+          <div class="mb-14 max-w-2xl">
+            <p class="text-sm font-semibold tracking-[0.16em] text-accent uppercase">Control by design</p>
+            <h2 class="mt-5 text-3xl font-bold tracking-[-0.035em] text-ink sm:text-4xl">A simpler operational surface.</h2>
+          </div>
+
+          <div class="grid gap-10 border-t border-ink/[0.06] pt-10 md:grid-cols-3 md:gap-8">
+            <article>
+              <h3 class="text-base font-semibold text-ink">Self-hosted Control</h3>
+              <p class="mt-3 max-w-sm text-sm leading-6 text-muted">
+                Run the service inside your own environment and keep the web-content data path under your control.
+              </p>
+            </article>
+            <article>
+              <h3 class="text-base font-semibold text-ink">Apache 2.0</h3>
+              <p class="mt-3 max-w-sm text-sm leading-6 text-muted">
+                Use, modify, and deploy Purify commercially without an AGPL licensing requirement.
+              </p>
+            </article>
+            <article>
+              <h3 class="text-base font-semibold text-ink">No Redis or Postgres</h3>
+              <p class="mt-3 max-w-sm text-sm leading-6 text-muted">
+                The core service does not require separate Redis or PostgreSQL infrastructure to get started.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- 7. Scale Metrics (技术规模) -->
+      <section class="bg-canvas px-6 py-24 sm:px-8 lg:py-32">
+        <div class="mx-auto grid max-w-7xl gap-14 md:grid-cols-2 md:gap-8">
+          <article class="border-t border-ink/[0.08] pt-8">
+            <p class="text-5xl font-bold tracking-[-0.06em] text-ink sm:text-6xl lg:text-7xl">52–99%</p>
+            <p class="mt-5 max-w-md text-sm leading-6 text-muted">
+              Token reduction observed across the current published benchmark set. Results vary by page structure and content density.
+            </p>
+          </article>
+          <article class="border-t border-ink/[0.08] pt-8">
+            <p class="text-5xl font-bold tracking-[-0.06em] text-ink sm:text-6xl lg:text-7xl">5 TOOLS</p>
+            <p class="mt-5 max-w-md text-sm leading-6 text-muted">
+              Built into the MCP server for scraping, batch jobs, site crawling, URL discovery, and structured extraction.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <!-- 8. Final CTA (尾部行动呼吁) -->
+      <section class="bg-premium px-6 py-24 text-center sm:px-8 lg:py-32">
+        <div class="mx-auto max-w-4xl">
+          <p class="text-sm font-semibold tracking-[0.16em] text-white/45 uppercase">Start with one URL</p>
+          <h2 class="mt-6 text-4xl font-bold tracking-[-0.045em] text-white sm:text-5xl">
+            Turn the web into context your agents can use.
+          </h2>
+          <p class="mx-auto mt-6 max-w-2xl text-base leading-7 text-white/60">
+            Use the hosted API, connect through MCP, or run Purify as a single Go service in your own environment.
+          </p>
+          <a
+            href="https://purify.verifly.pro"
+            class="mt-10 inline-flex min-h-12 items-center justify-center rounded-lg bg-accent px-7 text-sm font-semibold text-white shadow-sm transition hover:bg-accent/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-premium"
+          >
+            Try For Free
+          </a>
+          <p class="mt-16 text-xs text-white/30">Purify · Open-source web context for AI agents</p>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

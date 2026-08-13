@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 800" role="img" aria-labelledby="title desc">
+  <title id="title">An abstract field of blue square forms</title>
+  <desc id="desc">Mineral-blue square modules repeat, overlap, break apart, and reconnect across an open white field.</desc>
+  <defs>
+    <pattern id="micro-light" width="28" height="28" patternUnits="userSpaceOnUse">
+      <rect width="9" height="9" fill="#c6e2e8"/>
+    </pattern>
+    <pattern id="micro-mid" width="28" height="28" patternUnits="userSpaceOnUse">
+      <rect width="11" height="11" fill="#78b9cf"/>
+    </pattern>
+    <pattern id="micro-deep" width="28" height="28" patternUnits="userSpaceOnUse">
+      <rect width="10" height="10" fill="#1f7798"/>
+    </pattern>
+    <g id="step-light">
+      <rect x="0" y="0" width="112" height="112"/>
+      <rect x="128" y="0" width="56" height="56"/>
+      <rect x="200" y="0" width="28" height="28"/>
+      <rect x="128" y="72" width="112" height="112"/>
+      <rect x="256" y="72" width="56" height="56"/>
+      <rect x="328" y="72" width="28" height="28"/>
+      <rect x="256" y="144" width="112" height="112"/>
+      <rect x="384" y="144" width="56" height="56"/>
+      <rect x="456" y="144" width="28" height="28"/>
+    </g>
+    <g id="step-mid">
+      <rect x="0" y="0" width="72" height="72"/>
+      <rect x="88" y="0" width="36" height="36"/>
+      <rect x="136" y="0" width="18" height="18"/>
+      <rect x="88" y="48" width="72" height="72"/>
+      <rect x="176" y="48" width="36" height="36"/>
+      <rect x="224" y="48" width="18" height="18"/>
+      <rect x="176" y="96" width="72" height="72"/>
+      <rect x="264" y="96" width="36" height="36"/>
+      <rect x="312" y="96" width="18" height="18"/>
+    </g>
+  </defs>
+
+  <g style="mix-blend-mode:multiply">
+    <g fill="#d9edf1" opacity=".96">
+      <use href="#step-light" x="-78" y="80"/>
+      <use href="#step-light" x="842" y="-44" transform="rotate(90 1084 198)"/>
+      <use href="#step-light" x="1016" y="438" transform="rotate(180 1258 566)"/>
+      <rect x="84" y="584" width="168" height="168"/>
+      <rect x="270" y="648" width="84" height="84"/>
+      <rect x="1298" y="286" width="196" height="196"/>
+    </g>
+
+    <g fill="url(#micro-light)" opacity=".92">
+      <rect x="0" y="26" width="548" height="196"/>
+      <rect x="224" y="222" width="504" height="168"/>
+      <rect x="700" y="54" width="516" height="224"/>
+      <rect x="924" y="278" width="516" height="168"/>
+      <rect x="448" y="586" width="560" height="168"/>
+    </g>
+
+    <g fill="#9bcbd9" opacity=".84">
+      <use href="#step-mid" x="58" y="270"/>
+      <use href="#step-mid" x="472" y="92" transform="rotate(90 637 176)"/>
+      <use href="#step-mid" x="880" y="430" transform="rotate(180 1045 514)"/>
+      <use href="#step-mid" x="1126" y="94" transform="rotate(90 1291 178)"/>
+      <rect x="366" y="514" width="144" height="144"/>
+      <rect x="526" y="550" width="72" height="72"/>
+      <rect x="614" y="576" width="36" height="36"/>
+    </g>
+
+    <g fill="url(#micro-mid)" opacity=".95">
+      <rect x="88" y="478" width="332" height="140"/>
+      <rect x="350" y="338" width="490" height="168"/>
+      <rect x="746" y="170" width="308" height="168"/>
+      <rect x="1036" y="478" width="404" height="196"/>
+    </g>
+
+    <g fill="#4c96b3" opacity=".91">
+      <rect x="-54" y="366" width="224" height="224"/>
+      <rect x="192" y="410" width="112" height="112"/>
+      <rect x="326" y="354" width="56" height="56"/>
+      <rect x="398" y="326" width="28" height="28"/>
+
+      <rect x="448" y="254" width="168" height="168"/>
+      <rect x="632" y="206" width="84" height="84"/>
+      <rect x="730" y="178" width="42" height="42"/>
+      <rect x="786" y="164" width="21" height="21"/>
+
+      <rect x="688" y="434" width="196" height="196"/>
+      <rect x="902" y="434" width="98" height="98"/>
+      <rect x="1014" y="434" width="49" height="49"/>
+      <rect x="1077" y="434" width="24" height="24"/>
+
+      <rect x="1108" y="308" width="140" height="140"/>
+      <rect x="1264" y="252" width="70" height="70"/>
+      <rect x="1350" y="224" width="35" height="35"/>
+      <rect x="1401" y="210" width="18" height="18"/>
+    </g>
+
+    <g fill="url(#micro-deep)" opacity=".96">
+      <rect x="252" y="128" width="252" height="140"/>
+      <rect x="518" y="478" width="280" height="196"/>
+      <rect x="812" y="64" width="224" height="140"/>
+      <rect x="1050" y="620" width="308" height="140"/>
+    </g>
+
+    <g fill="#176f91">
+      <rect x="164" y="254" width="96" height="96"/>
+      <rect x="276" y="282" width="48" height="48"/>
+      <rect x="338" y="310" width="24" height="24"/>
+
+      <rect x="570" y="366" width="132" height="132"/>
+      <rect x="718" y="330" width="66" height="66"/>
+      <rect x="800" y="312" width="33" height="33"/>
+
+      <rect x="916" y="236" width="108" height="108"/>
+      <rect x="1040" y="268" width="54" height="54"/>
+      <rect x="1110" y="296" width="27" height="27"/>
+
+      <rect x="856" y="568" width="84" height="84"/>
+      <rect x="956" y="596" width="42" height="42"/>
+      <rect x="1012" y="610" width="21" height="21"/>
+    </g>
+
+    <g fill="#0b536f">
+      <rect x="366" y="218" width="76" height="76"/>
+      <rect x="462" y="202" width="38" height="38"/>
+      <rect x="514" y="194" width="19" height="19"/>
+      <rect x="794" y="396" width="92" height="92"/>
+      <rect x="902" y="372" width="46" height="46"/>
+      <rect x="964" y="360" width="23" height="23"/>
+      <rect x="1194" y="484" width="72" height="72"/>
+      <rect x="1282" y="512" width="36" height="36"/>
+      <rect x="1334" y="526" width="18" height="18"/>
+    </g>
+  </g>
+
+  <g fill="#fcfcf9">
+    <rect x="0" y="222" width="212" height="58"/>
+    <rect x="228" y="278" width="244" height="52"/>
+    <rect x="490" y="326" width="180" height="46"/>
+    <rect x="684" y="368" width="238" height="44"/>
+    <rect x="938" y="408" width="188" height="48"/>
+    <rect x="1140" y="452" width="300" height="54"/>
+  </g>
+
+  <g fill="#2d87a7">
+    <rect x="36" y="206" width="34" height="34"/>
+    <rect x="116" y="244" width="17" height="17"/>
+    <rect x="278" y="260" width="26" height="26"/>
+    <rect x="546" y="316" width="20" height="20"/>
+    <rect x="744" y="358" width="30" height="30"/>
+    <rect x="1018" y="398" width="22" height="22"/>
+    <rect x="1212" y="440" width="32" height="32"/>
+    <rect x="1388" y="478" width="18" height="18"/>
+  </g>
+</svg>

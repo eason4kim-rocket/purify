@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Purify — 面向 AI Agent 的开源网页上下文 API。" />
+    <title>Purify — Web context for AI agents</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳至正文</a>
+
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="Purify 首页">
+        <span class="brand-states" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span>Purify</span>
+      </a>
+      <p class="header-status mono"><i></i> SYSTEM OPERATIONAL</p>
+      <nav aria-label="主导航">
+        <a href="#product">产品</a>
+        <a href="#method">方法</a>
+        <a href="#developers">开发者</a>
+        <a href="https://github.com/Easonliuliang/purify">GitHub ↗</a>
+      </nav>
+      <a class="header-action" href="#developers">QUICKSTART <span>↗</span></a>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top">
+        <div class="hero-copy">
+          <p class="eyebrow mono">面向 AI AGENT 的开源网页上下文 API</p>
+          <h1>把网页变成<br />AI Agent 可用的<br /><em>干净上下文。</em></h1>
+          <p class="hero-lead">
+            Purify 自动选择 HTTP 或浏览器引擎，移除页面噪声，返回 Markdown、元数据、引用链接与 Token 指标。
+          </p>
+          <div class="hero-actions">
+            <a class="text-action" href="https://github.com/Easonliuliang/purify">查看 GitHub ↗</a>
+            <a class="text-action" href="#developers">60 秒快速开始 →</a>
+          </div>
+          <div class="hero-measure">
+            <div>
+              <strong>52.4%</strong>
+              <span class="mono">FEWER TOKENS</span>
+            </div>
+            <p>Example run on news.ycombinator.com.<br />Results vary by page.</p>
+          </div>
+        </div>
+
+        <aside class="live-record" id="try" aria-label="网页转换实时示例">
+          <div class="record-top mono">
+            <span>EXAMPLE REPLAY / SCRAPE</span>
+            <span class="record-state"><i></i> COMPLETE</span>
+            <span>08:42:16 Z</span>
+          </div>
+
+          <div class="record-source">
+            <div class="source-meta mono">
+              <span>SOURCE</span>
+              <strong>news.ycombinator.com</strong>
+              <span>HTTP 200</span>
+            </div>
+            <ol class="source-code mono">
+              <li class="drop"><span>DROP</span><code>&lt;nav class="topbar"&gt;new · past · comments&lt;/nav&gt;</code></li>
+              <li class="drop"><span>DROP</span><code>&lt;script src="analytics.js"&gt;&lt;/script&gt;</code></li>
+              <li class="keep"><span>KEEP</span><code>&lt;h1&gt;Show HN: Purify&lt;/h1&gt;</code></li>
+              <li class="keep"><span>KEEP</span><code>&lt;p&gt;A web context API for agents…&lt;/p&gt;</code></li>
+              <li class="keep"><span>KEEP</span><code>&lt;a href="github.com/…"&gt;Source&lt;/a&gt;</code></li>
+              <li class="drop"><span>DROP</span><code>&lt;aside&gt;sponsored · related links&lt;/aside&gt;</code></li>
+            </ol>
+          </div>
+
+          <div class="conversion-rail mono" aria-label="转换阶段">
+            <span class="is-done"><i></i>RAW</span>
+            <span class="is-done"><i></i>PARSED</span>
+            <span class="is-done"><i></i>CLEANED</span>
+            <span class="is-current"><i></i>DELIVERED</span>
+          </div>
+
+          <article class="record-output">
+            <div class="output-meta mono"><span>OUTPUT / MARKDOWN_CITATIONS</span><button type="button">COPY ↗</button></div>
+            <h2><b>#</b> Show HN: Purify</h2>
+            <p>A web context API for agents. Fetch a page, remove the noise, and return clean Markdown your model can use.<sup>[1]</sup></p>
+            <p class="source-link mono">[1] https://github.com/Easonliuliang/purify</p>
+          </article>
+
+          <dl class="record-metrics mono">
+            <div><dt>ENGINE</dt><dd>http</dd></div>
+            <div><dt>TIME</dt><dd>400 ms</dd></div>
+            <div><dt>RAW</dt><dd>11,708</dd></div>
+            <div><dt>CLEAN</dt><dd>5,572</dd></div>
+          </dl>
+
+          <form class="url-line">
+            <label class="mono" for="url">URL</label>
+            <input id="url" type="url" value="https://news.ycombinator.com" aria-label="输入网页 URL" />
+            <button class="mono" type="button">SCRAPE <span>↗</span></button>
+          </form>
+        </aside>
+
+        <div class="proof-ledger mono" aria-label="产品事实">
+          <div><span>01</span><strong>APACHE 2.0</strong><small>OPEN SOURCE</small></div>
+          <div><span>02</span><strong>REST + 5 MCP TOOLS</strong><small>AGENT READY</small></div>
+          <div><span>03</span><strong>GO · SELF-HOST</strong><small>SINGLE SERVICE</small></div>
+          <div><span>04</span><strong>NO REDIS OR POSTGRES</strong><small>LESS TO OPERATE</small></div>
+        </div>
+      </section>
+
+      <section class="method" id="method">
+        <header class="section-heading">
+          <p class="section-number mono">02 / THE CONVERSION</p>
+          <h2>看见什么被移除，<br />也看见什么被保留。</h2>
+          <p>真正的产品演示不是一张结果截图，而是一条可检查的转换记录。</p>
+        </header>
+
+        <div class="sample-switcher mono" aria-label="示例网页">
+          <button class="is-active" type="button">ARTICLE / 001</button>
+          <button type="button">DOCS / 002</button>
+          <button type="button">PRODUCT / 003</button>
+          <span>STATIC PRODUCT STUDY</span>
+        </div>
+
+        <div class="workbench" aria-label="网页清洗工作台">
+          <div class="workbench-title mono">
+            <span>RAW SOURCE</span><span>DECISION</span><span>CLEAN RECORD</span>
+          </div>
+
+          <div class="raw-column mono">
+            <div class="raw-row muted"><span>001</span><code>&lt;header class="global-nav"&gt;</code></div>
+            <div class="raw-row muted"><span>002</span><code>&lt;button&gt;Accept cookies&lt;/button&gt;</code></div>
+            <div class="raw-row selected"><span>003</span><code>&lt;h1&gt;How agents use the web&lt;/h1&gt;</code></div>
+            <div class="raw-row selected"><span>004</span><code>&lt;p&gt;Reliable context starts…&lt;/p&gt;</code></div>
+            <div class="raw-row selected"><span>005</span><code>&lt;a href="/research"&gt;Research&lt;/a&gt;</code></div>
+            <div class="raw-row warning"><span>006</span><code>&lt;time&gt;Updated Aug 9, 2026&lt;/time&gt;</code></div>
+            <div class="raw-row muted"><span>007</span><code>&lt;aside class="recommended"&gt;</code></div>
+            <div class="raw-row muted"><span>008</span><code>&lt;footer&gt;Legal · Careers · Social&lt;/footer&gt;</code></div>
+          </div>
+
+          <div class="decision-column mono">
+            <div class="decision drop"><i></i><span>DROP</span></div>
+            <div class="decision drop"><i></i><span>DROP</span></div>
+            <div class="decision keep"><i></i><span>KEEP</span></div>
+            <div class="decision keep"><i></i><span>KEEP</span></div>
+            <div class="decision keep"><i></i><span>KEEP</span></div>
+            <div class="decision format"><i></i><span>FORMAT</span></div>
+            <div class="decision drop"><i></i><span>DROP</span></div>
+            <div class="decision drop"><i></i><span>DROP</span></div>
+          </div>
+
+          <article class="clean-column">
+            <div class="clean-line clean-heading"><span class="mono">#</span><strong>How agents use the web</strong></div>
+            <div class="clean-line clean-copy">Reliable context starts with keeping the page’s meaning while removing the interface around it.</div>
+            <div class="clean-line clean-link mono">[Research](https://example.com/research)</div>
+            <div class="clean-line clean-date mono"><span>UPDATED</span><time>2026-08-09T08:42:16Z</time></div>
+            <div class="clean-line clean-source mono"><span>SOURCE</span><span>example.com/article</span></div>
+          </article>
+
+          <div class="workbench-ledger mono">
+            <span><b>−52.4%</b> TOKENS</span>
+            <span><b>400 ms</b> TOTAL</span>
+            <span><b>HTTP</b> ENGINE</span>
+            <a href="#">VIEW METHOD ↗</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="developer" id="developers">
+        <div class="developer-copy">
+          <p class="section-number mono">03 / START BUILDING</p>
+          <h2>两条命令。<br />干净 Markdown。</h2>
+          <div class="developer-links">
+            <a href="https://github.com/Easonliuliang/purify">READ THE DOCS ↗</a>
+            <a href="#top">TRY A URL ↑</a>
+          </div>
+        </div>
+        <pre><code><span># Start Purify</span>
+docker compose up -d
+
+<span># Scrape a page</span>
+curl -s -X POST http://localhost:8080/api/v1/scrape \
+  -H <em>"Content-Type: application/json"</em> \
+  -d <em>'{"url":"https://example.com"}'</em></code></pre>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en" class="auth-document">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="description" content="Sign in to Purify Search." />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#fcfcf9" />
+    <script>
+      (() => {
+        let savedTheme = null;
+        try {
+          savedTheme = window.localStorage.getItem("purify-theme");
+        } catch (_) {
+          savedTheme = null;
+        }
+        const systemTheme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        const initialTheme = savedTheme === "dark" || savedTheme === "light" ? savedTheme : systemTheme;
+        document.documentElement.dataset.theme = initialTheme;
+        document.documentElement.style.colorScheme = initialTheme;
+        document.querySelector('meta[name="theme-color"]').content = initialTheme === "dark" ? "#0a111b" : "#fcfcf9";
+      })();
+    </script>
+    <title>Sign in — Purify Search</title>
+    <link rel="preload" href="../assets/fonts/Newsreader-Variable.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="../assets/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./auth.css" />
+    <script src="./auth.js" defer></script>
+  </head>
+  <body class="auth-page">
+    <main class="auth-shell">
+      <section class="auth-visual" aria-labelledby="auth-story-title">
+        <a class="auth-wordmark wordmark" href="./index.html" aria-label="Purify home">
+          <span class="wordmark-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+          <span>Purify</span>
+        </a>
+
+        <div class="auth-story">
+          <p class="auth-kicker" data-auth-copy="story.kicker">Living evidence</p>
+          <h1 id="auth-story-title" data-auth-copy="story.title">Return to what the web<br />actually said.</h1>
+          <p data-auth-copy="story.body">Search, compare, and keep every update connected to its source.</p>
+        </div>
+
+        <div class="auth-signal" aria-hidden="true">
+          <span></span><span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <p class="auth-visual-note" data-auth-copy="story.note">Evidence stays inspectable as the world changes.</p>
+      </section>
+
+      <section class="auth-panel" aria-labelledby="auth-title">
+        <header class="auth-panel-header">
+          <a class="auth-back" href="./index.html">
+            <span aria-hidden="true">←</span><span data-auth-copy="action.back">Back to site</span>
+          </a>
+          <div class="auth-controls">
+            <button class="auth-icon-button" type="button" data-theme-toggle aria-label="Switch to dark mode">
+              <span data-theme-glyph aria-hidden="true">◐</span>
+            </button>
+            <button class="auth-language" type="button" data-language-toggle aria-label="切换到中文">EN</button>
+          </div>
+        </header>
+
+        <div class="auth-form-frame">
+          <div class="auth-heading">
+            <p class="auth-kicker" data-auth-copy="form.kicker">Your workspace</p>
+            <h2 id="auth-title" data-auth-title>Welcome back.</h2>
+            <p data-auth-subtitle>Sign in to continue to Purify Search.</p>
+          </div>
+
+          <div class="auth-providers">
+            <button class="auth-provider auth-provider-google" type="button" data-auth-provider="google">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path fill="#4285F4" d="M21.6 12.23c0-.71-.06-1.4-.18-2.07H12v3.91h5.38a4.6 4.6 0 0 1-2 3.02v2.54h3.24c1.9-1.75 2.98-4.33 2.98-7.4Z" />
+                <path fill="#34A853" d="M12 22c2.7 0 4.97-.9 6.62-2.43l-3.24-2.54c-.9.6-2.05.96-3.38.96-2.61 0-4.82-1.76-5.61-4.13H3.04v2.62A10 10 0 0 0 12 22Z" />
+                <path fill="#FBBC05" d="M6.39 13.86A6.02 6.02 0 0 1 6.08 12c0-.65.11-1.28.31-1.86V7.52H3.04A10 10 0 0 0 2 12c0 1.61.38 3.14 1.04 4.48l3.35-2.62Z" />
+                <path fill="#EA4335" d="M12 6.01c1.47 0 2.79.51 3.83 1.5l2.87-2.88A9.63 9.63 0 0 0 12 2a10 10 0 0 0-8.96 5.52l3.35 2.62C7.18 7.77 9.39 6.01 12 6.01Z" />
+              </svg>
+              <span data-auth-copy="action.google">Continue with Google</span>
+            </button>
+
+            <button class="auth-provider" type="button" data-auth-provider="github">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 .7a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2.23c-3.22.7-3.9-1.37-3.9-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.71.08-.71 1.17.08 1.78 1.2 1.78 1.2 1.04 1.78 2.72 1.27 3.39.97.1-.75.4-1.27.74-1.56-2.57-.29-5.27-1.29-5.27-5.69 0-1.26.45-2.29 1.19-3.09-.12-.29-.52-1.47.11-3.05 0 0 .97-.31 3.16 1.18a10.95 10.95 0 0 1 5.75 0c2.19-1.49 3.15-1.18 3.15-1.18.63 1.58.23 2.76.12 3.05.74.8 1.18 1.83 1.18 3.09 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.06.79 2.14v3.18c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z" />
+              </svg>
+              <span data-auth-copy="action.github">Continue with GitHub</span>
+            </button>
+          </div>
+
+          <div class="auth-divider"><span data-auth-copy="form.divider">or continue with email</span></div>
+
+          <form class="auth-form" data-auth-form novalidate>
+            <label class="auth-field">
+              <span data-auth-copy="field.email">Email address</span>
+              <input type="email" name="email" autocomplete="email" placeholder="you@company.com" required />
+            </label>
+
+            <label class="auth-field">
+              <span data-auth-copy="field.password">Password</span>
+              <span class="auth-password-wrap">
+                <input type="password" name="password" autocomplete="current-password" minlength="8" placeholder="••••••••" required />
+                <button type="button" data-password-toggle data-auth-copy="action.show">Show</button>
+              </span>
+            </label>
+
+            <div class="auth-form-meta" data-signin-only>
+              <label class="auth-checkbox">
+                <input type="checkbox" name="remember" />
+                <span data-auth-copy="field.remember">Keep me signed in</span>
+              </label>
+              <button type="button" class="auth-inline-action" data-auth-unavailable data-auth-copy="action.forgot">Forgot password?</button>
+            </div>
+
+            <p class="auth-terms" data-signup-only hidden data-auth-copy="form.terms">
+              By creating an account, you agree to the Terms and Privacy Policy.
+            </p>
+
+            <button class="auth-submit" type="submit" data-auth-submit>Sign in</button>
+            <p class="auth-status" data-auth-status aria-live="polite"></p>
+          </form>
+
+          <p class="auth-switch">
+            <span data-auth-switch-copy>New to Purify?</span>
+            <a href="./login.html?mode=signup" data-mode-link>Start free</a>
+          </p>
+        </div>
+
+        <footer class="auth-panel-footer">
+          <span>© 2026 Purify</span>
+          <span data-auth-copy="footer.note">Evidence-first search infrastructure.</span>
+        </footer>
+      </section>
+    </main>
+  </body>
+</html>
