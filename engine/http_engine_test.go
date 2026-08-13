@@ -22,6 +22,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/use-agent/purify/proxypool"
 )
 
 func TestHTTPEngineHonorsHeadersCookiesAndDefaultNetworkWait(t *testing.T) {
@@ -209,6 +211,51 @@ func TestHTTPEngineConcurrentPerRequestProxySelection(t *testing.T) {
 	close(errorsChannel)
 	for err := range errorsChannel {
 		t.Error(err)
+	}
+}
+
+// TestHTTPEngineRotatesProxyPool locks the round-robin egress: with two or more
+// exits and no per-request override, successive fetches must alternate proxies
+// so traffic is not pinned to one IP.
+func TestHTTPEngineRotatesProxyPool(t *testing.T) {
+	proxyA := proxyFixture(t, "proxy-a")
+	proxyB := proxyFixture(t, "proxy-b")
+	engine := NewHTTPEngineWithPool("", proxypool.New([]string{proxyA.URL, proxyB.URL}))
+
+	want := []string{"proxy-a", "proxy-b", "proxy-a", "proxy-b"}
+	for i, marker := range want {
+		result, err := engine.Fetch(context.Background(), &FetchRequest{
+			URL:     "http://purify-proxy-target.invalid/page",
+			Timeout: time.Second,
+		})
+		if err != nil {
+			t.Fatalf("Fetch(%d) error = %v", i, err)
+		}
+		if !strings.Contains(result.HTML, marker) {
+			t.Fatalf("Fetch(%d) served by wrong exit: HTML = %q, want %q", i, result.HTML, marker)
+		}
+	}
+}
+
+// TestHTTPEngineSingleEntryPoolKeepsSharedClient guards the fast path: one exit
+// must behave exactly like a single default proxy, never rotating.
+func TestHTTPEngineSingleEntryPoolKeepsSharedClient(t *testing.T) {
+	proxyA := proxyFixture(t, "proxy-a")
+	engine := NewHTTPEngineWithPool("", proxypool.New([]string{proxyA.URL}))
+	if engine.defaultProxyURL != proxyA.URL {
+		t.Fatalf("single-entry pool was not promoted to default: %q", engine.defaultProxyURL)
+	}
+	for i := range 3 {
+		result, err := engine.Fetch(context.Background(), &FetchRequest{
+			URL:     "http://purify-proxy-target.invalid/page",
+			Timeout: time.Second,
+		})
+		if err != nil {
+			t.Fatalf("Fetch(%d) error = %v", i, err)
+		}
+		if !strings.Contains(result.HTML, "proxy-a") {
+			t.Fatalf("Fetch(%d) HTML = %q, want proxy-a", i, result.HTML)
+		}
 	}
 }
 

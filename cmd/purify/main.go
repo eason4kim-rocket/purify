@@ -30,6 +30,7 @@ import (
 	"github.com/use-agent/purify/llm"
 	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/proxy"
+	"github.com/use-agent/purify/proxypool"
 	"github.com/use-agent/purify/publicnet"
 	"github.com/use-agent/purify/receipts"
 	"github.com/use-agent/purify/revisit"
@@ -535,7 +536,7 @@ func newCanonicalScrapeService(sc *scraper.Scraper, cl *cleaner.Cleaner, cc *cac
 	stealthEngine := engine.NewRodEngine(rodFetch, true)
 	backends := []engine.Engine{rodEngine, stealthEngine}
 	if cfg.Engine.EnableMultiEngine {
-		httpEngine := engine.NewHTTPEngine(cfg.Browser.DefaultProxy)
+		httpEngine := engine.NewHTTPEngineWithPool(cfg.Browser.DefaultProxy, proxypool.New(cfg.Browser.ProxyPool))
 		backends = []engine.Engine{httpEngine, rodEngine, stealthEngine}
 	}
 

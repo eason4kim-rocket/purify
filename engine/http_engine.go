@@ -17,6 +17,8 @@ import (
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/html"
 	"golang.org/x/net/proxy"
+
+	"github.com/use-agent/purify/proxypool"
 )
 
 // HTTPEngine is a lightweight Layer 1 engine that uses pure net/http.
@@ -25,6 +27,7 @@ import (
 type HTTPEngine struct {
 	client          *http.Client
 	defaultProxyURL string
+	pool            *proxypool.Pool
 	clientErr       error
 }
 
@@ -63,13 +66,30 @@ func init() {
 // If proxyURL is non-empty, all connections are routed through the proxy
 // (SOCKS5 with optional username/password auth is supported).
 func NewHTTPEngine(proxyURL string) *HTTPEngine {
-	client, err := newHTTPClient(proxyURL)
-	if proxyURL != "" {
-		slog.Info("http_engine: proxy configured", "proxy", redactProxy(proxyURL))
+	return NewHTTPEngineWithPool(proxyURL, nil)
+}
+
+// NewHTTPEngineWithPool builds an engine whose egress rotates across pool when a
+// request pins no proxy of its own. The shared client still backs defaultProxyURL
+// so a zero- or single-proxy deployment reuses one client for every request; the
+// per-request rotation client is built only when the pool holds two or more
+// exits. A single-entry pool with no explicit default is promoted to the default
+// so it, too, keeps the shared client.
+func NewHTTPEngineWithPool(defaultProxyURL string, pool *proxypool.Pool) *HTTPEngine {
+	if defaultProxyURL == "" && pool.Len() == 1 {
+		defaultProxyURL = pool.Next()
+	}
+	client, err := newHTTPClient(defaultProxyURL)
+	switch {
+	case defaultProxyURL != "":
+		slog.Info("http_engine: proxy configured", "proxy", redactProxy(defaultProxyURL))
+	case pool.Len() > 1:
+		slog.Info("http_engine: proxy pool configured", "exits", pool.Len())
 	}
 	return &HTTPEngine{
 		client:          client,
-		defaultProxyURL: proxyURL,
+		defaultProxyURL: defaultProxyURL,
+		pool:            pool,
 		clientErr:       err,
 	}
 }
@@ -382,7 +402,17 @@ func (e *HTTPEngine) Fetch(ctx context.Context, req *FetchRequest) (*FetchResult
 // clients and transports are request-local, making concurrent proxy selection
 // race-free.
 func (e *HTTPEngine) clientForRequest(proxyOverride string, checkRedirect func(*http.Request, []*http.Request) error) (*http.Client, func(), error) {
-	if proxyOverride == "" || proxyOverride == e.defaultProxyURL {
+	effectiveProxy := proxyOverride
+	if effectiveProxy == "" {
+		if e.pool.Len() > 1 {
+			// Two or more exits: round-robin a per-request client below.
+			effectiveProxy = e.pool.Next()
+		} else {
+			// Zero or one exit: the shared client already covers the default.
+			effectiveProxy = e.defaultProxyURL
+		}
+	}
+	if effectiveProxy == "" || effectiveProxy == e.defaultProxyURL {
 		if e.clientErr != nil {
 			return nil, func() {}, e.clientErr
 		}
@@ -393,7 +423,7 @@ func (e *HTTPEngine) clientForRequest(proxyOverride string, checkRedirect func(*
 		}
 		return e.client, func() {}, nil
 	}
-	client, err := newHTTPClient(proxyOverride)
+	client, err := newHTTPClient(effectiveProxy)
 	if err != nil {
 		return nil, func() {}, err
 	}

@@ -11,8 +11,12 @@ services:
       # ── Server ──
       PURIFY_MODE: release
       PURIFY_MAX_PAGES: "10"
-      # Ambient HTTP(S)_PROXY is ignored; this is the only explicit proxy.
+      # Ambient HTTP(S)_PROXY is ignored; these are the only explicit proxies.
+      # PURIFY_PROXY backs the Rod launch relay and the single-exit fast path.
       PURIFY_PROXY: "${PURIFY_PROXY:-}"
+      # Optional comma-separated pool. Two or more exits rotate the HTTP engine
+      # per request; one or none keeps the shared client on PURIFY_PROXY.
+      PURIFY_PROXY_POOL: "${PURIFY_PROXY_POOL:-}"
       # ── Auth (generate a strong key: openssl rand -hex 32) ──
       PURIFY_AUTH_ENABLED: "true"
       PURIFY_API_KEYS: "${PURIFY_API_KEYS}"

@@ -175,8 +175,15 @@ type BrowserConfig struct {
 	// MaxPages is the page pool capacity (max concurrent tabs).
 	MaxPages int // default: 10
 
-	// DefaultProxy is the default proxy URL for all requests.
+	// DefaultProxy is the default proxy URL for all requests. It also backs the
+	// browser launch proxy, so Rod keeps a single process-lifetime relay.
 	DefaultProxy string
+
+	// ProxyPool rotates egress across several proxy URLs for the HTTP engine.
+	// With zero or one entry the engine keeps its single shared client; with two
+	// or more it round-robins a per-request client across them. Rod continues to
+	// use DefaultProxy so it never pays a per-request relay.
+	ProxyPool []string
 
 	// NoSandbox disables Chrome's sandbox (needed in Docker).
 	NoSandbox bool // default: false
@@ -237,6 +244,7 @@ func Load() *Config {
 			Headless:     envBoolOr("PURIFY_HEADLESS", true),
 			MaxPages:     envIntOr("PURIFY_MAX_PAGES", 10),
 			DefaultProxy: os.Getenv("PURIFY_PROXY"),
+			ProxyPool:    envSliceOr("PURIFY_PROXY_POOL", nil),
 			NoSandbox:    envBoolOr("PURIFY_NO_SANDBOX", false),
 			BrowserBin:   os.Getenv("PURIFY_BROWSER_BIN"),
 		},
