@@ -97,9 +97,9 @@ type HealConfig struct {
 }
 
 // SearchConfig controls the process-owned baseline Search provider. An empty
-// credential leaves Search unavailable without constructing provider state.
+// index path leaves Search unavailable without constructing provider state.
 type SearchConfig struct {
-	BraveKey string
+	IndexPath string
 }
 
 // RerankConfig controls the process-owned metadata reranker. It only describes
@@ -293,7 +293,7 @@ func Load() *Config {
 			WebhookSecret: os.Getenv("PURIFY_HEAL_WEBHOOK_SECRET"),
 		},
 		Search: SearchConfig{
-			BraveKey: os.Getenv("PURIFY_SEARCH_BRAVE_KEY"),
+			IndexPath: os.Getenv("PURIFY_SEARCH_INDEX_PATH"),
 		},
 		Rerank: RerankConfig{
 			Enabled:        envBoolOr("PURIFY_RERANK_ENABLED", false),

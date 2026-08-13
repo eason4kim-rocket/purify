@@ -121,15 +121,15 @@ func TestHealConfigDefaultsAndEnvironment(t *testing.T) {
 }
 
 func TestSearchConfigDefaultsAndEnvironment(t *testing.T) {
-	t.Setenv("PURIFY_SEARCH_BRAVE_KEY", "")
+	t.Setenv("PURIFY_SEARCH_INDEX_PATH", "")
 	cfg := Load()
 	if cfg.Search != (SearchConfig{}) {
 		t.Fatalf("Search defaults = %#v", cfg.Search)
 	}
 
-	t.Setenv("PURIFY_SEARCH_BRAVE_KEY", " raw-process-key ")
+	t.Setenv("PURIFY_SEARCH_INDEX_PATH", " ./data/index.db ")
 	cfg = Load()
-	if cfg.Search.BraveKey != " raw-process-key " {
+	if cfg.Search.IndexPath != " ./data/index.db " {
 		t.Fatalf("Search environment = %#v", cfg.Search)
 	}
 }

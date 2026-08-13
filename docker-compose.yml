@@ -21,8 +21,8 @@ services:
       # still require enough tokens (maximum trust Search 59; legacy max 22).
       PURIFY_RATE_RPS: "5"
       PURIFY_RATE_BURST: "59"
-      # ── Search provider (empty leaves search/answer/watch disabled) ──
-      PURIFY_SEARCH_BRAVE_KEY: "${PURIFY_SEARCH_BRAVE_KEY:-}"
+      # ── Local search index (empty leaves search/answer/watch disabled) ──
+      PURIFY_SEARCH_INDEX_PATH: "${PURIFY_SEARCH_INDEX_PATH:-}"
       # ── Process-owned metadata reranker (default-off; no sidecar here) ──
       PURIFY_RERANK_ENABLED: "${PURIFY_RERANK_ENABLED:-false}"
       PURIFY_RERANK_ENDPOINT: "${PURIFY_RERANK_ENDPOINT:-}"

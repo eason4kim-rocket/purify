@@ -5,7 +5,8 @@ import (
 	"errors"
 	"net"
 	"net/netip"
-	"strings"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/use-agent/purify/models"
 	"github.com/use-agent/purify/publicnet"
 	"github.com/use-agent/purify/receipts"
+	"github.com/use-agent/purify/searchindex"
 )
 
 type recordingSearchResolver struct {
@@ -27,27 +29,15 @@ func (resolver *recordingSearchResolver) LookupNetIP(context.Context, string, st
 	return nil, errors.New("unexpected Search construction lookup")
 }
 
-func TestValidateManagedSearchConfigDisabledValidAndRedacted(t *testing.T) {
+func TestValidateManagedSearchConfigDisabledAndValid(t *testing.T) {
 	if err := validateManagedSearchConfig(config.SearchConfig{}); err != nil {
 		t.Fatalf("disabled validation error = %v", err)
 	}
-	if err := validateManagedSearchConfig(config.SearchConfig{BraveKey: "process-key"}); err != nil {
+	if err := validateManagedSearchConfig(config.SearchConfig{IndexPath: "/tmp/index.db"}); err != nil {
 		t.Fatalf("valid validation error = %v", err)
 	}
-
-	for _, key := range []string{
-		" secret with spaces ",
-		"secret\nvalue",
-		"\xff",
-		strings.Repeat("k", (16<<10)+1),
-	} {
-		err := validateManagedSearchConfig(config.SearchConfig{BraveKey: key})
-		if !errors.Is(err, errManagedSearchConfigInvalid) {
-			t.Fatalf("validateManagedSearchConfig() error = %v", err)
-		}
-		if strings.Contains(err.Error(), key) {
-			t.Fatalf("validation error leaked credential: %v", err)
-		}
+	if err := validateManagedSearchConfig(config.SearchConfig{IndexPath: "\xff"}); !errors.Is(err, errManagedSearchConfigInvalid) {
+		t.Fatalf("invalid path validation error = %v", err)
 	}
 }
 
@@ -66,36 +56,31 @@ func TestNewManagedSearchRuntimeDisabledIsInert(t *testing.T) {
 	(*managedSearchRuntime)(nil).Close()
 }
 
-func TestNewManagedSearchRuntimeRejectsInvalidConfigurationWithoutCredentialLeak(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		config *config.Config
-		policy *publicnet.Policy
-	}{
-		{
-			name: "invalid key is not hidden by unsafe gate",
-			config: &config.Config{
-				Search: config.SearchConfig{BraveKey: "private key"},
-			},
-		},
-		{
-			name: "missing policy",
-			config: &config.Config{
-				Search:    config.SearchConfig{BraveKey: "private-key"},
-				Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
-				RateLimit: config.RateLimitConfig{Burst: handler.MaxSearchRequestCost},
-			},
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			runtime, err := newManagedSearchRuntime(test.config, test.policy, nil, nil)
-			if runtime != nil || !errors.Is(err, errManagedSearchConfigInvalid) {
-				t.Fatalf("newManagedSearchRuntime() = %#v, %v", runtime, err)
-			}
-			if strings.Contains(err.Error(), test.config.Search.BraveKey) {
-				t.Fatalf("runtime error leaked credential: %v", err)
-			}
-		})
+func TestNewManagedSearchRuntimeMissingIndexIsInert(t *testing.T) {
+	cfg := &config.Config{
+		Search:    config.SearchConfig{IndexPath: filepath.Join(t.TempDir(), "missing.db")},
+		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+		RateLimit: config.RateLimitConfig{Burst: handler.MaxSearchRequestCost},
+	}
+	runtime, err := newManagedSearchRuntime(cfg, nil, nil, nil)
+	if err != nil || runtime != nil {
+		t.Fatalf("missing-index newManagedSearchRuntime() = %#v, %v", runtime, err)
+	}
+}
+
+func TestNewManagedSearchRuntimeRejectsCorruptIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "corrupt.db")
+	if err := os.WriteFile(path, []byte("not a sqlite database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Search:    config.SearchConfig{IndexPath: path},
+		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
+		RateLimit: config.RateLimitConfig{Burst: handler.MaxSearchRequestCost},
+	}
+	runtime, err := newManagedSearchRuntime(cfg, nil, nil, nil)
+	if runtime != nil || !errors.Is(err, errManagedSearchConfigInvalid) {
+		t.Fatalf("corrupt-index newManagedSearchRuntime() = %#v, %v", runtime, err)
 	}
 }
 
@@ -129,7 +114,7 @@ func TestNewManagedSearchRuntimeUnsafeCapabilityGateIsInert(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := &config.Config{
-				Search:    config.SearchConfig{BraveKey: "process-key"},
+				Search:    config.SearchConfig{IndexPath: filepath.Join(t.TempDir(), "index.db")},
 				Auth:      test.auth,
 				RateLimit: config.RateLimitConfig{Burst: test.burst},
 			}
@@ -207,7 +192,7 @@ func TestManagedSearchRuntimeConstructsWithoutNetworkAndClosesConcurrently(t *te
 		},
 	})
 	cfg := &config.Config{
-		Search:    config.SearchConfig{BraveKey: "process-key"},
+		Search:    config.SearchConfig{IndexPath: writeTestSearchIndex(t)},
 		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
 		RateLimit: config.RateLimitConfig{Burst: handler.MinSearchRequestCost},
 	}
@@ -253,6 +238,19 @@ func (stubSearchReceiptSigner) Sign(receipts.Payload) (string, error) {
 	return "", errors.New("unexpected construction signing")
 }
 
+func writeTestSearchIndex(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "index.db")
+	store, err := searchindex.Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	return path
+}
+
 func TestManagedSearchRuntimeEnrichmentFollowsSuppliedDependencies(t *testing.T) {
 	policy := publicnet.NewPolicy(publicnet.Options{
 		Resolver: &recordingSearchResolver{},
@@ -261,7 +259,7 @@ func TestManagedSearchRuntimeEnrichmentFollowsSuppliedDependencies(t *testing.T)
 		},
 	})
 	cfg := &config.Config{
-		Search:    config.SearchConfig{BraveKey: "process-key"},
+		Search:    config.SearchConfig{IndexPath: writeTestSearchIndex(t)},
 		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
 		RateLimit: config.RateLimitConfig{Burst: handler.MaxSearchRequestCost},
 	}

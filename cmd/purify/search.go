@@ -2,36 +2,40 @@ package main
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/use-agent/purify/api/handler"
 	"github.com/use-agent/purify/config"
 	"github.com/use-agent/purify/publicnet"
 	searchdomain "github.com/use-agent/purify/search"
+	"github.com/use-agent/purify/searchindex"
 )
 
 var errManagedSearchConfigInvalid = errors.New("managed search configuration is invalid")
 
-// managedSearchRuntime owns the baseline provider's dedicated HTTP transport.
+// managedSearchRuntime owns the local index handle used by Search.
 // Search is request-driven: constructing this runtime starts no background
 // work and makes no network request.
 type managedSearchRuntime struct {
 	service   *searchdomain.Service
-	provider  *searchdomain.BraveProvider
+	provider  *searchdomain.LocalIndexProvider
 	enriched  bool
 	closeOnce sync.Once
 }
 
-// validateManagedSearchConfig keeps disabled configuration inert and delegates
-// every configured credential boundary to the provider's canonical validator.
-// It deliberately replaces the provider error with a fixed process-level error
-// so startup diagnostics can never echo credential material.
+// validateManagedSearchConfig keeps disabled configuration inert. A
+// configured path is accepted here; existence and Open happen at runtime
+// construction so a missing index leaves Search unavailable instead of
+// crashing the rest of the process.
 func validateManagedSearchConfig(cfg config.SearchConfig) error {
-	if cfg.BraveKey == "" {
+	path := strings.TrimSpace(cfg.IndexPath)
+	if path == "" {
 		return nil
 	}
-	if err := searchdomain.ValidateBraveAPIKey(cfg.BraveKey); err != nil {
+	if !utf8.ValidString(path) {
 		return errManagedSearchConfigInvalid
 	}
 	return nil
@@ -40,8 +44,8 @@ func validateManagedSearchConfig(cfg config.SearchConfig) error {
 // managedSearchCapabilityEnabled mirrors the router's fail-closed Search
 // capability gate. Keeping the production runtime behind the same auth,
 // effective-key, and minimum positive burst boundary ensures an unavailable
-// route never retains provider state or its process-owned credential. Costlier
-// requests remain gated independently by the shared limiter.
+// route never retains an open index handle. Costlier requests remain gated
+// independently by the shared limiter.
 func managedSearchCapabilityEnabled(cfg *config.Config) bool {
 	if cfg == nil || !cfg.Auth.Enabled || cfg.RateLimit.Burst < handler.MinSearchRequestCost {
 		return false
@@ -83,16 +87,17 @@ func newManagedSearchRuntime(
 	if cfg == nil {
 		return nil, nil
 	}
-	// Validate every non-empty process credential before the capability gate:
-	// an unsafe auth/rate configuration must not hide a malformed secret.
 	if err := validateManagedSearchConfig(cfg.Search); err != nil {
 		return nil, err
 	}
-	if cfg.Search.BraveKey == "" || !managedSearchCapabilityEnabled(cfg) {
+	path := strings.TrimSpace(cfg.Search.IndexPath)
+	if path == "" || !managedSearchCapabilityEnabled(cfg) {
 		return nil, nil
 	}
-	if policy == nil {
-		return nil, errManagedSearchConfigInvalid
+
+	info, statErr := os.Stat(path)
+	if statErr != nil || info.IsDir() {
+		return nil, nil
 	}
 
 	options := make([]searchdomain.ServiceOption, 0, 1)
@@ -100,27 +105,32 @@ func newManagedSearchRuntime(
 	if enriched {
 		options = append(options, searchdomain.WithEnrichment(artifacts, signer))
 	}
-	provider, err := searchdomain.NewBraveProvider(cfg.Search.BraveKey, policy)
+	store, err := searchindex.Open(path)
 	if err != nil {
+		return nil, errManagedSearchConfigInvalid
+	}
+	provider, err := searchdomain.NewLocalIndexProvider(store)
+	if err != nil {
+		_ = store.Close()
 		return nil, errManagedSearchConfigInvalid
 	}
 	service, err := searchdomain.NewService(provider, options...)
 	if err != nil {
-		provider.CloseIdleConnections()
+		_ = provider.Close()
 		return nil, errManagedSearchConfigInvalid
 	}
 	return &managedSearchRuntime{service: service, provider: provider, enriched: enriched}, nil
 }
 
-// Close releases the provider's idle connection pool exactly once. It is safe
-// after partial startup, on a nil runtime, and from concurrent shutdown paths.
+// Close releases the index store exactly once. It is safe after partial
+// startup, on a nil runtime, and from concurrent shutdown paths.
 func (runtime *managedSearchRuntime) Close() {
 	if runtime == nil {
 		return
 	}
 	runtime.closeOnce.Do(func() {
 		if runtime.provider != nil {
-			runtime.provider.CloseIdleConnections()
+			_ = runtime.provider.Close()
 		}
 	})
 }
