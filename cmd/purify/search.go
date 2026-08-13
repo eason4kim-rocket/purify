@@ -75,12 +75,34 @@ func managedAnswerCapabilityEnabled(cfg *config.Config) bool {
 }
 
 // newManagedSearchRuntime constructs the request-driven Search runtime.
+// openSearchIndexStore opens the configured index. A missing file leaves Search
+// unavailable without failing the rest of the process.
+func openSearchIndexStore(cfg config.SearchConfig) (*searchindex.Store, error) {
+	if err := validateManagedSearchConfig(cfg); err != nil {
+		return nil, err
+	}
+	path := strings.TrimSpace(cfg.IndexPath)
+	if path == "" {
+		return nil, nil
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil || info.IsDir() {
+		return nil, nil
+	}
+	store, err := searchindex.Open(path)
+	if err != nil {
+		return nil, errManagedSearchConfigInvalid
+	}
+	return store, nil
+}
+
 // Result enrichment (verify, include_content, and schema) is attached only
 // when both process-owned dependencies are supplied; a baseline-only runtime
 // keeps those request shapes failing closed as SEARCH_UNAVAILABLE.
 func newManagedSearchRuntime(
 	cfg *config.Config,
 	policy *publicnet.Policy,
+	store *searchindex.Store,
 	artifacts searchdomain.ArtifactService,
 	signer searchdomain.ReceiptSigner,
 ) (*managedSearchRuntime, error) {
@@ -95,30 +117,16 @@ func newManagedSearchRuntime(
 		return nil, nil
 	}
 
-	info, statErr := os.Stat(path)
-	if statErr != nil || info.IsDir() {
+	if store == nil {
 		return nil, nil
-	}
-
-	store, err := searchindex.Open(path)
-	if err != nil {
-		return nil, errManagedSearchConfigInvalid
 	}
 	options := make([]searchdomain.ServiceOption, 0, 1)
 	enriched := artifacts != nil && signer != nil
 	if enriched {
-		enrichmentArtifacts := artifacts
-		if cfg.Search.FeedIndex {
-			// Enrichment already fetches and cleans these pages, so indexing
-			// them costs one queued write and grows coverage where callers
-			// actually look.
-			enrichmentArtifacts = searchdomain.NewIndexFeeder(artifacts, store)
-		}
-		options = append(options, searchdomain.WithEnrichment(enrichmentArtifacts, signer))
+		options = append(options, searchdomain.WithEnrichment(artifacts, signer))
 	}
 	provider, err := searchdomain.NewLocalIndexProvider(store)
 	if err != nil {
-		_ = store.Close()
 		return nil, errManagedSearchConfigInvalid
 	}
 	service, err := searchdomain.NewService(provider, options...)

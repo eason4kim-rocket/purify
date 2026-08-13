@@ -24,6 +24,7 @@ import (
 	"github.com/use-agent/purify/discovery"
 	"github.com/use-agent/purify/engine"
 	extractdomain "github.com/use-agent/purify/extract"
+	"github.com/use-agent/purify/indexfeed"
 	"github.com/use-agent/purify/jobs"
 	"github.com/use-agent/purify/ledger"
 	"github.com/use-agent/purify/llm"
@@ -244,9 +245,28 @@ func run() error {
 	defer cc.Close()
 
 	// ── 4c. Initialise the canonical ordered scrape service ─────────
-	scrapeService, err := newCanonicalScrapeService(sc, cl, cc, cfg)
+	canonicalScrape, err := newCanonicalScrapeService(sc, cl, cc, cfg)
 	if err != nil {
 		return fmt.Errorf("initialise canonical scrape service: %w", err)
+	}
+
+	// The index store is opened here, before the scrape service acquires its
+	// consumers, so every fetch in the process can feed it. Decorating a single
+	// route would only re-index pages the index already returned.
+	searchIndexStore, err := openSearchIndexStore(cfg.Search)
+	if err != nil {
+		return fmt.Errorf("open search index: %w", err)
+	}
+	if searchIndexStore != nil {
+		defer searchIndexStore.Close()
+	}
+	var scrapeService indexfeed.Runner = canonicalScrape
+	if searchIndexStore != nil && cfg.Search.FeedIndex {
+		feeder := indexfeed.New(canonicalScrape, searchIndexStore)
+		scrapeService = feeder
+		if closer, ok := feeder.(*indexfeed.Feeder); ok {
+			defer closer.Close()
+		}
 	}
 
 	// ── 4d. Initialise process-wide bounded background work ─────────
@@ -324,7 +344,7 @@ func run() error {
 		searchArtifacts = extractService
 		searchSigner = receiptSigner
 	}
-	managedSearch, err := newManagedSearchRuntime(cfg, outboundPolicy, searchArtifacts, searchSigner)
+	managedSearch, err := newManagedSearchRuntime(cfg, outboundPolicy, searchIndexStore, searchArtifacts, searchSigner)
 	if err != nil {
 		return fmt.Errorf("initialise managed search: %w", err)
 	}

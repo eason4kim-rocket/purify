@@ -46,7 +46,7 @@ func TestNewManagedSearchRuntimeDisabledIsInert(t *testing.T) {
 		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
 		RateLimit: config.RateLimitConfig{Burst: handler.MaxSearchRequestCost},
 	}
-	runtime, err := newManagedSearchRuntime(cfg, nil, nil, nil)
+	runtime, err := newManagedSearchRuntime(cfg, nil, nil, nil, nil)
 	if err != nil || runtime != nil {
 		t.Fatalf("disabled newManagedSearchRuntime() = %#v, %v", runtime, err)
 	}
@@ -62,7 +62,7 @@ func TestNewManagedSearchRuntimeMissingIndexIsInert(t *testing.T) {
 		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
 		RateLimit: config.RateLimitConfig{Burst: handler.MaxSearchRequestCost},
 	}
-	runtime, err := newManagedSearchRuntime(cfg, nil, nil, nil)
+	runtime, err := newManagedSearchRuntime(cfg, nil, nil, nil, nil)
 	if err != nil || runtime != nil {
 		t.Fatalf("missing-index newManagedSearchRuntime() = %#v, %v", runtime, err)
 	}
@@ -78,8 +78,14 @@ func TestNewManagedSearchRuntimeRejectsCorruptIndex(t *testing.T) {
 		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
 		RateLimit: config.RateLimitConfig{Burst: handler.MaxSearchRequestCost},
 	}
-	runtime, err := newManagedSearchRuntime(cfg, nil, nil, nil)
-	if runtime != nil || !errors.Is(err, errManagedSearchConfigInvalid) {
+	// Opening the index moved ahead of the Search runtime so every fetch in the
+	// process can feed it, so the corrupt-file rejection lives there now.
+	store, err := openSearchIndexStore(cfg.Search)
+	if store != nil || !errors.Is(err, errManagedSearchConfigInvalid) {
+		t.Fatalf("corrupt-index openSearchIndexStore() = %#v, %v", store, err)
+	}
+	runtime, err := newManagedSearchRuntime(cfg, nil, nil, nil, nil)
+	if runtime != nil || err != nil {
 		t.Fatalf("corrupt-index newManagedSearchRuntime() = %#v, %v", runtime, err)
 	}
 }
@@ -118,7 +124,7 @@ func TestNewManagedSearchRuntimeUnsafeCapabilityGateIsInert(t *testing.T) {
 				Auth:      test.auth,
 				RateLimit: config.RateLimitConfig{Burst: test.burst},
 			}
-			runtime, err := newManagedSearchRuntime(cfg, nil, nil, nil)
+			runtime, err := newManagedSearchRuntime(cfg, nil, nil, nil, nil)
 			if err != nil || runtime != nil {
 				t.Fatalf("unsafe newManagedSearchRuntime() = %#v, %v", runtime, err)
 			}
@@ -196,7 +202,12 @@ func TestManagedSearchRuntimeConstructsWithoutNetworkAndClosesConcurrently(t *te
 		Auth:      config.AuthConfig{Enabled: true, APIKeys: []string{"required-secret"}},
 		RateLimit: config.RateLimitConfig{Burst: handler.MinSearchRequestCost},
 	}
-	runtime, err := newManagedSearchRuntime(cfg, policy, nil, nil)
+	store, err := openSearchIndexStore(cfg.Search)
+	if err != nil || store == nil {
+		t.Fatalf("openSearchIndexStore() = %#v, %v", store, err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	runtime, err := newManagedSearchRuntime(cfg, policy, store, nil, nil)
 	if err != nil {
 		t.Fatalf("newManagedSearchRuntime() error = %v", err)
 	}
@@ -264,21 +275,31 @@ func TestManagedSearchRuntimeEnrichmentFollowsSuppliedDependencies(t *testing.T)
 		RateLimit: config.RateLimitConfig{Burst: handler.MaxSearchRequestCost},
 	}
 
-	baseline, err := newManagedSearchRuntime(cfg, policy, nil, nil)
+	// Each runtime closes the store it was handed, so every case opens its own.
+	baseline, err := newManagedSearchRuntime(cfg, policy, mustOpenTestIndex(t, cfg), nil, nil)
 	if err != nil || baseline == nil || baseline.enriched {
 		t.Fatalf("baseline runtime = %#v, %v", baseline, err)
 	}
 	baseline.Close()
 
-	partial, err := newManagedSearchRuntime(cfg, policy, stubSearchArtifactService{}, nil)
+	partial, err := newManagedSearchRuntime(cfg, policy, mustOpenTestIndex(t, cfg), stubSearchArtifactService{}, nil)
 	if err != nil || partial == nil || partial.enriched {
 		t.Fatalf("partial-dependency runtime = %#v, %v", partial, err)
 	}
 	partial.Close()
 
-	enriched, err := newManagedSearchRuntime(cfg, policy, stubSearchArtifactService{}, stubSearchReceiptSigner{})
+	enriched, err := newManagedSearchRuntime(cfg, policy, mustOpenTestIndex(t, cfg), stubSearchArtifactService{}, stubSearchReceiptSigner{})
 	if err != nil || enriched == nil || !enriched.enriched || enriched.service == nil {
 		t.Fatalf("enriched runtime = %#v, %v", enriched, err)
 	}
 	enriched.Close()
+}
+
+func mustOpenTestIndex(t *testing.T, cfg *config.Config) *searchindex.Store {
+	t.Helper()
+	store, err := openSearchIndexStore(cfg.Search)
+	if err != nil || store == nil {
+		t.Fatalf("openSearchIndexStore() = %#v, %v", store, err)
+	}
+	return store
 }
