@@ -13,7 +13,7 @@ document.documentElement.dataset.heroVariant = HERO_VARIANT;
 const copy = {
   en: {
     "nav.product": "Product",
-    "nav.technology": "Technology",
+    "nav.developers": "Developers",
     "nav.vision": "Vision",
     "nav.journal": "Journal",
     "nav.docs": "Docs",
@@ -28,38 +28,34 @@ const copy = {
       "Purify Search is building a path from the open, changing web to context AI systems can inspect, update, and use.",
     "hero.primary": "Try Purify",
     "hero.secondary": "Read our vision",
-    "product.kicker": "The product",
-    "product.title": "A search API that answers<br />with evidence attached.",
-    "product.lead":
-      "One call reaches the live web, ranks it in an index we own, and verifies before answering — the snapshot, the sources, and a signed receipt arrive in the same response.",
-    "product.cap1Label": "LIVE, NOT CACHED",
-    "product.cap1":
-      "Answers read the page as it stands right now, with an archive fallback when the live web will not respond.",
-    "product.cap2Label": "OWNED, NOT RESOLD",
-    "product.cap2":
-      "Results rank in a bilingual index we build ourselves — no upstream terms can switch our answers off.",
-    "product.cap3Label": "SIGNED, NOT ASSERTED",
-    "product.cap3": "Every promoted claim carries an Ed25519 receipt that replays through /verify.",
-    "stack.kicker": "Fetch · Find · Verify",
-    "stack.title": "Three layers, welded<br />into one path.",
-    "stack.lead":
-      "Rented layers break trust at the seams. Purify runs the whole path itself, so one receipt can cover the journey from raw page to promoted claim.",
-    "stack.l1Index": "LAYER 01 — 抓",
-    "stack.l1Title": "Fetch",
-    "stack.l1Body":
-      "TLS and HTTP/2 that match a real Chrome, a full browser when pages demand rendering, archives when the live web will not answer.",
-    "stack.l2Index": "LAYER 02 — 找",
-    "stack.l2Title": "Find",
-    "stack.l2Body":
-      "A bilingual index we build and grow ourselves — seeded from the head of the web, expanded by real demand, never resold rankings.",
-    "stack.l3Index": "LAYER 03 — 核",
-    "stack.l3Title": "Verify",
-    "stack.l3Body":
-      "Independent sources cross-checked, conflicts kept on the record, and a receipt signed before any claim is promoted.",
-    "receipt.kicker": "The receipt",
-    "receipt.title": "Disagreement stays<br />on the record.",
-    "receipt.lead":
-      "Every response can be re-opened: which sources, observed when, what conflicted, what was promoted — and the signature that seals it.",
+    "pillars.eyebrow": "Purify Search API",
+    "pillars.title": "Search that proves every answer.",
+    "pillars.sub":
+      "Purify fetches the live page, finds it in an index we own, and verifies the claim before it reaches you.",
+    "pillars.c1Title": "Fetch",
+    "pillars.c1Body":
+      "Reach any public page with a real Chrome fingerprint — TLS, HTTP/2, full rendering, and an archive fallback.",
+    "pillars.c2Title": "Find",
+    "pillars.c2Body": "A bilingual index we build and grow ourselves — no resold rankings, no upstream terms.",
+    "pillars.c3Title": "Verify",
+    "pillars.c3Body":
+      "Independent sources cross-checked, conflicts kept visible, and every receipt signed with Ed25519.",
+    "dev.eyebrow": "For developers",
+    "dev.title": "The receipt is in the response.",
+    "dev.sub":
+      "GET /search returns results the way your agent needs them — the snapshot ID, the observed time, and a signed receipt, inline.",
+    "dev.b1": "snapshot_id pins the exact bytes an answer was read from",
+    "dev.b2": "observed_at timestamps every read",
+    "dev.b3": "The receipt replays through /verify",
+    "dev.link": "Read the API docs",
+    "rec.eyebrow": "Built-in verification",
+    "rec.title": "Disagreement stays on the record.",
+    "rec.sub":
+      "When sources conflict, Purify does not guess. Each claim stays attached to its source; nothing is promoted until verification settles it.",
+    "rec.b1": "Conflicts retained, never hidden",
+    "rec.b2": "Every source carries its observed time",
+    "rec.b3": "One receipt covers the whole path",
+    "rec.link": "See the trust stack on GitHub",
     "specimen.kicker": "SEARCH RECEIPT / ILLUSTRATIVE RECORD",
     "specimen.title": "Every answer ships with a receipt you can audit.",
     "specimen.status": "Needs review",
@@ -74,25 +70,19 @@ const copy = {
     "specimen.current": "Current",
     "specimen.conflict": "Conflict retained",
     "specimen.changed": "Changed",
-    "specimen.link": "Read the API docs",
-    "proof.l1": "FETCH ENGINES",
-    "proof.d1": "Chrome-true HTTP, headless browser, stealth render, web archive.",
-    "proof.l2": "LANGUAGES INDEXED",
-    "proof.d2": "English and Chinese, ranked in one merged result set.",
-    "proof.l3": "ANSWERS SNAPSHOTTED",
-    "proof.d3": "Every result preserves the exact bytes it was read from.",
-    "proof.l4": "RECEIPT PER ANSWER",
-    "proof.d4": "Signed with Ed25519, replayable through /verify.",
-    "future.kicker": "What comes next",
-    "future.title": "From answers<br />to a living fact layer.",
-    "future.lead":
+    "stats.title": "Built to be checked.",
+    "stats.l1": "FETCH ENGINES",
+    "stats.l2": "LANGUAGES INDEXED",
+    "stats.l3": "ANSWERS SNAPSHOTTED",
+    "stats.l4": "RECEIPT PER ANSWER",
+    "vision2.eyebrow": "The road ahead",
+    "vision2.title": "From answers to a living fact layer.",
+    "vision2.sub":
       "Receipts accumulate into memory. Memory learns to watch for change, heal what breaks, and keep every repair inspectable. Search is only the first layer.",
-    "future.researchers": "For researchers who cite what they find.",
-    "future.builders": "For builders whose agents act on facts.",
-    "future.systems": "For systems that must show their work.",
-    "future.final": "For every intelligence working on humanity\u2019s next chapter.",
-    "future.primary": "Try Purify",
-    "future.secondary": "Follow our work",
+    "cta.title": "Start building on verified answers.",
+    "cta.sub": "One call to /search. Evidence in every response.",
+    "cta.primary": "Try Purify",
+    "cta.secondary": "Read the docs",
     "footer.note": "Search that can show its work.",
     "footer.product": "PRODUCT",
     "footer.perspective": "PERSPECTIVE",
@@ -104,7 +94,7 @@ const copy = {
   },
   zh: {
     "nav.product": "产品",
-    "nav.technology": "技术",
+    "nav.developers": "开发者",
     "nav.vision": "愿景",
     "nav.journal": "手记",
     "nav.docs": "文档",
@@ -119,33 +109,29 @@ const copy = {
       "Purify Search 正在建立一条通往开放且持续变化的网络之路，把其中的信息转化为 AI 系统能够检查、更新并使用的上下文。",
     "hero.primary": "试用 Purify",
     "hero.secondary": "阅读我们的愿景",
-    "product.kicker": "产品",
-    "product.title": "一个把证据一并交付的<br />搜索 API。",
-    "product.lead":
-      "一次调用抵达实时网页，在自建索引中排序，核验之后才作答——快照、来源与签名回执，随同一个响应返回。",
-    "product.cap1Label": "实时，而非缓存",
-    "product.cap1": "答案读取此刻的页面；活网不应答时，回退到历史存档。",
-    "product.cap2Label": "自有，而非转售",
-    "product.cap2": "结果在我们自建的中英双语索引中排序——没有任何上游条款能掐断答案。",
-    "product.cap3Label": "签名，而非口说",
-    "product.cap3": "每条生效的陈述都带有 Ed25519 回执，可通过 /verify 重放核验。",
-    "stack.kicker": "抓 · 找 · 核",
-    "stack.title": "三层，焊成<br />一条链路。",
-    "stack.lead":
-      "租来的层，信任会在接缝处断裂。Purify 自己跑通整条链路，让一张回执覆盖从原始页面到生效陈述的全程。",
-    "stack.l1Index": "第一层 — 抓",
-    "stack.l1Title": "抓取",
-    "stack.l1Body": "TLS 与 HTTP/2 同真实 Chrome 一致；页面需要渲染时用完整浏览器；活网不应答时回退历史存档。",
-    "stack.l2Index": "第二层 — 找",
-    "stack.l2Title": "检索",
-    "stack.l2Body": "自建自养的中英双语索引——以头部网络打底，随真实需求生长，绝不转售他人排序。",
-    "stack.l3Index": "第三层 — 核",
-    "stack.l3Title": "核验",
-    "stack.l3Body": "交叉核对相互独立的来源，冲突留在记录上；任何陈述生效之前，先签发回执。",
-    "receipt.kicker": "回执",
-    "receipt.title": "分歧，<br />留在记录上。",
-    "receipt.lead":
-      "每个响应都可以被重新打开：哪些来源、何时观察、哪里冲突、何者生效——以及为这一切封印的签名。",
+    "pillars.eyebrow": "PURIFY 搜索 API",
+    "pillars.title": "让每一条答案，都能自证。",
+    "pillars.sub": "Purify 抓取实时页面，在自建索引中检索，并在结果抵达你之前完成核验。",
+    "pillars.c1Title": "抓取",
+    "pillars.c1Body": "以真实 Chrome 指纹抵达任何公开页面——TLS、HTTP/2、完整渲染，外加历史存档回退。",
+    "pillars.c2Title": "检索",
+    "pillars.c2Body": "自建自养的中英双语索引——不转售排序，不受上游条款约束。",
+    "pillars.c3Title": "核验",
+    "pillars.c3Body": "交叉核对独立来源，冲突保持可见，每张回执都以 Ed25519 签名。",
+    "dev.eyebrow": "面向开发者",
+    "dev.title": "回执，就在响应里。",
+    "dev.sub": "GET /search 以智能体需要的方式返回结果——快照 ID、观察时间与签名回执，全部内联。",
+    "dev.b1": "snapshot_id 锁定答案所依据的原始字节",
+    "dev.b2": "observed_at 记录每一次读取的时间",
+    "dev.b3": "回执可经 /verify 重放核验",
+    "dev.link": "查看 API 文档",
+    "rec.eyebrow": "内建核验",
+    "rec.title": "分歧，留在记录上。",
+    "rec.sub": "来源冲突时，Purify 不做猜测。每种陈述都与各自来源保持关联；核验完成之前，谁也不会生效。",
+    "rec.b1": "冲突保留，绝不隐藏",
+    "rec.b2": "每个来源都带观察时间",
+    "rec.b3": "一张回执覆盖全程",
+    "rec.link": "在 GitHub 查看信任栈",
     "specimen.kicker": "搜索回执 / 示意记录",
     "specimen.title": "每一条答案，都附带一张可以复核的回执。",
     "specimen.status": "等待复核",
@@ -159,24 +145,18 @@ const copy = {
     "specimen.current": "当前",
     "specimen.conflict": "保留冲突",
     "specimen.changed": "已变化",
-    "specimen.link": "查看 API 文档",
-    "proof.l1": "抓取引擎",
-    "proof.d1": "Chrome 指纹 HTTP、无头浏览器、隐身渲染、网络存档。",
-    "proof.l2": "索引语言",
-    "proof.d2": "中文与英文，在同一份结果中合并排序。",
-    "proof.l3": "答案留有快照",
-    "proof.d3": "每条结果都保存它所依据的原始字节。",
-    "proof.l4": "每条答案一张回执",
-    "proof.d4": "以 Ed25519 签名，可经 /verify 重放核验。",
-    "future.kicker": "接下来",
-    "future.title": "从答案，<br />到活的事实层。",
-    "future.lead": "回执沉淀为记忆；记忆学会察觉变化、修复断裂，并让每一次修复都可被检查。搜索，只是第一层。",
-    "future.researchers": "献给引用即可溯源的研究者。",
-    "future.builders": "献给让智能体依据事实行动的建设者。",
-    "future.systems": "献给必须出示证据的智能系统。",
-    "future.final": "献给每一种参与书写人类下一章的智能。",
-    "future.primary": "试用 Purify",
-    "future.secondary": "关注我们的进展",
+    "stats.title": "为被检验而生。",
+    "stats.l1": "抓取引擎",
+    "stats.l2": "索引语言",
+    "stats.l3": "答案留有快照",
+    "stats.l4": "每条答案一张回执",
+    "vision2.eyebrow": "路线图",
+    "vision2.title": "从答案，到活的事实层。",
+    "vision2.sub": "回执沉淀为记忆；记忆学会察觉变化、修复断裂，并让每一次修复都可被检查。搜索，只是第一层。",
+    "cta.title": "开始在可核验的答案上构建。",
+    "cta.sub": "一次调用 /search，每个响应都带证据。",
+    "cta.primary": "试用 Purify",
+    "cta.secondary": "阅读文档",
     "footer.note": "让每一次搜索，都能出示自己的证据。",
     "footer.product": "产品",
     "footer.perspective": "观点",
@@ -1113,10 +1093,8 @@ function setupMenu() {
 
 function setupSectionReveals(preferences) {
   const revealTargets = [...document.querySelectorAll("[data-reveal]")];
-  const future = document.querySelector(".future");
   if (preferences.reduced) {
     revealTargets.forEach((target) => target.classList.add("is-visible"));
-    future?.classList.add("is-visible");
     return;
   }
 
@@ -1136,7 +1114,6 @@ function setupSectionReveals(preferences) {
   );
 
   revealTargets.forEach((target) => observer.observe(target));
-  if (future) observer.observe(future);
 
   let scanRequest = 0;
   const revealPassedContent = () => {
@@ -1147,7 +1124,6 @@ function setupSectionReveals(preferences) {
       pendingTargets.delete(target);
       observer.unobserve(target);
     });
-    if (future && future.getBoundingClientRect().bottom < 0) future.classList.add("is-visible");
   };
   window.addEventListener(
     "scroll",
