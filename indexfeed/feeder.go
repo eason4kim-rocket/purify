@@ -30,6 +30,9 @@ const (
 	minBodyBytes = 200
 	// flushInterval bounds how long a fetched page waits for a full batch.
 	flushInterval = 5 * time.Second
+	// archiveEngineName marks pages recovered from the Wayback fallback, which
+	// must never enter the index. It mirrors engine.ArchiveEngine.Name().
+	archiveEngineName = "wayback-archive"
 )
 
 // Runner is the canonical scrape boundary, matching extract.Runner and
@@ -162,6 +165,12 @@ func publicPage(result *scrape.Result) (searchindex.Page, bool) {
 	}
 	response := result.Response
 	if !response.Success || response.StatusCode < 200 || response.StatusCode >= 300 {
+		return searchindex.Page{}, false
+	}
+	// Archive fallbacks recover content for the caller but must not enter the
+	// index: an archived copy under the live URL would masquerade as a current
+	// capture. The engine name is the provenance signal.
+	if response.EngineUsed == archiveEngineName {
 		return searchindex.Page{}, false
 	}
 	body := strings.TrimSpace(response.Content)

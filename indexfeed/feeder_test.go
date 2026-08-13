@@ -91,6 +91,29 @@ func TestFeederNeverBlocksOrFailsTheRequest(t *testing.T) {
 	}
 }
 
+// TestFeederSkipsArchivePages locks that a Wayback fallback result never enters
+// the index: an archived copy under the live URL would masquerade as a current
+// capture.
+func TestFeederSkipsArchivePages(t *testing.T) {
+	store := openTestStore(t)
+	feeder := New(&runnerStub{engineUsed: "wayback-archive"}, store).(*Feeder)
+	ctx := context.Background()
+
+	if _, err := feeder.Run(ctx, &models.ScrapeRequest{URL: "https://example.com/doc"}, nil); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if err := feeder.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	count, err := store.CountPages(ctx)
+	if err != nil {
+		t.Fatalf("CountPages() error = %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("archived page was indexed: count = %d, want 0", count)
+	}
+}
+
 func TestNewPassesThroughWithoutStore(t *testing.T) {
 	inner := &runnerStub{}
 	if got := New(inner, nil); got != Runner(inner) {
@@ -112,6 +135,7 @@ type runnerStub struct {
 	statusCode int
 	body       string
 	url        string
+	engineUsed string
 	failure    bool
 	err        error
 }
@@ -140,6 +164,7 @@ func (stub *runnerStub) Run(_ context.Context, request *models.ScrapeRequest, _ 
 			StatusCode: status,
 			FinalURL:   final,
 			Content:    body,
+			EngineUsed: stub.engineUsed,
 			Metadata:   models.Metadata{Title: "Go scheduler"},
 		},
 		Source: &scraper.ScrapeResult{

@@ -132,6 +132,11 @@ type EngineConfig struct {
 	// EnableMultiEngine toggles the multi-engine dispatcher.
 	EnableMultiEngine bool // default: true
 
+	// EnableArchiveFallback adds a last-resort Wayback Machine fetch when every
+	// live engine fails, so a blocked or down origin can still yield content.
+	// Archive results are transparently labeled and never fed to the index.
+	EnableArchiveFallback bool // default: true
+
 	// EscalationDelays is the staged start delay for each engine tier.
 	EscalationDelays []time.Duration // default: [0s, 2s, 5s]
 
@@ -272,9 +277,10 @@ func Load() *Config {
 			Format: envOr("PURIFY_LOG_FORMAT", "json"),
 		},
 		Engine: EngineConfig{
-			EnableMultiEngine: envBoolOr("PURIFY_MULTI_ENGINE", true),
-			EscalationDelays:  envDurationSliceOr("PURIFY_ESCALATION_DELAYS", []time.Duration{0, 2 * time.Second, 5 * time.Second}),
-			HTTPTimeout:       envDurationOr("PURIFY_HTTP_TIMEOUT", 5*time.Second),
+			EnableMultiEngine:     envBoolOr("PURIFY_MULTI_ENGINE", true),
+			EnableArchiveFallback: envBoolOr("PURIFY_ARCHIVE_FALLBACK", true),
+			EscalationDelays:      envDurationSliceOr("PURIFY_ESCALATION_DELAYS", []time.Duration{0, 2 * time.Second, 5 * time.Second}),
+			HTTPTimeout:           envDurationOr("PURIFY_HTTP_TIMEOUT", 5*time.Second),
 		},
 		AdaptivePool: AdaptivePoolConfig{
 			MinPages:     envIntOr("PURIFY_MIN_PAGES", 3),

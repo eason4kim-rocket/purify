@@ -539,6 +539,12 @@ func newCanonicalScrapeService(sc *scraper.Scraper, cl *cleaner.Cleaner, cc *cac
 		httpEngine := engine.NewHTTPEngineWithPool(cfg.Browser.DefaultProxy, proxypool.New(cfg.Browser.ProxyPool))
 		backends = []engine.Engine{httpEngine, rodEngine, stealthEngine}
 	}
+	// The archive fallback runs last: only reached when every live engine above
+	// has failed, so it recovers a blocked or offline origin without ever
+	// pre-empting a live fetch.
+	if cfg.Engine.EnableArchiveFallback {
+		backends = append(backends, engine.NewArchiveEngine(engine.ArchiveConfig{}))
+	}
 
 	fetchers := make([]scrape.Fetcher, 0, len(backends))
 	for _, backend := range backends {
