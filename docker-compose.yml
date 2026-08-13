@@ -28,6 +28,9 @@ services:
       #     -seeds /data/seeds.json -out /data/index.db -max-pages 100000
       #   docker compose restart purify   # the index is opened at startup
       PURIFY_SEARCH_INDEX_PATH: "${PURIFY_SEARCH_INDEX_PATH:-/data/index.db}"
+      # Add pages fetched while serving a request to the index. Off by default:
+      # the URLs a caller asked about become searchable content.
+      PURIFY_SEARCH_INDEX_FEED: "${PURIFY_SEARCH_INDEX_FEED:-false}"
       # ── Process-owned metadata reranker (default-off; no sidecar here) ──
       PURIFY_RERANK_ENABLED: "${PURIFY_RERANK_ENABLED:-false}"
       PURIFY_RERANK_ENDPOINT: "${PURIFY_RERANK_ENDPOINT:-}"

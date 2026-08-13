@@ -100,14 +100,21 @@ func newManagedSearchRuntime(
 		return nil, nil
 	}
 
-	options := make([]searchdomain.ServiceOption, 0, 1)
-	enriched := artifacts != nil && signer != nil
-	if enriched {
-		options = append(options, searchdomain.WithEnrichment(artifacts, signer))
-	}
 	store, err := searchindex.Open(path)
 	if err != nil {
 		return nil, errManagedSearchConfigInvalid
+	}
+	options := make([]searchdomain.ServiceOption, 0, 1)
+	enriched := artifacts != nil && signer != nil
+	if enriched {
+		enrichmentArtifacts := artifacts
+		if cfg.Search.FeedIndex {
+			// Enrichment already fetches and cleans these pages, so indexing
+			// them costs one queued write and grows coverage where callers
+			// actually look.
+			enrichmentArtifacts = searchdomain.NewIndexFeeder(artifacts, store)
+		}
+		options = append(options, searchdomain.WithEnrichment(enrichmentArtifacts, signer))
 	}
 	provider, err := searchdomain.NewLocalIndexProvider(store)
 	if err != nil {

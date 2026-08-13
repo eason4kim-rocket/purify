@@ -100,6 +100,10 @@ type HealConfig struct {
 // index path leaves Search unavailable without constructing provider state.
 type SearchConfig struct {
 	IndexPath string
+	// FeedIndex adds pages fetched while serving a request to the index. It is
+	// off by default: the URLs a caller asked about become searchable content,
+	// which is the operator's call to make.
+	FeedIndex bool
 }
 
 // RerankConfig controls the process-owned metadata reranker. It only describes
@@ -294,6 +298,7 @@ func Load() *Config {
 		},
 		Search: SearchConfig{
 			IndexPath: os.Getenv("PURIFY_SEARCH_INDEX_PATH"),
+			FeedIndex: envBoolOr("PURIFY_SEARCH_INDEX_FEED", false),
 		},
 		Rerank: RerankConfig{
 			Enabled:        envBoolOr("PURIFY_RERANK_ENABLED", false),
