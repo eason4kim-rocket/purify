@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"sort"
+	"sync"
 
 	"github.com/use-agent/purify/consensus"
 	"github.com/use-agent/purify/extract"
@@ -327,8 +328,14 @@ func (service *Service) evaluateTrust(
 	return fusion, nil
 }
 
+// memoArtifactService reuses the pages trust analysis already fetched. Trust
+// analysis fills it sequentially, but the same memo is then handed to result
+// enrichment, which fetches from several goroutines at once, so every map
+// access is guarded. A page trust analysis failed to fetch is absent from the
+// memo, so concurrent enrichment misses are ordinary rather than exceptional.
 type memoArtifactService struct {
 	inner ArtifactService
+	mutex sync.Mutex
 	byURL map[string]*extract.Artifact
 }
 
@@ -340,15 +347,35 @@ func (memo *memoArtifactService) FetchPublicArtifact(ctx context.Context, rawURL
 	if memo == nil || memo.inner == nil {
 		return nil, errTrustAnalysisInput
 	}
-	if artifact, ok := memo.byURL[rawURL]; ok {
+	if artifact, ok := memo.lookup(rawURL); ok {
 		return artifact, nil
 	}
+	// The inner fetch runs outside the lock so one slow page cannot serialize
+	// the bounded enrichment workers. Two workers racing the same missing URL
+	// therefore fetch twice; both artifacts are read-only, so the loser is
+	// simply discarded rather than shared.
 	artifact, err := memo.inner.FetchPublicArtifact(ctx, rawURL)
 	if err != nil {
 		return nil, err
 	}
+	return memo.store(rawURL, artifact), nil
+}
+
+func (memo *memoArtifactService) lookup(rawURL string) (*extract.Artifact, bool) {
+	memo.mutex.Lock()
+	defer memo.mutex.Unlock()
+	artifact, ok := memo.byURL[rawURL]
+	return artifact, ok
+}
+
+func (memo *memoArtifactService) store(rawURL string, artifact *extract.Artifact) *extract.Artifact {
+	memo.mutex.Lock()
+	defer memo.mutex.Unlock()
+	if existing, ok := memo.byURL[rawURL]; ok {
+		return existing
+	}
 	memo.byURL[rawURL] = artifact
-	return artifact, nil
+	return artifact
 }
 
 func (memo *memoArtifactService) ExtractArtifact(ctx context.Context, artifact *extract.Artifact, request *models.ExtractRequest) (*models.ExtractResponse, error) {

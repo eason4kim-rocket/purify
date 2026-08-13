@@ -2,6 +2,8 @@ package search
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -145,3 +147,121 @@ func (judge staticTrustJudge) JudgeDocument(context.Context, eav.Subject, eav.Do
 }
 
 func timeNowUTC() time.Time { return time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC) }
+
+// TestSearchTrustMemoSurvivesConcurrentEnrichment locks the hand-off between
+// sequential trust analysis and concurrent result enrichment. Pages that fail
+// to fetch during analysis are never memoized, so the enrichment workers reach
+// the shared memo with a miss and install their pages at the same time.
+func TestSearchTrustMemoSurvivesConcurrentEnrichment(t *testing.T) {
+	provider := &stubSearchProvider{name: "stub", results: []ProviderResult{
+		{Rank: 1, URL: "https://alpha.com/a", Title: "a", Snippet: "Ada wrote notes about engines alpha."},
+		{Rank: 2, URL: "https://bravo.net/b", Title: "b", Snippet: "Ada wrote notes about engines bravo."},
+		{Rank: 3, URL: "https://charlie.org/c", Title: "c", Snippet: "Ada wrote notes about engines charlie."},
+		{Rank: 4, URL: "https://delta.io/d", Title: "d", Snippet: "Ada wrote notes about engines delta."},
+		{Rank: 5, URL: "https://echo.dev/e", Title: "e", Snippet: "Ada wrote notes about engines echo."},
+	}}
+	artifacts := newFlakyTrustArtifactStub(defaultSearchEnrichmentSlots)
+	service, err := newService(provider, timeNowUTC,
+		WithReranker(identityTrustScorer()),
+		WithEnrichment(artifacts, &stubSearchReceiptSigner{token: "receipt"}),
+		WithTrustJudge(staticTrustJudge{verdict: eav.VerdictUncertain}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := service.Search(context.Background(), &models.SearchRequest{
+		Query:           "Ada engines",
+		Ranking:         models.SearchRankingTrust,
+		IncludeContent:  true,
+		ExpectedSubject: &models.SubjectSpec{Name: "Ada Lovelace"},
+	})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if response.Ranking == nil || response.Ranking.Mode != models.SearchRankingTrust {
+		t.Fatalf("ranking = %#v", response.Ranking)
+	}
+	if len(response.Results) < 2 {
+		t.Fatalf("results = %d, want the enrichment fan-out to stay concurrent", len(response.Results))
+	}
+	if retries := artifacts.retries(); retries < 2 {
+		t.Fatalf("memo retries = %d, want the enrichment workers to miss concurrently", retries)
+	}
+}
+
+// flakyTrustArtifactStub fails every URL's first fetch, so trust analysis
+// memoizes nothing and every enrichment worker misses. Retries then rendezvous
+// so their memo writes overlap instead of relying on scheduling luck.
+type flakyTrustArtifactStub struct {
+	gate    chan struct{}
+	width   int
+	mutex   sync.Mutex
+	seen    map[string]struct{}
+	waiting int
+	retried int
+}
+
+func newFlakyTrustArtifactStub(width int) *flakyTrustArtifactStub {
+	return &flakyTrustArtifactStub{gate: make(chan struct{}), width: width, seen: map[string]struct{}{}}
+}
+
+func (stub *flakyTrustArtifactStub) FetchPublicArtifact(_ context.Context, rawURL string) (*extract.Artifact, error) {
+	if stub.firstFetch(rawURL) {
+		return nil, errors.New("transient fetch failure")
+	}
+	stub.rendezvous()
+	return &extract.Artifact{
+		Public: &models.ScrapeResponse{FinalURL: rawURL, Content: trustStubContent + rawURL},
+		Source: &scraper.ScrapeResult{
+			FinalURL:   rawURL,
+			FetchedAt:  time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC),
+			SnapshotID: snapshot.ID("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		},
+	}, nil
+}
+
+func (stub *flakyTrustArtifactStub) firstFetch(rawURL string) bool {
+	stub.mutex.Lock()
+	defer stub.mutex.Unlock()
+	if _, ok := stub.seen[rawURL]; !ok {
+		stub.seen[rawURL] = struct{}{}
+		return true
+	}
+	stub.retried++
+	return false
+}
+
+// rendezvous releases every retry together once the fan-out is full. The
+// deadline keeps a narrower fan-out from blocking the test.
+func (stub *flakyTrustArtifactStub) rendezvous() {
+	stub.mutex.Lock()
+	stub.waiting++
+	full := stub.waiting >= stub.width
+	gate := stub.gate
+	stub.mutex.Unlock()
+	if full {
+		select {
+		case <-gate:
+		default:
+			close(gate)
+		}
+		return
+	}
+	select {
+	case <-gate:
+	case <-time.After(time.Second):
+	}
+}
+
+func (stub *flakyTrustArtifactStub) retries() int {
+	stub.mutex.Lock()
+	defer stub.mutex.Unlock()
+	return stub.retried
+}
+
+func (stub *flakyTrustArtifactStub) ExtractArtifact(context.Context, *extract.Artifact, *models.ExtractRequest) (*models.ExtractResponse, error) {
+	return &models.ExtractResponse{Success: true}, nil
+}
+
+const trustStubContent = "Ada wrote notes about engines alpha. Ada wrote notes about engines bravo. " +
+	"Ada wrote notes about engines charlie. Ada wrote notes about engines delta. " +
+	"Ada wrote notes about engines echo. body of "
