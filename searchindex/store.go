@@ -140,77 +140,8 @@ func HashContent(body string) string {
 // Upsert writes one page and keeps the matching FTS table in sync. A repeat
 // URL with the same content hash is a no-op.
 func (s *Store) Upsert(ctx context.Context, page Page) error {
-	if s == nil {
-		return ErrClosed
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	normalized, err := normalizePage(page)
-	if err != nil {
-		return err
-	}
-
-	s.gate.RLock()
-	defer s.gate.RUnlock()
-	if s.closed {
-		return ErrClosed
-	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("searchindex: begin upsert: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var existingID int64
-	var existingHash, existingLang, existingTitle, existingBody string
-	err = tx.QueryRowContext(ctx, `SELECT id, content_hash, lang, title, body FROM pages WHERE url = ?`, normalized.URL).
-		Scan(&existingID, &existingHash, &existingLang, &existingTitle, &existingBody)
-	switch {
-	case err == nil && existingHash == normalized.ContentHash:
-		return tx.Commit()
-	case err == nil:
-		if err := deleteFTS(ctx, tx, existingID, existingLang, existingTitle, existingBody); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE pages SET root=?, title=?, body=?, lang=?, fetched_at=?, content_hash=?, etag=?, last_mod=?, needs_render=?
-			WHERE id=?`,
-			normalized.Root, normalized.Title, normalized.Body, normalized.Lang, normalized.FetchedAt.Unix(),
-			normalized.ContentHash, normalized.ETag, normalized.LastMod, boolToInt(normalized.NeedsRender), existingID,
-		); err != nil {
-			return fmt.Errorf("searchindex: update page: %w", err)
-		}
-		if err := insertFTS(ctx, tx, existingID, normalized); err != nil {
-			return err
-		}
-	case errors.Is(err, sql.ErrNoRows):
-		result, execErr := tx.ExecContext(ctx, `
-			INSERT INTO pages(url, root, title, body, lang, fetched_at, content_hash, etag, last_mod, needs_render)
-			VALUES(?,?,?,?,?,?,?,?,?,?)`,
-			normalized.URL, normalized.Root, normalized.Title, normalized.Body, normalized.Lang, normalized.FetchedAt.Unix(),
-			normalized.ContentHash, normalized.ETag, normalized.LastMod, boolToInt(normalized.NeedsRender),
-		)
-		if execErr != nil {
-			return fmt.Errorf("searchindex: insert page: %w", execErr)
-		}
-		id, idErr := result.LastInsertId()
-		if idErr != nil {
-			return fmt.Errorf("searchindex: page id: %w", idErr)
-		}
-		if err := insertFTS(ctx, tx, id, normalized); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("searchindex: lookup page: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("searchindex: commit upsert: %w", err)
-	}
-	return nil
+	_, err := s.UpsertMany(ctx, []Page{page})
+	return err
 }
 
 // CountPages returns the number of stored pages.

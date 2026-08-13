@@ -58,6 +58,28 @@ func TestOpenRejectsEmptyPathAndClosedStore(t *testing.T) {
 	}
 }
 
+func TestUpsertManyWritesChangedPagesOnly(t *testing.T) {
+	store := openTestStore(t)
+	pages := []Page{
+		{URL: "https://example.com/a", Root: "example.com", Title: "A", Body: "alpha", Lang: LangEnglish},
+		{URL: "https://example.com/b", Root: "example.com", Title: "B", Body: "bravo", Lang: LangEnglish},
+	}
+	written, err := store.UpsertMany(context.Background(), pages)
+	if err != nil || written != 2 {
+		t.Fatalf("UpsertMany() = %d, %v", written, err)
+	}
+	written, err = store.UpsertMany(context.Background(), pages)
+	if err != nil || written != 0 {
+		t.Fatalf("duplicate UpsertMany() = %d, %v", written, err)
+	}
+	pages[1].Body = "bravo changed"
+	pages[1].ContentHash = ""
+	written, err = store.UpsertMany(context.Background(), pages)
+	if err != nil || written != 1 {
+		t.Fatalf("changed UpsertMany() = %d, %v", written, err)
+	}
+}
+
 func TestNormalizePageRequiresURLRootAndLang(t *testing.T) {
 	if _, err := normalizePage(Page{}); err == nil {
 		t.Fatal("empty page accepted")
