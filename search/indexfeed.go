@@ -27,8 +27,10 @@ const (
 // pages, so the index grows for free, and it grows where callers actually look
 // instead of where a crawl guessed.
 //
-// Feeding is off unless the operator enables it: the URLs a caller asked about
-// become searchable content, which is their decision to make, not ours.
+// The indexed pages are public web content owned by their publisher, not by the
+// caller, and canonicalPublicRoot rejects anything the public search path would
+// refuse. The residual exposure is the URL set rather than the content: an
+// index filling with one company's pages shows that someone is researching it.
 type IndexFeeder struct {
 	inner ArtifactService
 	store *searchindex.Store

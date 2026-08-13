@@ -123,9 +123,17 @@ func TestHealConfigDefaultsAndEnvironment(t *testing.T) {
 func TestSearchConfigDefaultsAndEnvironment(t *testing.T) {
 	t.Setenv("PURIFY_SEARCH_INDEX_PATH", "")
 	cfg := Load()
-	if cfg.Search != (SearchConfig{}) {
+	// Feeding served pages back into the index is on by default; an empty index
+	// path still leaves Search itself unavailable.
+	if cfg.Search != (SearchConfig{FeedIndex: true}) {
 		t.Fatalf("Search defaults = %#v", cfg.Search)
 	}
+
+	t.Setenv("PURIFY_SEARCH_INDEX_FEED", "false")
+	if cfg = Load(); cfg.Search.FeedIndex {
+		t.Fatal("PURIFY_SEARCH_INDEX_FEED=false did not disable feeding")
+	}
+	t.Setenv("PURIFY_SEARCH_INDEX_FEED", "")
 
 	t.Setenv("PURIFY_SEARCH_INDEX_PATH", " ./data/index.db ")
 	cfg = Load()
