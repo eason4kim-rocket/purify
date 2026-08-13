@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"unicode"
 
 	"github.com/go-ego/gse"
 )
@@ -15,11 +17,14 @@ var (
 	segmenterOnce sync.Once
 	segmenter     gse.Segmenter
 	segmenterErr  error
+
+	segmenterLoadedFlag atomic.Bool
 )
 
 func chineseSegmenter() (*gse.Segmenter, error) {
 	segmenterOnce.Do(func() {
 		segmenter, segmenterErr = gse.NewEmbed("zh_s")
+		segmenterLoadedFlag.Store(segmenterErr == nil)
 	})
 	if segmenterErr != nil {
 		return nil, fmt.Errorf("searchindex: load chinese dictionary: %w", segmenterErr)
@@ -46,6 +51,13 @@ func segmentFor(lang, text string, search bool) (string, error) {
 	if lang != LangChinese || strings.TrimSpace(text) == "" {
 		return text, nil
 	}
+	// Every query probes both language tables, so English text reaches this
+	// path routinely. Text with no Han characters has nothing to segment, and
+	// short-circuiting it here is what keeps an English-only deployment from
+	// ever loading the dictionary.
+	if !containsHan(text) {
+		return text, nil
+	}
 	seg, err := chineseSegmenter()
 	if err != nil {
 		// Falling back to another tokenizer here would leave the index holding
@@ -66,3 +78,17 @@ func segmentFor(lang, text string, search bool) (string, error) {
 	}
 	return strings.Join(kept, " "), nil
 }
+
+func containsHan(text string) bool {
+	for _, r := range text {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// segmenterLoaded reports whether the dictionary has been built. Reading the
+// flag must not touch segmenterOnce: calling Do would consume it and stop the
+// real loader from ever running.
+func segmenterLoaded() bool { return segmenterLoadedFlag.Load() }

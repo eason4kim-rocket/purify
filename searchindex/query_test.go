@@ -221,3 +221,24 @@ func TestQueryMatchesChineseCompoundParts(t *testing.T) {
 		t.Fatalf("cross-word fragment matched: %#v", spurious)
 	}
 }
+
+// TestEnglishQueryNeverLoadsChineseDictionary locks the lazy-load claim. Every
+// query probes both language tables, so without a Han short-circuit an
+// English-only deployment would still pay the dictionary's ~130 MB on its very
+// first query.
+func TestEnglishQueryNeverLoadsChineseDictionary(t *testing.T) {
+	if segmenterLoaded() {
+		t.Skip("another test in this package already built the dictionary")
+	}
+	store := openTestStore(t)
+	mustUpsert(t, store, Page{
+		URL: "https://example.com/go", Root: "example.com", Title: "Go scheduler",
+		Body: "the go scheduler multiplexes goroutines onto threads", Lang: LangEnglish, FetchedAt: time.Now(),
+	})
+	if _, err := store.Query(context.Background(), "goroutine scheduler threads", 5); err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if segmenterLoaded() {
+		t.Fatal("an English-only query loaded the Chinese dictionary")
+	}
+}
