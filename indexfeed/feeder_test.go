@@ -149,3 +149,30 @@ func (stub *runnerStub) Run(_ context.Context, request *models.ScrapeRequest, _ 
 		},
 	}, nil
 }
+
+// TestFeederFlushesWithoutAFullBatch locks the time-based flush. Batching on
+// count alone stranded pages until traffic happened to fill a batch — exactly
+// the early low-traffic case — and lost them on a crash.
+func TestFeederFlushesWithoutAFullBatch(t *testing.T) {
+	store := openTestStore(t)
+	feeder := newFeeder(&runnerStub{}, store, 20*time.Millisecond)
+	t.Cleanup(func() { _ = feeder.Close() })
+
+	if _, err := feeder.Run(context.Background(), &models.ScrapeRequest{URL: "https://example.com/one"}, nil); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		count, err := store.CountPages(context.Background())
+		if err != nil {
+			t.Fatalf("CountPages() error = %v", err)
+		}
+		if count == 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("one page never flushed on its own: count = %d", count)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/net/publicsuffix"
 
@@ -27,6 +28,8 @@ const (
 	batchSize  = 16
 	// minBodyBytes skips error pages and near-empty shells.
 	minBodyBytes = 200
+	// flushInterval bounds how long a fetched page waits for a full batch.
+	flushInterval = 5 * time.Second
 )
 
 // Runner is the canonical scrape boundary, matching extract.Runner and
@@ -49,6 +52,9 @@ type Feeder struct {
 	queue     chan searchindex.Page
 	closeOnce sync.Once
 	done      chan struct{}
+	// flushEvery is fixed at construction so the writer goroutine never races a
+	// caller mutating it.
+	flushEvery time.Duration
 }
 
 var _ Runner = (*Feeder)(nil)
@@ -59,11 +65,19 @@ func New(inner Runner, store *searchindex.Store) Runner {
 	if inner == nil || store == nil {
 		return inner
 	}
+	return newFeeder(inner, store, flushInterval)
+}
+
+func newFeeder(inner Runner, store *searchindex.Store, flushEvery time.Duration) *Feeder {
+	if flushEvery <= 0 {
+		flushEvery = flushInterval
+	}
 	feeder := &Feeder{
-		inner: inner,
-		store: store,
-		queue: make(chan searchindex.Page, queueDepth),
-		done:  make(chan struct{}),
+		inner:      inner,
+		store:      store,
+		queue:      make(chan searchindex.Page, queueDepth),
+		done:       make(chan struct{}),
+		flushEvery: flushEvery,
 	}
 	go feeder.drain()
 	return feeder
@@ -117,13 +131,26 @@ func (feeder *Feeder) drain() {
 		_, _ = feeder.store.UpsertMany(context.Background(), batch)
 		batch = batch[:0]
 	}
-	for page := range feeder.queue {
-		batch = append(batch, page)
-		if len(batch) >= batchSize {
+	// Batching on count alone would strand pages until traffic happened to fill
+	// a batch, which is exactly the early low-traffic case, and lose them on a
+	// crash. The ticker bounds how long a fetched page waits.
+	ticker := time.NewTicker(feeder.flushEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case page, open := <-feeder.queue:
+			if !open {
+				flush()
+				return
+			}
+			batch = append(batch, page)
+			if len(batch) >= batchSize {
+				flush()
+			}
+		case <-ticker.C:
 			flush()
 		}
 	}
-	flush()
 }
 
 // publicPage keeps only public, successful, substantive pages. A cache hit is
