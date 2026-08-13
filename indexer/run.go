@@ -34,6 +34,12 @@ type RunConfig struct {
 	MaxPages     int
 	MaxPerHost   int
 	AllowPrivate bool
+
+	// MaxFrontierPerHost caps a root's total frontier rows across runs so
+	// link discovery cannot let one site flood the queue. Zero derives a
+	// default from MaxPerHost; frontier rows outlive a single run's page
+	// budget, so the default leaves room beyond MaxPerHost.
+	MaxFrontierPerHost int
 }
 
 // Stats is a coarse run summary.
@@ -65,6 +71,9 @@ func Run(ctx context.Context, store *searchindex.Store, fetcher *Fetcher, discov
 	}
 	if cfg.MaxPerHost <= 0 {
 		cfg.MaxPerHost = defaultMaxPerHost
+	}
+	if cfg.MaxFrontierPerHost <= 0 {
+		cfg.MaxFrontierPerHost = 2 * cfg.MaxPerHost
 	}
 
 	// A killed run leaves its in-flight URLs leased, and Lease refuses every
@@ -143,21 +152,22 @@ func (r *runState) work(ctx context.Context) {
 			return
 		}
 		if !ok {
-			// Every remaining host may simply be leased by a peer. Discovery
-			// only runs before the workers start, so a drained frontier stays
-			// drained and one backoff is enough to tell the two apart.
+			// An empty lease is not the end of the crawl: every leasable root
+			// may be held by a peer, and a peer's in-flight page can enqueue
+			// links that refill the frontier. Only a frontier with neither
+			// pending nor leased rows is truly drained.
+			active, activeErr := r.store.ActiveFrontier(ctx)
+			if activeErr != nil {
+				r.fail(activeErr)
+				return
+			}
+			if active == 0 {
+				return
+			}
 			if !sleepContext(ctx, emptyLeaseBackoff) {
 				return
 			}
-			retried, retriedOK, retryErr := r.store.Lease(ctx, time.Now())
-			if retryErr != nil {
-				r.fail(retryErr)
-				return
-			}
-			if !retriedOK {
-				return
-			}
-			item = retried
+			continue
 		}
 		r.process(ctx, item)
 	}
@@ -179,7 +189,7 @@ func (r *runState) process(ctx context.Context, item searchindex.FrontierItem) {
 		return
 	}
 
-	page, fetchErr := indexOne(ctx, r.fetcher, r.pipeline, item, r.cfg.AllowPrivate)
+	page, links, fetchErr := indexOne(ctx, r.fetcher, r.pipeline, item, r.cfg.AllowPrivate)
 	switch {
 	case errors.Is(fetchErr, ErrNotModified):
 		r.countSkipped()
@@ -191,6 +201,14 @@ func (r *runState) process(ctx context.Context, item searchindex.FrontierItem) {
 		return
 	}
 	_ = r.store.Complete(ctx, item.URL)
+	if len(links) > 0 {
+		grown, growErr := r.store.EnqueueBounded(ctx, links, r.cfg.MaxFrontierPerHost)
+		if growErr != nil {
+			r.fail(growErr)
+			return
+		}
+		r.countDiscovered(grown)
+	}
 	if r.append(item.Root, page) {
 		if err := r.flush(ctx); err != nil {
 			r.fail(err)
@@ -305,9 +323,10 @@ func (r *runState) snapshot() Stats {
 	return r.stats
 }
 
-func (r *runState) countRobotsDeny() { r.mu.Lock(); r.stats.RobotsDeny++; r.mu.Unlock() }
-func (r *runState) countFailed()     { r.mu.Lock(); r.stats.Failed++; r.mu.Unlock() }
-func (r *runState) countSkipped()    { r.mu.Lock(); r.stats.Skipped304++; r.mu.Unlock() }
+func (r *runState) countRobotsDeny()      { r.mu.Lock(); r.stats.RobotsDeny++; r.mu.Unlock() }
+func (r *runState) countFailed()          { r.mu.Lock(); r.stats.Failed++; r.mu.Unlock() }
+func (r *runState) countSkipped()         { r.mu.Lock(); r.stats.Skipped304++; r.mu.Unlock() }
+func (r *runState) countDiscovered(n int) { r.mu.Lock(); r.stats.Discovered += n; r.mu.Unlock() }
 
 func sleepContext(ctx context.Context, wait time.Duration) bool {
 	timer := time.NewTimer(wait)
@@ -320,10 +339,10 @@ func sleepContext(ctx context.Context, wait time.Duration) bool {
 	}
 }
 
-func indexOne(ctx context.Context, fetcher *Fetcher, pipeline *cleaner.Cleaner, item searchindex.FrontierItem, allowPrivate bool) (searchindex.Page, error) {
+func indexOne(ctx context.Context, fetcher *Fetcher, pipeline *cleaner.Cleaner, item searchindex.FrontierItem, allowPrivate bool) (searchindex.Page, []searchindex.FrontierItem, error) {
 	fetched, err := fetcher.Get(ctx, item.URL, "", "")
 	if err != nil {
-		return searchindex.Page{}, err
+		return searchindex.Page{}, nil, err
 	}
 	cleaned, cleanErr := pipeline.Clean(string(fetched.Body), fetched.URL, "text", "auto")
 	title, body := "", ""
@@ -338,10 +357,14 @@ func indexOne(ctx context.Context, fetcher *Fetcher, pipeline *cleaner.Cleaner, 
 	if err != nil {
 		canonical, root = item.URL, item.Root
 	}
+	// Links come from the raw markup: a page too script-heavy to clean still
+	// names its neighbors, and those anchors are how sitemap-less sites get
+	// any coverage past their front page.
+	links := collectLinks(string(fetched.Body), fetched.URL, root, allowPrivate)
 	lang := searchindex.DetectLanguage(title + " " + body)
 	return searchindex.Page{
 		URL: canonical, Root: root, Title: title, Body: body, Lang: lang,
 		FetchedAt: fetched.FetchedAt, ETag: fetched.ETag, LastMod: fetched.LastMod,
 		NeedsRender: NeedsRender(body),
-	}, nil
+	}, links, nil
 }
