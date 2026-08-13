@@ -67,6 +67,11 @@ func Run(ctx context.Context, store *searchindex.Store, fetcher *Fetcher, discov
 		cfg.MaxPerHost = defaultMaxPerHost
 	}
 
+	// A killed run leaves its in-flight URLs leased, and Lease refuses every
+	// root with a leased row, so reclaim them before this run starts.
+	if _, err := store.ReleaseStaleLeases(ctx); err != nil {
+		return Stats{}, err
+	}
 	discovered, err := SeedFrontier(ctx, store, discoverer, seeds, cfg.AllowPrivate)
 	if err != nil {
 		return Stats{}, err

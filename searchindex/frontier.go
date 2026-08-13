@@ -120,6 +120,33 @@ func (s *Store) Lease(ctx context.Context, now time.Time) (FrontierItem, bool, e
 	return item, true, nil
 }
 
+// ReleaseStaleLeases returns every leased row to pending. Leases carry no
+// expiry, so rows left behind by a killed crawler block their root forever —
+// and when the remaining pending URLs cluster on a few slow hosts, two stale
+// rows are enough to make a full frontier look drained. One crawler owns a
+// database at a time, so at startup every surviving lease is stale.
+func (s *Store) ReleaseStaleLeases(ctx context.Context) (int, error) {
+	if err := s.guard(ctx); err != nil {
+		return 0, err
+	}
+	s.gate.RLock()
+	defer s.gate.RUnlock()
+	if s.closed {
+		return 0, ErrClosed
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE frontier SET state=?, leased_at=0 WHERE state=?`,
+		FrontierPending, FrontierLeased,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("searchindex: release stale leases: %w", err)
+	}
+	released, _ := result.RowsAffected()
+	return int(released), nil
+}
+
 // Complete marks a leased URL done.
 func (s *Store) Complete(ctx context.Context, rawURL string) error {
 	return s.setFrontierState(ctx, rawURL, FrontierDone)

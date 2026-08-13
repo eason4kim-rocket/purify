@@ -40,6 +40,39 @@ func TestFrontierLeaseOneRootAtATimeAndCompletes(t *testing.T) {
 	}
 }
 
+// TestFrontierReleaseStaleLeasesUnblocksTheRoot locks crash recovery: a killed
+// crawler leaves rows in "leased" forever, and because Lease refuses any root
+// with a leased row, a handful of stale leases can block every pending URL of
+// the slow-host tail and make a full frontier look drained.
+func TestFrontierReleaseStaleLeasesUnblocksTheRoot(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Unix(1_700_000_100, 0)
+	if _, err := store.Enqueue(context.Background(), []FrontierItem{
+		{URL: "https://a.example/1", Root: "example"},
+		{URL: "https://a.example/2", Root: "example"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.Lease(context.Background(), now); err != nil || !ok {
+		t.Fatalf("Lease() = %v, %v", ok, err)
+	}
+	// The crawler dies here; its lease survives in the table.
+	if _, ok, err := store.Lease(context.Background(), now); err != nil || ok {
+		t.Fatalf("blocked root leased anyway: %v, %v", ok, err)
+	}
+	released, err := store.ReleaseStaleLeases(context.Background())
+	if err != nil || released != 1 {
+		t.Fatalf("ReleaseStaleLeases() = %d, %v", released, err)
+	}
+	item, ok, err := store.Lease(context.Background(), now)
+	if err != nil || !ok {
+		t.Fatalf("Lease() after release = %v, %v", ok, err)
+	}
+	if item.Root != "example" {
+		t.Fatalf("released root not leasable: %#v", item)
+	}
+}
+
 func TestFrontierFailRetriesThenGivesUp(t *testing.T) {
 	store := openTestStore(t)
 	if _, err := store.Enqueue(context.Background(), []FrontierItem{{URL: "https://a.example/", Root: "example"}}); err != nil {
