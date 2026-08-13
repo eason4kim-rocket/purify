@@ -23,6 +23,7 @@ func SeedFrontier(ctx context.Context, store *searchindex.Store, discoverer Disc
 		return 0, fmt.Errorf("indexer: store and discoverer are required")
 	}
 	inserted := 0
+	seedCanonicals := make([]string, 0, len(seeds))
 	for _, seed := range seeds {
 		if err := ctx.Err(); err != nil {
 			return inserted, err
@@ -40,6 +41,9 @@ func SeedFrontier(ctx context.Context, store *searchindex.Store, discoverer Disc
 			if foreignLocalePath(canonical) {
 				continue
 			}
+			if rawURL == seed {
+				seedCanonicals = append(seedCanonicals, canonical)
+			}
 			items = append(items, searchindex.FrontierItem{URL: canonical, Root: root})
 		}
 		n, enqueueErr := store.Enqueue(ctx, items)
@@ -47,6 +51,13 @@ func SeedFrontier(ctx context.Context, store *searchindex.Store, discoverer Disc
 			return inserted, enqueueErr
 		}
 		inserted += n
+	}
+	// On a frontier drained by earlier runs every seed row is already done,
+	// so nothing would ever be fetched and in-crawl link discovery could not
+	// start. Refetching the seed pages each run restarts the cascade and
+	// picks up links the front pages gained since.
+	if _, err := store.Requeue(ctx, seedCanonicals); err != nil {
+		return inserted, err
 	}
 	return inserted, nil
 }

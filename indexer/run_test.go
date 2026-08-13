@@ -131,6 +131,54 @@ func TestRunGrowsFrontierFromFetchedPages(t *testing.T) {
 	}
 }
 
+// TestRunRefetchesSeedsOnDrainedFrontier locks the discovery bootstrap: after
+// earlier runs close every row, a crawl used to end instantly with nothing to
+// lease, so link discovery never saw a page. Seeds must reopen each run.
+func TestRunRefetchesSeedsOnDrainedFrontier(t *testing.T) {
+	filler := strings.Repeat("indexable words ", 40)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/" {
+			_, _ = io.WriteString(writer, `<html><title>root</title><body>`+filler+`<a href="/n1">n</a></body></html>`)
+			return
+		}
+		_, _ = io.WriteString(writer, `<html><title>leaf</title><body>`+filler+`</body></html>`)
+	}))
+	t.Cleanup(server.Close)
+
+	store, err := searchindex.Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// An earlier run left the seed row closed.
+	seedURL := server.URL + "/"
+	if _, err := store.Enqueue(context.Background(), []searchindex.FrontierItem{{URL: seedURL, Root: "127.0.0.1"}}); err != nil {
+		t.Fatal(err)
+	}
+	leased, ok, err := store.Lease(context.Background(), time.Now())
+	if err != nil || !ok {
+		t.Fatal(err, ok)
+	}
+	if err := store.Complete(context.Background(), leased.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	fetcher, err := NewFetcher(FetcherConfig{AllowPrivateNetworks: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := Run(context.Background(), store, fetcher, stubDiscoverer{}, []string{seedURL}, RunConfig{
+		Workers: 1, BatchSize: 2, MaxPages: 10, AllowPrivate: true,
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if stats.Indexed != 2 {
+		t.Fatalf("stats = %#v, want the reopened seed and its discovered link indexed", stats)
+	}
+}
+
 // TestRunStopsGrowingAtTheFrontierBudget locks the guardrail end to end: once
 // a root's frontier rows reach MaxFrontierPerHost, fetched pages stop adding
 // links for it.

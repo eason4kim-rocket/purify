@@ -98,6 +98,54 @@ func (s *Store) enqueue(ctx context.Context, items []FrontierItem, perRootBudget
 	return inserted, nil
 }
 
+// Requeue returns the named done or failed rows to pending so they get
+// fetched again. On a frontier drained by earlier runs every row is closed,
+// no page is ever refetched, and in-crawl link discovery has nothing to grow
+// from; requeuing the seed pages restarts the cascade. Pending and leased
+// rows, and URLs with no row at all, are left untouched.
+func (s *Store) Requeue(ctx context.Context, urls []string) (int, error) {
+	if err := s.guard(ctx); err != nil {
+		return 0, err
+	}
+	if len(urls) == 0 {
+		return 0, nil
+	}
+	s.gate.RLock()
+	defer s.gate.RUnlock()
+	if s.closed {
+		return 0, ErrClosed
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("searchindex: begin requeue: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	reopened := 0
+	for _, rawURL := range urls {
+		rawURL = strings.TrimSpace(rawURL)
+		if rawURL == "" {
+			continue
+		}
+		result, execErr := tx.ExecContext(ctx, `
+			UPDATE frontier SET state=?, leased_at=0, attempts=0
+			WHERE url=? AND state IN (?, ?)`,
+			FrontierPending, rawURL, FrontierDone, FrontierFailed,
+		)
+		if execErr != nil {
+			return 0, fmt.Errorf("searchindex: requeue: %w", execErr)
+		}
+		affected, _ := result.RowsAffected()
+		reopened += int(affected)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("searchindex: commit requeue: %w", err)
+	}
+	return reopened, nil
+}
+
 // ActiveFrontier counts pending and leased rows. Link discovery lets an
 // in-flight page refill an empty frontier, so a crawler may only stop when
 // this count reaches zero.

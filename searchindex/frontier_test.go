@@ -169,6 +169,56 @@ func TestActiveFrontierCountsPendingAndLeased(t *testing.T) {
 	}
 }
 
+// TestRequeueReopensFinishedRows locks the link-discovery bootstrap: on a
+// frontier drained by earlier runs every seed row is done, no page is ever
+// fetched again, and in-crawl discovery has no page to grow from. Requeue
+// returns named URLs to pending so the seeds get refetched and remined.
+func TestRequeueReopensFinishedRows(t *testing.T) {
+	store := openTestStore(t)
+	if _, err := store.Enqueue(context.Background(), []FrontierItem{
+		{URL: "https://a.example/", Root: "example"},
+		{URL: "https://a.example/deep", Root: "example"},
+		{URL: "https://b.example/", Root: "b.example"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_100, 0)
+	item, ok, err := store.Lease(context.Background(), now)
+	if err != nil || !ok {
+		t.Fatal(err, ok)
+	}
+	if err := store.Complete(context.Background(), item.URL); err != nil {
+		t.Fatal(err)
+	}
+	// Occupy a.example/deep so the next lease reaches b.example, then exhaust
+	// b.example into the failed state.
+	deep, ok, err := store.Lease(context.Background(), now)
+	if err != nil || !ok || deep.URL != "https://a.example/deep" {
+		t.Fatalf("Lease() = %#v, %v, %v", deep, ok, err)
+	}
+	leased, ok, err := store.Lease(context.Background(), now)
+	if err != nil || !ok || leased.URL != "https://b.example/" {
+		t.Fatalf("Lease() = %#v, %v, %v", leased, ok, err)
+	}
+	if err := store.Fail(context.Background(), "https://b.example/", 1); err != nil {
+		t.Fatal(err)
+	}
+	// Reopen the done and failed rows; the unknown URL is a no-op and the
+	// in-flight a.example/deep lease stays untouched.
+	requeued, err := store.Requeue(context.Background(), []string{
+		item.URL, "https://b.example/", "https://missing.example/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requeued != 2 {
+		t.Fatalf("Requeue() = %d, want the done and failed rows reopened", requeued)
+	}
+	if active, err := store.ActiveFrontier(context.Background()); err != nil || active != 3 {
+		t.Fatalf("ActiveFrontier() after requeue = %d, %v, want all 3 rows open", active, err)
+	}
+}
+
 func frontierHas(t *testing.T, store *Store, url string) bool {
 	t.Helper()
 	var one int
