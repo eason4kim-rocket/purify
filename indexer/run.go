@@ -46,6 +46,11 @@ type RunConfig struct {
 	// in-crawl link discovery never mined their fetched pages, so those
 	// roots cannot grow until their pages are refetched. Zero disables it.
 	ReopenStarvedBelow int
+
+	// PruneFrontier drops pending rows the current admission rules reject
+	// before the crawl starts, so a queue built under older, leakier rules
+	// stops spending fetch budget on known junk.
+	PruneFrontier bool
 }
 
 // Stats is a coarse run summary.
@@ -94,6 +99,13 @@ func Run(ctx context.Context, store *searchindex.Store, fetcher *Fetcher, discov
 	}
 	if cfg.ReopenStarvedBelow > 0 {
 		if _, err := store.RequeueStarvedRoots(ctx, cfg.ReopenStarvedBelow); err != nil {
+			return Stats{}, err
+		}
+	}
+	// Pruning runs last so seed discovery and reopened rows are held to the
+	// same admission rules as everything already queued.
+	if cfg.PruneFrontier {
+		if _, err := store.PrunePending(ctx, junkURL); err != nil {
 			return Stats{}, err
 		}
 	}

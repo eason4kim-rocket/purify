@@ -181,6 +181,71 @@ func (s *Store) RequeueStarvedRoots(ctx context.Context, maxRows int) (int, erro
 	return int(reopened), nil
 }
 
+// PrunePending deletes pending rows the caller's predicate marks as junk.
+// Admission rules tighten as crawls reveal new trap shapes, and a queue
+// built under the old rules would otherwise spend real fetch budget on URLs
+// the crawler would no longer admit. Done, failed, and leased rows carry
+// history or in-flight work and are kept.
+func (s *Store) PrunePending(ctx context.Context, junk func(url string) bool) (int, error) {
+	if err := s.guard(ctx); err != nil {
+		return 0, err
+	}
+	if junk == nil {
+		return 0, nil
+	}
+	s.gate.RLock()
+	defer s.gate.RUnlock()
+	if s.closed {
+		return 0, ErrClosed
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	rows, err := s.db.QueryContext(ctx, `SELECT url FROM frontier WHERE state = ?`, FrontierPending)
+	if err != nil {
+		return 0, fmt.Errorf("searchindex: scan pending: %w", err)
+	}
+	var doomed []string
+	for rows.Next() {
+		var pendingURL string
+		if err := rows.Scan(&pendingURL); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("searchindex: scan pending: %w", err)
+		}
+		if junk(pendingURL) {
+			doomed = append(doomed, pendingURL)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, fmt.Errorf("searchindex: scan pending: %w", err)
+	}
+	_ = rows.Close()
+	if len(doomed) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("searchindex: begin prune: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	pruned := 0
+	for _, doomedURL := range doomed {
+		result, execErr := tx.ExecContext(ctx,
+			`DELETE FROM frontier WHERE url = ? AND state = ?`, doomedURL, FrontierPending)
+		if execErr != nil {
+			return 0, fmt.Errorf("searchindex: prune: %w", execErr)
+		}
+		affected, _ := result.RowsAffected()
+		pruned += int(affected)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("searchindex: commit prune: %w", err)
+	}
+	return pruned, nil
+}
+
 // ActiveFrontier counts pending and leased rows. Link discovery lets an
 // in-flight page refill an empty frontier, so a crawler may only stop when
 // this count reaches zero.

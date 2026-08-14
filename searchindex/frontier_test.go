@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -261,6 +262,54 @@ func TestRequeueReopensFinishedRows(t *testing.T) {
 	}
 	if active, err := store.ActiveFrontier(context.Background()); err != nil || active != 3 {
 		t.Fatalf("ActiveFrontier() after requeue = %d, %v, want all 3 rows open", active, err)
+	}
+}
+
+// TestPrunePendingDeletesJunkPendingRowsOnly locks queue hygiene: admission
+// rules tighten between runs, and a frontier built under the old rules must
+// shed the URLs the crawler would no longer admit without touching history
+// (done rows) or in-flight work (leased rows).
+func TestPrunePendingDeletesJunkPendingRowsOnly(t *testing.T) {
+	store := openTestStore(t)
+	if _, err := store.Enqueue(context.Background(), []FrontierItem{
+		{URL: "https://a.example/keep", Root: "example"},
+		{URL: "https://a.example/junk-pending", Root: "example"},
+		{URL: "https://b.example/junk-done", Root: "b.example"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Close the b.example row so its junk URL is protected as history.
+	for {
+		item, ok, err := store.Lease(context.Background(), time.Unix(1_700_000_100, 0))
+		if err != nil || !ok {
+			t.Fatal(err, ok)
+		}
+		if item.Root == "b.example" {
+			if err := store.Complete(context.Background(), item.URL); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+		if err := store.Fail(context.Background(), item.URL, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pruned, err := store.PrunePending(context.Background(), func(url string) bool {
+		return strings.Contains(url, "junk")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pruned != 1 {
+		t.Fatalf("PrunePending() = %d, want only the pending junk row", pruned)
+	}
+	if frontierHas(t, store, "https://a.example/junk-pending") {
+		t.Fatal("pending junk row survived the prune")
+	}
+	for _, keep := range []string{"https://a.example/keep", "https://b.example/junk-done"} {
+		if !frontierHas(t, store, keep) {
+			t.Fatalf("prune deleted %s", keep)
+		}
 	}
 }
 
