@@ -38,7 +38,7 @@ func SeedFrontier(ctx context.Context, store *searchindex.Store, discoverer Disc
 			if normErr != nil {
 				continue
 			}
-			if foreignLocalePath(canonical) {
+			if junkURL(canonical) {
 				continue
 			}
 			if rawURL == seed {
