@@ -116,6 +116,46 @@ func TestFrontierLeaseDoesNotStarveLaterSortingRoots(t *testing.T) {
 	t.Fatal("late-sorting root was never leased in 40 picks")
 }
 
+// TestFrontierLeasePreferredWinsURLOrderAndKeepsOneLeasePerRoot locks the
+// operator escape hatch for deep evaluation targets. Preferred URLs must jump
+// ahead of ordinary lexicographic order, but they may not bypass the existing
+// one-in-flight lease boundary for a registrable domain.
+func TestFrontierLeasePreferredWinsURLOrderAndKeepsOneLeasePerRoot(t *testing.T) {
+	store := openTestStore(t)
+	items := []FrontierItem{
+		{URL: "https://a.example/000-ordinary", Root: "a.example"},
+		{URL: "https://a.example/zzz-preferred", Root: "a.example"},
+		{URL: "https://b.example/zzz-preferred", Root: "b.example"},
+		{URL: "https://c.example/000-ordinary", Root: "c.example"},
+	}
+	if _, err := store.Enqueue(context.Background(), items); err != nil {
+		t.Fatal(err)
+	}
+	preferred := []string{
+		"https://a.example/zzz-preferred",
+		"https://b.example/zzz-preferred",
+	}
+	now := time.Unix(1_700_000_100, 0)
+	first, ok, err := store.LeasePreferred(context.Background(), preferred, now)
+	if err != nil || !ok || first.URL != preferred[0] {
+		t.Fatalf("first LeasePreferred() = %#v, %v, %v", first, ok, err)
+	}
+	second, ok, err := store.LeasePreferred(context.Background(), preferred, now)
+	if err != nil || !ok || second.URL != preferred[1] {
+		t.Fatalf("second LeasePreferred() = %#v, %v, %v", second, ok, err)
+	}
+	if first.Root == second.Root {
+		t.Fatalf("preferred leases shared one root: %#v %#v", first, second)
+	}
+	if _, ok, err := store.LeasePreferred(context.Background(), preferred, now); err != nil || ok {
+		t.Fatalf("third LeasePreferred() = ok %v, err %v, want no available preferred root", ok, err)
+	}
+	ordinary, ok, err := store.Lease(context.Background(), now)
+	if err != nil || !ok || ordinary.Root != "c.example" {
+		t.Fatalf("ordinary Lease() while preferred roots are held = %#v, %v, %v", ordinary, ok, err)
+	}
+}
+
 // TestEnqueueBoundedStopsAtThePerRootBudget locks the growth guardrail: link
 // discovery feeds the frontier while the crawl runs, so without a per-root
 // budget one heavily linked host could flood the table and starve every other

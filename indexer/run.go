@@ -35,6 +35,11 @@ type RunConfig struct {
 	MaxPerHost   int
 	AllowPrivate bool
 
+	// PriorityURLs are exact operator-selected pages to lease before the
+	// ordinary frontier. They still obey root concurrency, robots, crawl delay,
+	// retry, content, and per-host limits.
+	PriorityURLs []string
+
 	// MaxFrontierPerHost caps a root's total frontier rows across runs so
 	// link discovery cannot let one site flood the queue. Zero derives a
 	// default from MaxPerHost; frontier rows outlive a single run's page
@@ -109,15 +114,20 @@ func Run(ctx context.Context, store *searchindex.Store, fetcher *Fetcher, discov
 			return Stats{}, err
 		}
 	}
+	priorityURLs, priorityDiscovered, err := PreparePriorityFrontier(ctx, store, cfg.PriorityURLs, cfg.AllowPrivate)
+	if err != nil {
+		return Stats{}, err
+	}
 	run := &runState{
-		store:     store,
-		fetcher:   fetcher,
-		cfg:       cfg,
-		pipeline:  cleaner.NewCleaner(),
-		stats:     Stats{Discovered: discovered},
-		hostCount: map[string]int{},
-		lastFetch: map[string]time.Time{},
-		robots:    map[string]robotsEntry{},
+		store:        store,
+		fetcher:      fetcher,
+		cfg:          cfg,
+		pipeline:     cleaner.NewCleaner(),
+		priorityURLs: priorityURLs,
+		stats:        Stats{Discovered: discovered + priorityDiscovered},
+		hostCount:    map[string]int{},
+		lastFetch:    map[string]time.Time{},
+		robots:       map[string]robotsEntry{},
 	}
 
 	// Lease already refuses a URL whose registrable domain has another leased
@@ -145,10 +155,11 @@ func Run(ctx context.Context, store *searchindex.Store, fetcher *Fetcher, discov
 // runState is the shared crawl state. Every field below mu is guarded; network
 // and cleaning work always happens with mu released.
 type runState struct {
-	store    *searchindex.Store
-	fetcher  *Fetcher
-	cfg      RunConfig
-	pipeline *cleaner.Cleaner
+	store        *searchindex.Store
+	fetcher      *Fetcher
+	cfg          RunConfig
+	pipeline     *cleaner.Cleaner
+	priorityURLs []string
 
 	mu        sync.Mutex
 	stats     Stats
@@ -170,7 +181,7 @@ func (r *runState) work(ctx context.Context) {
 		if ctx.Err() != nil || r.done() {
 			return
 		}
-		item, ok, leaseErr := r.store.Lease(ctx, time.Now())
+		item, ok, leaseErr := r.lease(ctx, time.Now())
 		if leaseErr != nil {
 			r.fail(leaseErr)
 			return
@@ -195,6 +206,16 @@ func (r *runState) work(ctx context.Context) {
 		}
 		r.process(ctx, item)
 	}
+}
+
+func (r *runState) lease(ctx context.Context, now time.Time) (searchindex.FrontierItem, bool, error) {
+	if len(r.priorityURLs) > 0 {
+		item, ok, err := r.store.LeasePreferred(ctx, r.priorityURLs, now)
+		if err != nil || ok {
+			return item, ok, err
+		}
+	}
+	return r.store.Lease(ctx, now)
 }
 
 func (r *runState) process(ctx context.Context, item searchindex.FrontierItem) {

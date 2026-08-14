@@ -14,6 +14,10 @@ const (
 	FrontierLeased  = "leased"
 	FrontierDone    = "done"
 	FrontierFailed  = "failed"
+
+	// MaxPreferredLeaseURLs bounds the operator-owned exact URL list used to
+	// jump deep evaluation targets ahead of one root's lexicographic queue.
+	MaxPreferredLeaseURLs = 256
 )
 
 // FrontierItem is one URL in the crawl queue.
@@ -319,6 +323,94 @@ func (s *Store) Lease(ctx context.Context, now time.Time) (FrontierItem, bool, e
 		FrontierLeased, now.Unix(), item.URL,
 	); err != nil {
 		return FrontierItem{}, false, fmt.Errorf("searchindex: lease frontier: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return FrontierItem{}, false, err
+	}
+	item.State = FrontierLeased
+	item.LeasedAt = now.Unix()
+	item.Attempts++
+	return item, true, nil
+}
+
+// LeasePreferred claims the first pending URL in preferredURLs whose root is
+// not already leased. It changes only selection order: the returned row uses
+// the same lease state and one-in-flight-per-root boundary as Lease. Callers
+// should fall back to Lease when no preferred URL is currently available.
+func (s *Store) LeasePreferred(ctx context.Context, preferredURLs []string, now time.Time) (FrontierItem, bool, error) {
+	if err := s.guard(ctx); err != nil {
+		return FrontierItem{}, false, err
+	}
+	if len(preferredURLs) > MaxPreferredLeaseURLs {
+		return FrontierItem{}, false, fmt.Errorf("%w: too many preferred lease URLs", ErrInvalidConfig)
+	}
+	cleaned := make([]string, 0, len(preferredURLs))
+	seen := make(map[string]struct{}, len(preferredURLs))
+	for _, rawURL := range preferredURLs {
+		rawURL = strings.TrimSpace(rawURL)
+		if rawURL == "" {
+			continue
+		}
+		if _, exists := seen[rawURL]; exists {
+			continue
+		}
+		seen[rawURL] = struct{}{}
+		cleaned = append(cleaned, rawURL)
+	}
+	if len(cleaned) == 0 {
+		return FrontierItem{}, false, nil
+	}
+
+	s.gate.RLock()
+	defer s.gate.RUnlock()
+	if s.closed {
+		return FrontierItem{}, false, ErrClosed
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return FrontierItem{}, false, fmt.Errorf("searchindex: begin preferred lease: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var query strings.Builder
+	query.WriteString("WITH preferred(url, priority) AS (VALUES ")
+	args := make([]any, 0, len(cleaned)*2+2)
+	for index, rawURL := range cleaned {
+		if index > 0 {
+			query.WriteByte(',')
+		}
+		query.WriteString("(?,?)")
+		args = append(args, rawURL, index)
+	}
+	query.WriteString(`)
+		SELECT f.url, f.root, f.attempts
+		FROM preferred p JOIN frontier f ON f.url = p.url
+		WHERE f.state = ?
+		  AND NOT EXISTS (
+			SELECT 1 FROM frontier active
+			WHERE active.root = f.root AND active.state = ?)
+		ORDER BY p.priority LIMIT 1`)
+	args = append(args, FrontierPending, FrontierLeased)
+
+	var item FrontierItem
+	err = tx.QueryRowContext(ctx, query.String(), args...).Scan(&item.URL, &item.Root, &item.Attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		if commitErr := tx.Commit(); commitErr != nil {
+			return FrontierItem{}, false, commitErr
+		}
+		return FrontierItem{}, false, nil
+	}
+	if err != nil {
+		return FrontierItem{}, false, fmt.Errorf("searchindex: pick preferred frontier: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE frontier SET state=?, leased_at=?, attempts=attempts+1 WHERE url=?`,
+		FrontierLeased, now.Unix(), item.URL,
+	); err != nil {
+		return FrontierItem{}, false, fmt.Errorf("searchindex: lease preferred frontier: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return FrontierItem{}, false, err

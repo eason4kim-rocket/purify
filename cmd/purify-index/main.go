@@ -15,6 +15,7 @@ import (
 
 func main() {
 	seedsPath := flag.String("seeds", "", "JSON array of seed URLs")
+	priorityURLsPath := flag.String("priority-urls", "", "optional JSON array of exact URLs to lease first")
 	outPath := flag.String("out", "./data/index.db", "index database path")
 	maxPages := flag.Int("max-pages", 500, "stop after this many indexed pages")
 	maxPerHost := flag.Int("max-per-host", 10000, "per-domain page cap")
@@ -26,19 +27,26 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, *seedsPath, *outPath, *maxPages, *maxPerHost, *maxFrontierPerHost, *reopenStarved, *pruneFrontier, *allowPrivate); err != nil {
+	if err := run(ctx, *seedsPath, *priorityURLsPath, *outPath, *maxPages, *maxPerHost, *maxFrontierPerHost, *reopenStarved, *pruneFrontier, *allowPrivate); err != nil {
 		fmt.Fprintf(os.Stderr, "purify-index: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, seedsPath, outPath string, maxPages, maxPerHost, maxFrontierPerHost, reopenStarved int, pruneFrontier, allowPrivate bool) error {
+func run(ctx context.Context, seedsPath, priorityURLsPath, outPath string, maxPages, maxPerHost, maxFrontierPerHost, reopenStarved int, pruneFrontier, allowPrivate bool) error {
 	if seedsPath == "" {
 		return fmt.Errorf("-seeds is required")
 	}
 	seeds, err := indexer.LoadSeeds(seedsPath)
 	if err != nil {
 		return err
+	}
+	var priorityURLs []string
+	if priorityURLsPath != "" {
+		priorityURLs, err = indexer.LoadPriorityURLs(priorityURLsPath)
+		if err != nil {
+			return err
+		}
 	}
 	store, err := searchindex.Open(outPath)
 	if err != nil {
@@ -61,7 +69,7 @@ func run(ctx context.Context, seedsPath, outPath string, maxPages, maxPerHost, m
 		MaxPages: maxPages, MaxPerHost: maxPerHost,
 		MaxFrontierPerHost: maxFrontierPerHost,
 		ReopenStarvedBelow: reopenStarved, PruneFrontier: pruneFrontier,
-		AllowPrivate: allowPrivate,
+		AllowPrivate: allowPrivate, PriorityURLs: priorityURLs,
 	})
 	if err != nil {
 		return err

@@ -131,6 +131,62 @@ func TestRunGrowsFrontierFromFetchedPages(t *testing.T) {
 	}
 }
 
+// TestRunIndexesPreferredURLBeforeLexicographicFrontier locks the targeted
+// recovery path: a deep exact URL must be fetched before thousands of earlier
+// same-root rows, then the runner may fall back to its ordinary frontier.
+func TestRunIndexesPreferredURLBeforeLexicographicFrontier(t *testing.T) {
+	filler := strings.Repeat("indexable words ", 40)
+	var mu sync.Mutex
+	var fetched []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/robots.txt" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		mu.Lock()
+		fetched = append(fetched, request.URL.Path)
+		mu.Unlock()
+		_, _ = io.WriteString(writer, `<html><title>`+request.URL.Path+`</title><body>`+filler+`</body></html>`)
+	}))
+	t.Cleanup(server.Close)
+
+	store, err := searchindex.Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.Enqueue(context.Background(), []searchindex.FrontierItem{{
+		URL: server.URL + "/000-ordinary", Root: "127.0.0.1",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	fetcher, err := NewFetcher(FetcherConfig{AllowPrivateNetworks: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorityURL := server.URL + "/zzz-preferred"
+	stats, err := Run(context.Background(), store, fetcher, stubDiscoverer{}, nil, RunConfig{
+		Workers: 1, BatchSize: 1, MaxPages: 1, AllowPrivate: true,
+		PriorityURLs: []string{priorityURL},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if stats.Indexed != 1 {
+		t.Fatalf("stats = %#v, want one preferred page", stats)
+	}
+	mu.Lock()
+	gotFetched := append([]string(nil), fetched...)
+	mu.Unlock()
+	if len(gotFetched) != 1 || gotFetched[0] != "/zzz-preferred" {
+		t.Fatalf("fetch order = %#v, want only the preferred URL", gotFetched)
+	}
+	hits, err := store.Query(context.Background(), "indexable words", 10)
+	if err != nil || len(hits) != 1 || hits[0].URL != priorityURL {
+		t.Fatalf("Query() = %#v, %v, want the preferred page", hits, err)
+	}
+}
+
 // TestRunRefetchesSeedsOnDrainedFrontier locks the discovery bootstrap: after
 // earlier runs close every row, a crawl used to end instantly with nothing to
 // lease, so link discovery never saw a page. Seeds must reopen each run.
