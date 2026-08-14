@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" class="visual-lock-v1">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -21,17 +21,10 @@
         const initialTheme = savedTheme === "dark" || savedTheme === "light" ? savedTheme : systemTheme;
         document.documentElement.dataset.theme = initialTheme;
         document.documentElement.style.colorScheme = initialTheme;
-        document.querySelector('meta[name="theme-color"]').content = initialTheme === "dark" ? "#0a111b" : "#fcfcf9";
+        document.querySelector('meta[name="theme-color"]').content = initialTheme === "dark" ? "#000000" : "#fcfcf9";
       })();
     </script>
     <title>Purify Search — Search is how intelligence meets the world.</title>
-    <link
-      rel="preload"
-      href="../assets/fonts/Newsreader-Variable.woff2"
-      as="font"
-      type="font/woff2"
-      crossorigin
-    />
     <link
       rel="preload"
       href="../assets/fonts/Geist-Variable.woff2"
@@ -39,10 +32,17 @@
       type="font/woff2"
       crossorigin
     />
+    <link
+      rel="preload"
+      href="../assets/fonts/GeistMono-Variable.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
     <link rel="stylesheet" href="./styles.css" />
     <script src="./app.js?v=photon-stars-4" defer></script>
   </head>
-  <body>
+  <body class="page-home">
     <a class="skip-link" href="#main">Skip to content</a>
 
     <header class="site-header" data-header>
@@ -124,21 +124,45 @@
         </div>
       </section>
 
+      <div class="pipeline-strip" data-reveal aria-hidden="true">
+        <div class="container strip-row">
+          <span class="strip-item"><i>01</i><span data-copy="strip.s1">Fetch the live page</span></span>
+          <span class="strip-arrow">→</span>
+          <span class="strip-item"><i>02</i><span data-copy="strip.s2">Find it in our own index</span></span>
+          <span class="strip-arrow">→</span>
+          <span class="strip-item"><i>03</i><span data-copy="strip.s3">Verify the claim</span></span>
+          <span class="strip-arrow">→</span>
+          <span class="strip-item"><i>04</i><span data-copy="strip.s4">Sign the receipt</span></span>
+        </div>
+      </div>
+
+      <section class="trust-strip" aria-label="Trusted by" data-reveal="section">
+        <div class="container">
+          <p class="trust-label" data-copy="trust.label">Built on the same stack as</p>
+          <div class="trust-logos">
+            <span class="trust-logo">Chrome</span>
+            <span class="trust-logo">Go</span>
+            <span class="trust-logo">HTTP/2</span>
+            <span class="trust-logo">Ed25519</span>
+            <span class="trust-logo">SQLite</span>
+            <span class="trust-logo">WebAssembly</span>
+          </div>
+        </div>
+      </section>
+
       <section class="section pillars" id="product" aria-labelledby="pillars-title">
         <div class="container">
           <div class="sec-head" data-reveal="section">
             <p class="eyebrow-label" data-copy="pillars.eyebrow">Purify Search API</p>
-            <h2 id="pillars-title" data-copy="pillars.title">Search that proves every answer.</h2>
+            <h2 id="pillars-title" data-copy="pillars.title">Search that <em class="serif-accent">proves</em> every answer.</h2>
             <p class="sec-sub" data-copy="pillars.sub">
               Purify fetches the live page, finds it in an index we own, and verifies the claim before it reaches you.
             </p>
           </div>
 
-          <div class="cards-3" data-reveal="section">
-            <article class="card">
-              <span class="icon-chip" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a13.4 13.4 0 0 1 3.6 9 13.4 13.4 0 0 1-3.6 9 13.4 13.4 0 0 1-3.6-9A13.4 13.4 0 0 1 12 3z"/></svg>
-              </span>
+          <div class="pillars-grid" data-reveal="section">
+            <article class="pillar">
+              <span class="pillar-index mono" aria-hidden="true">01</span>
               <h3 data-copy="pillars.c1Title">Fetch</h3>
               <p data-copy="pillars.c1Body">
                 Reach any public page with a real Chrome fingerprint — TLS, HTTP/2, full rendering, and an archive fallback.
@@ -148,12 +172,19 @@
                 <span class="mono">HTTP/2</span>
                 <span class="mono">Archive fallback</span>
               </div>
+              <div class="pillar-visual" aria-hidden="true">
+                <div class="micro-fetch">
+                  <span class="micro-node micro-node-a">200</span>
+                  <span class="micro-line"></span>
+                  <span class="micro-node micro-node-b">→</span>
+                  <span class="micro-line"></span>
+                  <span class="micro-node micro-node-c">HTML</span>
+                </div>
+              </div>
             </article>
 
-            <article class="card">
-              <span class="icon-chip" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.6-4.6"/></svg>
-              </span>
+            <article class="pillar">
+              <span class="pillar-index mono" aria-hidden="true">02</span>
               <h3 data-copy="pillars.c2Title">Find</h3>
               <p data-copy="pillars.c2Body">
                 A bilingual index we build and grow ourselves — no resold rankings, no upstream terms.
@@ -163,12 +194,21 @@
                 <span class="mono">Demand-grown</span>
                 <span class="mono">Zero upstream terms</span>
               </div>
+              <div class="pillar-visual" aria-hidden="true">
+                <div class="micro-index">
+                  <span class="micro-bar" style="--h: 40%"></span>
+                  <span class="micro-bar" style="--h: 65%"></span>
+                  <span class="micro-bar" style="--h: 50%"></span>
+                  <span class="micro-bar" style="--h: 85%"></span>
+                  <span class="micro-bar" style="--h: 30%"></span>
+                  <span class="micro-bar" style="--h: 70%"></span>
+                  <span class="micro-bar" style="--h: 55%"></span>
+                </div>
+              </div>
             </article>
 
-            <article class="card">
-              <span class="icon-chip" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l6.5 2.6v5.2c0 4.1-2.7 7.3-6.5 9.2-3.8-1.9-6.5-5.1-6.5-9.2V6.1L12 3.5z"/><path d="M9.2 12.2l2 2 3.8-3.9"/></svg>
-              </span>
+            <article class="pillar">
+              <span class="pillar-index mono" aria-hidden="true">03</span>
               <h3 data-copy="pillars.c3Title">Verify</h3>
               <p data-copy="pillars.c3Body">
                 Independent sources cross-checked, conflicts kept visible, and every receipt signed with Ed25519.
@@ -178,94 +218,34 @@
                 <span class="mono">Conflicts retained</span>
                 <span class="mono">Ed25519 receipt</span>
               </div>
+              <div class="pillar-visual" aria-hidden="true">
+                <div class="micro-verify">
+                  <span class="micro-sig">✓</span>
+                  <span class="micro-sig-text mono">Ed25519</span>
+                </div>
+              </div>
             </article>
           </div>
         </div>
       </section>
 
-      <section class="section feature feature-alt" id="developers" aria-labelledby="dev-title">
-        <div class="container feature-row">
-          <div class="feature-copy" data-reveal="section">
-            <p class="eyebrow-label" data-copy="dev.eyebrow">For developers</p>
-            <h2 id="dev-title" data-copy="dev.title">The receipt is in the response.</h2>
-            <p class="feature-sub" data-copy="dev.sub">
-              GET /search returns results the way your agent needs them — the snapshot ID, the observed time, and a signed receipt, inline.
-            </p>
-            <ul class="checklist">
-              <li>
-                <span class="check-dot" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
-                <span data-copy="dev.b1">snapshot_id pins the exact bytes an answer was read from</span>
-              </li>
-              <li>
-                <span class="check-dot" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
-                <span data-copy="dev.b2">observed_at timestamps every read</span>
-              </li>
-              <li>
-                <span class="check-dot" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
-                <span data-copy="dev.b3">The receipt replays through /verify</span>
-              </li>
-            </ul>
-            <a class="text-link" href="https://github.com/Easonliuliang/purify#api" target="_blank" rel="noreferrer">
-              <span data-copy="dev.link">Read the API docs</span><span aria-hidden="true"> →</span>
-            </a>
-          </div>
-
-          <figure class="feature-visual" data-reveal="media">
-            <div class="terminal-card">
-              <div class="terminal-head">
-                <span class="mono">PURIFY TERMINAL</span>
-                <span class="mono terminal-status">GET /search · 200 OK</span>
-              </div>
-              <pre class="terminal-body"><code><span class="t-prompt">$</span> curl -G "https://purify.verifly.pro/search" \
-    --data-urlencode "q=security patch release date" \
-    -H "Authorization: Bearer $PURIFY_KEY"
-
-{
-  "url": "https://docs.example.org/releases",
-  "title": "Release notes · 2026.08",
-  "observed_at": "2026-08-12T14:32:08Z",
-  "snapshot_id": "snap_9f2c41d8",
-  "verification": {
-    "state": <em>"verified"</em>,
-    "independent_sources": 3,
-    "conflicts_retained": 1,
-    "receipt": <em>"rcpt_ed25519_c7b2…"</em>
-  }
-}</code></pre>
-            </div>
-          </figure>
+      <section class="section receipt-section blueprint" id="evidence" aria-labelledby="rec-title">
+        <div class="aurora-field" aria-hidden="true">
+          <span class="aurora aurora-a"></span>
+          <span class="aurora aurora-b"></span>
+          <span class="aurora aurora-c"></span>
         </div>
-      </section>
-
-      <section class="section feature" id="evidence" aria-labelledby="rec-title">
-        <div class="container feature-row feature-row-flip">
-          <div class="feature-copy" data-reveal="section">
+        <div class="container">
+          <div class="sec-head" data-reveal="section">
             <p class="eyebrow-label" data-copy="rec.eyebrow">Built-in verification</p>
-            <h2 id="rec-title" data-copy="rec.title">Disagreement stays on the record.</h2>
-            <p class="feature-sub" data-copy="rec.sub">
+            <h2 id="rec-title" data-copy="rec.title">Every answer ships with a <em class="serif-accent">receipt</em>. <span class="title-note">(Not just a ranking.)</span></h2>
+            <p class="sec-sub" data-copy="rec.sub">
               When sources conflict, Purify does not guess. Each claim stays attached to its source; nothing is promoted until verification settles it.
             </p>
-            <ul class="checklist">
-              <li>
-                <span class="check-dot" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
-                <span data-copy="rec.b1">Conflicts retained, never hidden</span>
-              </li>
-              <li>
-                <span class="check-dot" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
-                <span data-copy="rec.b2">Every source carries its observed time</span>
-              </li>
-              <li>
-                <span class="check-dot" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
-                <span data-copy="rec.b3">One receipt covers the whole path</span>
-              </li>
-            </ul>
-            <a class="text-link" href="https://github.com/Easonliuliang/purify" target="_blank" rel="noreferrer">
-              <span data-copy="rec.link">See the trust stack on GitHub</span><span aria-hidden="true"> →</span>
-            </a>
           </div>
 
-          <div class="feature-visual" data-reveal="media">
-            <div class="evidence-specimen" aria-label="Illustrative search receipt">
+          <div class="receipt-stage">
+            <div class="evidence-specimen" data-reveal="specimen" aria-label="Illustrative search receipt">
               <div class="specimen-header">
                 <div>
                   <span class="mono" data-copy="specimen.kicker">SEARCH RECEIPT / ILLUSTRATIVE RECORD</span>
@@ -317,40 +297,107 @@
               </div>
             </div>
           </div>
+
+          <div class="fact-strip" data-reveal="section" aria-label="Key facts">
+            <span class="mono">4 FETCH ENGINES</span><i></i>
+            <span class="mono">2 LANGUAGES INDEXED</span><i></i>
+            <span class="mono">100% SNAPSHOTTED</span><i></i>
+            <span class="mono">1 RECEIPT / ANSWER</span>
+          </div>
         </div>
       </section>
 
-      <section class="stats" aria-labelledby="stats-title">
+      <section class="section compare-section" aria-labelledby="compare-title">
+        <div class="compare-aurora" aria-hidden="true"><span></span><span></span></div>
         <div class="container">
-          <div class="stats-head" data-reveal="section">
-            <h2 id="stats-title" data-copy="stats.title">Built to be checked.</h2>
+          <div class="sec-head" data-reveal="section">
+            <p class="eyebrow-label" data-copy="compare.eyebrow">Why Purify</p>
+            <h2 id="compare-title" data-copy="compare.title">The difference is on the <em class="serif-accent">record</em>.</h2>
           </div>
-          <div class="stats-grid" data-reveal="section">
-            <div class="stat">
-              <span class="stat-figure">4</span>
-              <span class="mono" data-copy="stats.l1">FETCH ENGINES</span>
+
+          <div class="compare-grid" data-reveal="section">
+            <div class="compare-col compare-col-them">
+              <p class="mono compare-head" data-copy="compare.themHead">SEARCH WITHOUT RECEIPTS</p>
+              <ul>
+                <li><span class="compare-mark compare-mark-x" aria-hidden="true">×</span><span data-copy="compare.t1">Ranked links, no proof of what was read</span></li>
+                <li><span class="compare-mark compare-mark-x" aria-hidden="true">×</span><span data-copy="compare.t2">Sources can change or vanish silently</span></li>
+                <li><span class="compare-mark compare-mark-x" aria-hidden="true">×</span><span data-copy="compare.t3">Conflicts get averaged into one guess</span></li>
+                <li><span class="compare-mark compare-mark-x" aria-hidden="true">×</span><span data-copy="compare.t4">Trust rests on the provider's word</span></li>
+              </ul>
             </div>
-            <div class="stat">
-              <span class="stat-figure">2</span>
-              <span class="mono" data-copy="stats.l2">LANGUAGES INDEXED</span>
-            </div>
-            <div class="stat">
-              <span class="stat-figure">100%</span>
-              <span class="mono" data-copy="stats.l3">ANSWERS SNAPSHOTTED</span>
-            </div>
-            <div class="stat">
-              <span class="stat-figure">1</span>
-              <span class="mono" data-copy="stats.l4">RECEIPT PER ANSWER</span>
+            <div class="compare-col compare-col-us">
+              <p class="mono compare-head" data-copy="compare.usHead">SEARCH WITH PURIFY</p>
+              <ul>
+                <li><span class="compare-mark compare-mark-check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span><span data-copy="compare.u1">snapshot_id pins the exact bytes an answer was read from</span></li>
+                <li><span class="compare-mark compare-mark-check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span><span data-copy="compare.u2">observed_at timestamps every read</span></li>
+                <li><span class="compare-mark compare-mark-check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span><span data-copy="compare.u3">Conflicts retained, never hidden</span></li>
+                <li><span class="compare-mark compare-mark-check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span><span data-copy="compare.u4">Ed25519 receipt replays through /verify</span></li>
+              </ul>
             </div>
           </div>
         </div>
       </section>
 
-      <section class="section vision2" id="vision" aria-labelledby="vision-title">
+      <section class="section dev-section" id="developers" aria-labelledby="dev-title">
+        <div class="container dev-grid">
+          <div class="feature-copy" data-reveal="section">
+            <p class="eyebrow-label" data-copy="dev.eyebrow">For developers</p>
+            <h2 id="dev-title" data-copy="dev.title">The receipt is in the <em class="serif-accent">response</em>.</h2>
+            <p class="feature-sub" data-copy="dev.sub">
+              GET /search returns results the way your agent needs them — the snapshot ID, the observed time, and a signed receipt, inline.
+            </p>
+            <ul class="checklist">
+              <li>
+                <span class="check-dot" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
+                <span data-copy="dev.b1">snapshot_id pins the exact bytes an answer was read from</span>
+              </li>
+              <li>
+                <span class="check-dot" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
+                <span data-copy="dev.b2">observed_at timestamps every read</span>
+              </li>
+              <li>
+                <span class="check-dot" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
+                <span data-copy="dev.b3">The receipt replays through /verify</span>
+              </li>
+            </ul>
+            <a class="text-link" href="https://github.com/Easonliuliang/purify#api" target="_blank" rel="noreferrer">
+              <span data-copy="dev.link">Read the API docs</span><span aria-hidden="true"> →</span>
+            </a>
+          </div>
+
+          <figure class="feature-visual" data-reveal="media">
+            <div class="terminal-card">
+              <div class="terminal-head">
+                <span class="mono">PURIFY TERMINAL</span>
+                <span class="mono terminal-status">GET /search · 200 OK</span>
+              </div>
+              <pre class="terminal-body"><code><span class="t-prompt">$</span> curl -G "https://purify.verifly.pro/search" \
+    --data-urlencode "q=security patch release date" \
+    -H "Authorization: Bearer $PURIFY_KEY"
+
+{
+  "url": "https://docs.example.org/releases",
+  "title": "Release notes · 2026.08",
+  "observed_at": "2026-08-12T14:32:08Z",
+  "snapshot_id": "snap_9f2c41d8",
+  "verification": {
+    "state": <em>"verified"</em>,
+    "independent_sources": 3,
+    "conflicts_retained": 1,
+    "receipt": <em>"rcpt_ed25519_c7b2…"</em>
+  }
+}</code></pre>
+            </div>
+          </figure>
+        </div>
+      </section>
+
+      <section class="section vision-section blueprint" id="vision" aria-labelledby="vision-title">
+        <div class="plexus-field" data-plexus aria-hidden="true"></div>
         <div class="container">
           <div class="sec-head sec-head-tight" data-reveal="section">
             <p class="eyebrow-label" data-copy="vision2.eyebrow">The road ahead</p>
-            <h2 id="vision-title" data-copy="vision2.title">From answers to a living fact layer.</h2>
+            <h2 id="vision-title" data-copy="vision2.title">From answers to a living <em class="serif-accent">fact layer</em>.</h2>
             <p class="sec-sub" data-copy="vision2.sub">
               Receipts accumulate into memory. Memory learns to watch for change, heal what breaks, and keep every repair inspectable. Search is only the first layer.
             </p>
@@ -358,15 +405,16 @@
         </div>
       </section>
 
-      <section class="cta-band" aria-labelledby="cta-title">
+      <section class="blue-band cta-band" aria-labelledby="cta-title">
+        <div class="cta-aurora" aria-hidden="true"><span></span><span></span><span></span></div>
         <div class="container cta-inner" data-reveal="section">
           <h2 id="cta-title" data-copy="cta.title">Start building on verified answers.</h2>
           <p class="cta-sub" data-copy="cta.sub">One call to /search. Evidence in every response.</p>
           <div class="cta-actions">
-            <a class="button button-primary" href="./login.html?mode=signup" data-auth-link="signup">
+            <a class="button button-on-band" href="./login.html?mode=signup" data-auth-link="signup">
               <span data-copy="cta.primary">Try Purify</span><span aria-hidden="true"> →</span>
             </a>
-            <a class="button button-secondary" href="https://github.com/Easonliuliang/purify#api" target="_blank" rel="noreferrer">
+            <a class="button button-ghost-band" href="https://github.com/Easonliuliang/purify#api" target="_blank" rel="noreferrer">
               <span data-copy="cta.secondary">Read the docs</span>
             </a>
           </div>

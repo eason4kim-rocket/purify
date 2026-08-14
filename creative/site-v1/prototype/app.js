@@ -1,11 +1,13 @@
-const VISUAL_LOCK_STATIC = true;
+const VISUAL_LOCK_STATIC = false;
 const HERO_MATRIX_LIVE = true;
+// Hero composition stays pinned even with page motion unlocked — the stage is locked by design.
+const HERO_SCROLL_LOCK = true;
 const PAGE_PARAMS = new URLSearchParams(window.location.search);
 const HERO_VARIANT = PAGE_PARAMS.get("hero") === "a" ? "a" : "b";
 const CAPTURE_MODE = PAGE_PARAMS.has("capture");
 const THEME_STORAGE_KEY = "purify-theme";
 const SYSTEM_THEME_MEDIA = window.matchMedia("(prefers-color-scheme: dark)");
-const THEME_COLORS = { light: "#fcfcf9", dark: "#0a111b" };
+const THEME_COLORS = { light: "#fcfcf9", dark: "#000000" };
 
 if (CAPTURE_MODE) document.documentElement.classList.add("capture-mode");
 document.documentElement.dataset.heroVariant = HERO_VARIANT;
@@ -28,8 +30,13 @@ const copy = {
       "Purify Search is building a path from the open, changing web to context AI systems can inspect, update, and use.",
     "hero.primary": "Try Purify",
     "hero.secondary": "Read our vision",
+    "strip.s1": "Fetch the live page",
+    "strip.s2": "Find it in our own index",
+    "strip.s3": "Verify the claim",
+    "strip.s4": "Sign the receipt",
+    "trust.label": "Built on the same stack as",
     "pillars.eyebrow": "Purify Search API",
-    "pillars.title": "Search that proves every answer.",
+    "pillars.title": 'Search that <em class="serif-accent">proves</em> every answer.',
     "pillars.sub":
       "Purify fetches the live page, finds it in an index we own, and verifies the claim before it reaches you.",
     "pillars.c1Title": "Fetch",
@@ -41,7 +48,7 @@ const copy = {
     "pillars.c3Body":
       "Independent sources cross-checked, conflicts kept visible, and every receipt signed with Ed25519.",
     "dev.eyebrow": "For developers",
-    "dev.title": "The receipt is in the response.",
+    "dev.title": 'The receipt is in the <em class="serif-accent">response</em>.',
     "dev.sub":
       "GET /search returns results the way your agent needs them — the snapshot ID, the observed time, and a signed receipt, inline.",
     "dev.b1": "snapshot_id pins the exact bytes an answer was read from",
@@ -49,7 +56,8 @@ const copy = {
     "dev.b3": "The receipt replays through /verify",
     "dev.link": "Read the API docs",
     "rec.eyebrow": "Built-in verification",
-    "rec.title": "Disagreement stays on the record.",
+    "rec.title":
+      'Every answer ships with a <em class="serif-accent">receipt</em>. <span class="title-note">(Not just a ranking.)</span>',
     "rec.sub":
       "When sources conflict, Purify does not guess. Each claim stays attached to its source; nothing is promoted until verification settles it.",
     "rec.b1": "Conflicts retained, never hidden",
@@ -75,8 +83,20 @@ const copy = {
     "stats.l2": "LANGUAGES INDEXED",
     "stats.l3": "ANSWERS SNAPSHOTTED",
     "stats.l4": "RECEIPT PER ANSWER",
+    "compare.eyebrow": "Why Purify",
+    "compare.title": 'The difference is on the <em class="serif-accent">record</em>.',
+    "compare.themHead": "SEARCH WITHOUT RECEIPTS",
+    "compare.usHead": "SEARCH WITH PURIFY",
+    "compare.t1": "Ranked links, no proof of what was read",
+    "compare.t2": "Sources can change or vanish silently",
+    "compare.t3": "Conflicts get averaged into one guess",
+    "compare.t4": "Trust rests on the provider's word",
+    "compare.u1": "snapshot_id pins the exact bytes an answer was read from",
+    "compare.u2": "observed_at timestamps every read",
+    "compare.u3": "Conflicts retained, never hidden",
+    "compare.u4": "Ed25519 receipt replays through /verify",
     "vision2.eyebrow": "The road ahead",
-    "vision2.title": "From answers to a living fact layer.",
+    "vision2.title": 'From answers to a living <em class="serif-accent">fact layer</em>.',
     "vision2.sub":
       "Receipts accumulate into memory. Memory learns to watch for change, heal what breaks, and keep every repair inspectable. Search is only the first layer.",
     "cta.title": "Start building on verified answers.",
@@ -109,8 +129,13 @@ const copy = {
       "Purify Search 正在建立一条通往开放且持续变化的网络之路，把其中的信息转化为 AI 系统能够检查、更新并使用的上下文。",
     "hero.primary": "试用 Purify",
     "hero.secondary": "阅读我们的愿景",
+    "strip.s1": "抓取实时页面",
+    "strip.s2": "在自建索引中检索",
+    "strip.s3": "核验每一条陈述",
+    "strip.s4": "签发签名回执",
+    "trust.label": "与这些技术同源构建",
     "pillars.eyebrow": "PURIFY 搜索 API",
-    "pillars.title": "让每一条答案，都能自证。",
+    "pillars.title": '让每一条答案，都能<em class="serif-accent">自证</em>。',
     "pillars.sub": "Purify 抓取实时页面，在自建索引中检索，并在结果抵达你之前完成核验。",
     "pillars.c1Title": "抓取",
     "pillars.c1Body": "以真实 Chrome 指纹抵达任何公开页面——TLS、HTTP/2、完整渲染，外加历史存档回退。",
@@ -119,14 +144,15 @@ const copy = {
     "pillars.c3Title": "核验",
     "pillars.c3Body": "交叉核对独立来源，冲突保持可见，每张回执都以 Ed25519 签名。",
     "dev.eyebrow": "面向开发者",
-    "dev.title": "回执，就在响应里。",
+    "dev.title": '回执，就在<em class="serif-accent">响应</em>里。',
     "dev.sub": "GET /search 以智能体需要的方式返回结果——快照 ID、观察时间与签名回执，全部内联。",
     "dev.b1": "snapshot_id 锁定答案所依据的原始字节",
     "dev.b2": "observed_at 记录每一次读取的时间",
     "dev.b3": "回执可经 /verify 重放核验",
     "dev.link": "查看 API 文档",
     "rec.eyebrow": "内建核验",
-    "rec.title": "分歧，留在记录上。",
+    "rec.title":
+      '每一条答案，都附带一张<em class="serif-accent">回执</em>。<span class="title-note">（不只是排名。）</span>',
     "rec.sub": "来源冲突时，Purify 不做猜测。每种陈述都与各自来源保持关联；核验完成之前，谁也不会生效。",
     "rec.b1": "冲突保留，绝不隐藏",
     "rec.b2": "每个来源都带观察时间",
@@ -150,8 +176,20 @@ const copy = {
     "stats.l2": "索引语言",
     "stats.l3": "答案留有快照",
     "stats.l4": "每条答案一张回执",
+    "compare.eyebrow": "为什么选择 Purify",
+    "compare.title": '差别，写在<em class="serif-accent">记录</em>里。',
+    "compare.themHead": "没有回执的搜索",
+    "compare.usHead": "用 PURIFY 搜索",
+    "compare.t1": "只有排名链接，读过的内容无凭据",
+    "compare.t2": "来源可能悄悄变更或消失",
+    "compare.t3": "冲突被平均成一次猜测",
+    "compare.t4": "信任只能寄托在服务商的嘴上",
+    "compare.u1": "snapshot_id 锁定答案所依据的原始字节",
+    "compare.u2": "observed_at 记录每一次读取的时间",
+    "compare.u3": "冲突保留，绝不隐藏",
+    "compare.u4": "Ed25519 回执可经 /verify 重放核验",
     "vision2.eyebrow": "路线图",
-    "vision2.title": "从答案，到活的事实层。",
+    "vision2.title": '从答案，到活的<em class="serif-accent">事实层</em>。',
     "vision2.sub": "回执沉淀为记忆；记忆学会察觉变化、修复断裂，并让每一次修复都可被检查。搜索，只是第一层。",
     "cta.title": "开始在可核验的答案上构建。",
     "cta.sub": "一次调用 /search，每个响应都带证据。",
@@ -515,7 +553,7 @@ class HeroMatrix {
   onScroll() {
     const rect = this.hero.getBoundingClientRect();
     const distance = Math.max(window.innerHeight * 0.72, this.hero.offsetHeight * 0.78);
-    this.scrollProgress = VISUAL_LOCK_STATIC ? 0 : clamp(-rect.top / distance);
+    this.scrollProgress = HERO_SCROLL_LOCK ? 0 : clamp(-rect.top / distance);
     const copyProgress = smoothstep(0.45, 0.72, this.scrollProgress);
     this.hero.style.setProperty("--hero-copy-y", `${(-18 * copyProgress).toFixed(2)}px`);
     this.hero.style.setProperty("--hero-copy-opacity", `${(1 - 0.28 * copyProgress).toFixed(3)}`);
@@ -945,6 +983,154 @@ class MemoryField {
   }
 }
 
+/* Vision section: a slow particle mesh — the "living fact layer" made visible.
+   Nodes drift; links form and dissolve within range. */
+class PlexusField {
+  constructor(field, preferences) {
+    this.field = field;
+    this.preferences = preferences;
+    this.canvas = document.createElement("canvas");
+    this.canvas.setAttribute("aria-hidden", "true");
+    this.context = this.canvas.getContext("2d", { alpha: true });
+    this.particles = [];
+    this.width = 0;
+    this.height = 0;
+    this.dpr = 1;
+    this.lastFrame = 0;
+    this.frameRequest = 0;
+    this.visible = false;
+    this.pageVisible = !document.hidden;
+
+    field.replaceChildren(this.canvas);
+    this.resizeObserver = new ResizeObserver(() => this.resize());
+    this.resizeObserver.observe(field);
+    this.visibilityObserver = new IntersectionObserver(
+      ([entry]) => {
+        this.visible = entry.isIntersecting;
+        this.syncPlayback();
+      },
+      { rootMargin: "120px" }
+    );
+    this.visibilityObserver.observe(field);
+    this.resize();
+    this.syncPlayback();
+  }
+
+  setPreferences(preferences) {
+    this.preferences = preferences;
+    this.syncPlayback();
+  }
+
+  setPageVisible(visible) {
+    this.pageVisible = visible;
+    this.syncPlayback();
+  }
+
+  refreshTheme() {
+    this.draw();
+  }
+
+  palette() {
+    return document.documentElement.dataset.theme === "dark"
+      ? { dot: "rgba(122, 170, 255, 0.68)", line: "rgba(122, 170, 255, 0.13)" }
+      : { dot: "rgba(23, 101, 255, 0.46)", line: "rgba(23, 101, 255, 0.1)" };
+  }
+
+  resize() {
+    const rect = this.field.getBoundingClientRect();
+    const nextWidth = Math.max(1, Math.round(rect.width));
+    const nextHeight = Math.max(1, Math.round(rect.height));
+    if (nextWidth === this.width && nextHeight === this.height) return;
+    this.width = nextWidth;
+    this.height = nextHeight;
+    this.dpr = Math.min(window.devicePixelRatio || 1, nextWidth < 768 ? 1.25 : 1.75);
+    this.canvas.width = Math.round(nextWidth * this.dpr);
+    this.canvas.height = Math.round(nextHeight * this.dpr);
+    this.canvas.style.width = `${nextWidth}px`;
+    this.canvas.style.height = `${nextHeight}px`;
+    this.buildParticles();
+    this.draw();
+  }
+
+  buildParticles() {
+    const count = clamp(Math.round((this.width * this.height) / 16000), 32, 72);
+    const random = seededRandom(424242);
+    this.particles = Array.from({ length: count }, () => ({
+      x: random() * this.width,
+      y: random() * this.height,
+      vx: (random() - 0.5) * 20,
+      vy: (random() - 0.5) * 20,
+      radius: 1.3 + random() * 1.5
+    }));
+  }
+
+  syncPlayback() {
+    const shouldRun = this.visible && this.pageVisible && !this.preferences.reduced;
+    if (shouldRun && !this.frameRequest) {
+      this.lastFrame = performance.now();
+      this.frameRequest = requestAnimationFrame((time) => this.frame(time));
+    } else if (!shouldRun && this.frameRequest) {
+      cancelAnimationFrame(this.frameRequest);
+      this.frameRequest = 0;
+    }
+    if (!shouldRun) this.draw();
+  }
+
+  frame(time) {
+    this.frameRequest = 0;
+    const delta = Math.min(50, time - this.lastFrame) / 1000;
+    this.lastFrame = time;
+    for (const particle of this.particles) {
+      particle.x += particle.vx * delta;
+      particle.y += particle.vy * delta;
+      if (particle.x < -24) particle.x = this.width + 24;
+      else if (particle.x > this.width + 24) particle.x = -24;
+      if (particle.y < -24) particle.y = this.height + 24;
+      else if (particle.y > this.height + 24) particle.y = -24;
+    }
+    this.draw();
+    if (this.visible && this.pageVisible) {
+      this.frameRequest = requestAnimationFrame((nextTime) => this.frame(nextTime));
+    }
+  }
+
+  draw() {
+    if (!this.context || !this.width || !this.height) return;
+    const context = this.context;
+    const { dot, line } = this.palette();
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    context.scale(this.dpr, this.dpr);
+
+    const linkDistance = 132;
+    context.lineWidth = 1;
+    context.strokeStyle = line;
+    for (let i = 0; i < this.particles.length; i++) {
+      const a = this.particles[i];
+      for (let j = i + 1; j < this.particles.length; j++) {
+        const b = this.particles[j];
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        const distanceSquared = dx * dx + dy * dy;
+        if (distanceSquared > linkDistance * linkDistance) continue;
+        context.globalAlpha = 1 - Math.sqrt(distanceSquared) / linkDistance;
+        context.beginPath();
+        context.moveTo(a.x, a.y);
+        context.lineTo(b.x, b.y);
+        context.stroke();
+      }
+    }
+
+    context.globalAlpha = 1;
+    context.fillStyle = dot;
+    for (const particle of this.particles) {
+      context.beginPath();
+      context.arc(particle.x, particle.y, particle.radius, 0, Math.PI * 2);
+      context.fill();
+    }
+  }
+}
+
 function readStoredTheme() {
   try {
     const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
@@ -1135,6 +1321,43 @@ function setupSectionReveals(preferences) {
   requestAnimationFrame(revealPassedContent);
 }
 
+/* Big stat numbers count up once when they enter the viewport — the "measurable"
+   claim lands harder when the number earns its value. */
+function setupStatCountUp(preferences) {
+  const figures = [...document.querySelectorAll(".stat-figure")];
+  if (preferences.reduced || !figures.length) return;
+
+  const animate = (el) => {
+    const match = el.textContent.trim().match(/^(\d+)([\s\S]*)$/);
+    if (!match) return;
+    const target = Number(match[1]);
+    const suffix = match[2];
+    const duration = 900;
+    let startTime = 0;
+    const step = (now) => {
+      if (!startTime) startTime = now;
+      const progress = Math.min((now - startTime) / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      el.textContent = String(Math.round(target * eased)) + suffix;
+      if (progress < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  };
+
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        animate(entry.target);
+        observer.unobserve(entry.target);
+      });
+    },
+    { threshold: 0.6 }
+  );
+
+  figures.forEach((el) => observer.observe(el));
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   let preferences = getMotionPreferences();
   let heroPreferences = getMotionPreferences({ ignoreVisualLock: HERO_MATRIX_LIVE });
@@ -1145,14 +1368,18 @@ document.addEventListener("DOMContentLoaded", () => {
   setupTheme();
   setupMenu();
   setupSectionReveals(preferences);
+  setupStatCountUp(preferences);
 
   const heroMotion = new HeroMatrix(
     document.querySelector("[data-hero-matrix]"),
     document.querySelector("[data-hero]"),
     heroPreferences
   );
+  const plexusField = document.querySelector("[data-plexus]");
+  const plexus = plexusField ? new PlexusField(plexusField, preferences) : null;
   document.addEventListener("purify:theme-change", () => {
     heroMotion.refreshTheme();
+    plexus?.refreshTheme();
   });
 
   document.querySelector("[data-language-toggle]")?.addEventListener("click", () => {
@@ -1161,10 +1388,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.addEventListener("visibilitychange", () => {
     heroMotion.setPageVisible(!document.hidden);
+    plexus?.setPageVisible(!document.hidden);
   });
 
   document.addEventListener("purify:menu-state", (event) => {
     heroMotion.setPageVisible(!document.hidden && !event.detail.open);
+    plexus?.setPageVisible(!document.hidden && !event.detail.open);
   });
 
   const applyPreferences = () => {
@@ -1181,6 +1410,7 @@ document.addEventListener("DOMContentLoaded", () => {
     document.documentElement.classList.toggle("motion-reduced", preferences.reduced);
     document.documentElement.classList.toggle("motion-constrained", preferences.constrained);
     heroMotion.setPreferences(heroPreferences);
+    plexus?.setPreferences(preferences);
   };
 
   const reducedMedia = window.matchMedia("(prefers-reduced-motion: reduce)");
