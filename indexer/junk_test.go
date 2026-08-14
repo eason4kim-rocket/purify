@@ -20,6 +20,7 @@ func TestJunkURLRejectsTrapsAssetsAndForeignLocales(t *testing.T) {
 		"https://doc.rust-lang.org/beta/core/arch/arm/fn.vbslq_s16.html",
 		"https://doc.rust-lang.org/nightly/std/index.html",
 		"http://archive.ubuntu.com/ubuntu/dists/bionic/multiverse/dep11/by-hash/SHA256/3a8d",
+		"https://docs.kernel.org/_sources/admin-guide/hw-vuln/core-scheduling.rst.txt",
 		"http://jigsaw.w3.org/css-validator/org/w3c/css/CssFontWidth.class",
 		"http://jigsaw.w3.org/css-validator/org/w3c/css/CssFontWidth.java",
 		"https://a.example/de/docs/page",

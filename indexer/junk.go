@@ -92,7 +92,9 @@ func trappedPath(escapedPath string) bool {
 	counts := map[string]int{}
 	repeated := 0
 	for _, segment := range segments {
-		if segment == "by-hash" {
+		// by-hash marks content-addressed archive trees; _sources marks
+		// Sphinx raw-source twins that duplicate every rendered page.
+		if segment == "by-hash" || segment == "_sources" {
 			return true
 		}
 		if segment == "" {
