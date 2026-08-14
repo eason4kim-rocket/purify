@@ -64,7 +64,7 @@ func run(ctx context.Context, seedsPath, outPath string, maxPages, maxPerHost, m
 	if err != nil {
 		return err
 	}
-	fmt.Printf("discovered=%d indexed=%d failed=%d robots_deny=%d not_modified=%d\n",
-		stats.Discovered, stats.Indexed, stats.Failed, stats.RobotsDeny, stats.Skipped304)
+	fmt.Printf("discovered=%d indexed=%d failed=%d robots_deny=%d not_modified=%d skipped_content=%d\n",
+		stats.Discovered, stats.Indexed, stats.Failed, stats.RobotsDeny, stats.Skipped304, stats.SkippedContent)
 	return nil
 }

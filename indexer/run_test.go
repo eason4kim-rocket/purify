@@ -179,6 +179,47 @@ func TestRunRefetchesSeedsOnDrainedFrontier(t *testing.T) {
 	}
 }
 
+// TestRunSkipsNonDocumentContent locks the content gate: package blobs and
+// media used to become empty-bodied index rows that matched nothing, and a
+// retry loop for them would burn attempts on bytes that never change.
+func TestRunSkipsNonDocumentContent(t *testing.T) {
+	filler := strings.Repeat("indexable words ", 40)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/":
+			_, _ = io.WriteString(writer, `<html><title>root</title><body>`+filler+`<a href="/blob">b</a><a href="/doc">d</a></body></html>`)
+		case "/blob":
+			writer.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = writer.Write([]byte{0x1f, 0x8b, 0x08, 0x00, 0x99, 0x99, 0x99, 0x99})
+		default:
+			_, _ = io.WriteString(writer, `<html><title>doc</title><body>`+filler+`</body></html>`)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	store, err := searchindex.Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fetcher, err := NewFetcher(FetcherConfig{AllowPrivateNetworks: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := Run(context.Background(), store, fetcher, stubDiscoverer{}, []string{server.URL + "/"}, RunConfig{
+		Workers: 1, BatchSize: 2, MaxPages: 10, AllowPrivate: true,
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if stats.Indexed != 2 || stats.SkippedContent != 1 || stats.Failed != 0 {
+		t.Fatalf("stats = %#v, want 2 indexed, 1 content skip, no failures", stats)
+	}
+	if active, err := store.ActiveFrontier(context.Background()); err != nil || active != 0 {
+		t.Fatalf("ActiveFrontier() = %d, %v, want the blob row completed", active, err)
+	}
+}
+
 // TestRunStopsGrowingAtTheFrontierBudget locks the guardrail end to end: once
 // a root's frontier rows reach MaxFrontierPerHost, fetched pages stop adding
 // links for it.

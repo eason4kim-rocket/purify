@@ -26,7 +26,32 @@ var (
 	ErrNotModified = errors.New("indexer: not modified")
 	ErrFetchFailed = errors.New("indexer: fetch failed")
 	ErrTooLarge    = errors.New("indexer: page exceeds byte limit")
+	ErrUnindexable = errors.New("indexer: content type is not indexable")
 )
+
+// indexableContentType reports whether a response can become an index row.
+// Only markup and plain text qualify: package blobs, media, and archive
+// metadata otherwise arrive as empty-bodied rows that match nothing and
+// spend the crawl budget. Plain text stays because RFCs are served as it.
+// A missing header falls back to sniffing the body.
+func indexableContentType(header string, body []byte) bool {
+	mediaType := strings.ToLower(strings.TrimSpace(header))
+	if at := strings.IndexByte(mediaType, ';'); at >= 0 {
+		mediaType = strings.TrimSpace(mediaType[:at])
+	}
+	if mediaType == "" || mediaType == "application/octet-stream" {
+		sniffed := http.DetectContentType(body)
+		if at := strings.IndexByte(sniffed, ';'); at >= 0 {
+			sniffed = sniffed[:at]
+		}
+		mediaType = strings.ToLower(strings.TrimSpace(sniffed))
+	}
+	switch mediaType {
+	case "text/html", "application/xhtml+xml", "text/plain", "text/markdown":
+		return true
+	}
+	return false
+}
 
 // FetchResult is one lightweight HTTP page.
 type FetchResult struct {

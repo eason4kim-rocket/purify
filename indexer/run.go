@@ -50,11 +50,12 @@ type RunConfig struct {
 
 // Stats is a coarse run summary.
 type Stats struct {
-	Discovered int
-	Indexed    int
-	Failed     int
-	RobotsDeny int
-	Skipped304 int
+	Discovered     int
+	Indexed        int
+	Failed         int
+	RobotsDeny     int
+	Skipped304     int
+	SkippedContent int
 }
 
 // Run discovers seeds, then fetches and indexes until MaxPages or the frontier
@@ -206,6 +207,12 @@ func (r *runState) process(ctx context.Context, item searchindex.FrontierItem) {
 		r.countSkipped()
 		_ = r.store.Complete(ctx, item.URL)
 		return
+	case errors.Is(fetchErr, ErrUnindexable):
+		// The URL is spent, not broken: retrying a package blob or media
+		// file would return the same bytes.
+		r.countSkippedContent()
+		_ = r.store.Complete(ctx, item.URL)
+		return
 	case fetchErr != nil:
 		r.countFailed()
 		_ = r.store.Fail(ctx, item.URL, r.cfg.MaxAttempts)
@@ -337,6 +344,7 @@ func (r *runState) snapshot() Stats {
 func (r *runState) countRobotsDeny()      { r.mu.Lock(); r.stats.RobotsDeny++; r.mu.Unlock() }
 func (r *runState) countFailed()          { r.mu.Lock(); r.stats.Failed++; r.mu.Unlock() }
 func (r *runState) countSkipped()         { r.mu.Lock(); r.stats.Skipped304++; r.mu.Unlock() }
+func (r *runState) countSkippedContent()  { r.mu.Lock(); r.stats.SkippedContent++; r.mu.Unlock() }
 func (r *runState) countDiscovered(n int) { r.mu.Lock(); r.stats.Discovered += n; r.mu.Unlock() }
 
 func sleepContext(ctx context.Context, wait time.Duration) bool {
@@ -354,6 +362,9 @@ func indexOne(ctx context.Context, fetcher *Fetcher, pipeline *cleaner.Cleaner, 
 	fetched, err := fetcher.Get(ctx, item.URL, "", "")
 	if err != nil {
 		return searchindex.Page{}, nil, err
+	}
+	if !indexableContentType(fetched.ContentType, fetched.Body) {
+		return searchindex.Page{}, nil, ErrUnindexable
 	}
 	cleaned, cleanErr := pipeline.Clean(string(fetched.Body), fetched.URL, "text", "auto")
 	title, body := "", ""
